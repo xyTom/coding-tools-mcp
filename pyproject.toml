@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-tool-runtime-mcp"
+version = "0.1.0"
+description = "Workspace-confined coding runtime primitives exposed as an MCP server."
+requires-python = ">=3.11"
+readme = "docs/profile-v0.1.md"
+license = { text = "MIT" }
+authors = [{ name = "Codex Tool Runtime MCP Contributors" }]
+
+[project.scripts]
+codex-tool-runtime-mcp = "codex_tool_runtime_mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["codex_tool_runtime_mcp*"]
