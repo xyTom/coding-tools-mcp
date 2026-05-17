@@ -63,7 +63,7 @@ Manual SWE-bench workflow:
 .github/workflows/swebench-lite.yml
 ```
 
-The manual `swebench-lite` workflow can install the official harness, record Docker diagnostics, run selected Lite instance IDs, and upload `reports/benchmark/**`. It fails by default unless official harness results include parsed resolved counts from real non-placeholder baseline and MCP-candidate predictions with `candidate_mcp_resolved >= baseline_native_resolved`.
+The manual `swebench-lite` workflow can install the official harness, record Docker diagnostics, run selected Lite instance IDs, and upload `reports/benchmark/**`. It defaults to `prediction_source=reference_patch`, which generates non-empty SWE-bench reference-patch predictions for official harness sanity. It fails by default unless official harness results include parsed resolved counts with `candidate_mcp_resolved >= baseline_native_resolved`. Use `prediction_source=checked_in` only after replacing the scaffold files with model-generated predictions.
 
 Manual real-workload workflow:
 

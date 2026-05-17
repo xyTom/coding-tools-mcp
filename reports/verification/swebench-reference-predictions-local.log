@@ -1,0 +1,5 @@
+PYTHONDONTWRITEBYTECODE=1 python3 benchmarks/swebench/generate_reference_predictions.py \
+	--instance-id sympy__sympy-12419 \
+	--baseline-output reports/benchmark/swebench-reference-predictions/baseline_reference.jsonl \
+	--candidate-output reports/benchmark/swebench-reference-predictions/candidate_reference.jsonl \
+	--metadata-output reports/benchmark/swebench-reference-predictions/metadata.json

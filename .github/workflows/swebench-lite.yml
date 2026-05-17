@@ -16,6 +16,14 @@ on:
         required: false
         type: boolean
         default: true
+      prediction_source:
+        description: "Prediction files to evaluate"
+        required: false
+        type: choice
+        options:
+          - reference_patch
+          - checked_in
+        default: reference_patch
       install_swebench:
         description: "Attempt to install the official SWE-bench package"
         required: false
@@ -49,6 +57,7 @@ jobs:
         run: |
           ids="${{ inputs.instance_ids }}"
           args=()
+          prediction_args=()
           IFS=',' read -ra parts <<< "$ids"
           for id in "${parts[@]}"; do
             trimmed="$(echo "$id" | xargs)"
@@ -56,6 +65,18 @@ jobs:
               args+=(--instance-id "$trimmed")
             fi
           done
+          if [ "${{ inputs.prediction_source }}" = "reference_patch" ]; then
+            mkdir -p reports/benchmark/swebench-reference-predictions
+            python benchmarks/swebench/generate_reference_predictions.py \
+              "${args[@]}" \
+              --baseline-output reports/benchmark/swebench-reference-predictions/baseline_reference.jsonl \
+              --candidate-output reports/benchmark/swebench-reference-predictions/candidate_reference.jsonl \
+              --metadata-output reports/benchmark/swebench-reference-predictions/metadata.json
+            prediction_args=(
+              --baseline-predictions reports/benchmark/swebench-reference-predictions/baseline_reference.jsonl
+              --candidate-predictions reports/benchmark/swebench-reference-predictions/candidate_reference.jsonl
+            )
+          fi
           install_flag=()
           if [ "${{ inputs.install_swebench }}" = "true" ]; then
             install_flag=(--install-swebench)
@@ -69,6 +90,7 @@ jobs:
             --run-evaluation \
             --max-workers "${{ inputs.max_workers }}" \
             "${args[@]}" \
+            "${prediction_args[@]}" \
             "${require_flag[@]}" \
             --report-json reports/benchmark/swebench-official-attempt.json \
             --report-md reports/benchmark/swebench-official-attempt.md

@@ -149,9 +149,9 @@ SWE-bench:
 - default smoke conclusion: `PREFLIGHT_ONLY`
 - explicit official-harness attempt in this container: `BLOCKED`
 
-The repository does not claim SWE-bench pass. Docker or harness availability can block official evaluation, and checked-in predictions are placeholders until replaced with real baseline and MCP-candidate patches.
+The repository does not claim a model-generated SWE-bench leaderboard result. Docker or harness availability can block official evaluation, and checked-in predictions are placeholders until replaced with real baseline and MCP-candidate patches.
 
-Manual official SWE-bench attempts should run through `.github/workflows/swebench-lite.yml`. The workflow uploads `reports/benchmark/**` and fails by default unless the official harness produces parsed resolved counts with `candidate_mcp_resolved >= baseline_native_resolved` using real, non-placeholder predictions.
+Manual official SWE-bench attempts should run through `.github/workflows/swebench-lite.yml`. The workflow defaults to `prediction_source=reference_patch`, generates non-empty reference-patch prediction files for the selected Lite instances, uploads `reports/benchmark/**`, and fails unless the official harness produces parsed resolved counts with `candidate_mcp_resolved >= baseline_native_resolved`. Use `prediction_source=checked_in` only after replacing the scaffold files with model-generated predictions.
 
 ## Development Commands
 

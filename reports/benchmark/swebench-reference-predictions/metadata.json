@@ -1,0 +1,10 @@
+{
+  "dataset_name": "princeton-nlp/SWE-bench_Lite",
+  "instance_ids": [
+    "sympy__sympy-12419"
+  ],
+  "prediction_source": "reference_patch",
+  "source": "https://datasets-server.huggingface.co/rows",
+  "split": "test",
+  "warning": "Reference patches validate the official harness path; they are not model-generated benchmark predictions."
+}
