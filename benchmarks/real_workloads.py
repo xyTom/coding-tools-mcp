@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -72,9 +73,9 @@ WORKLOADS = [
         required_executable="go",
         read_path="errors.go",
         search_query="func New",
-        command="go test ./...",
+        command="go test",
         timeout_ms=180000,
-        env={"GOCACHE": ".gocache", "GOMODCACHE": ".gomodcache"},
+        env={"GOCACHE": ".gocache", "GOMODCACHE": ".gomodcache", "GOTOOLCHAIN": "local"},
     ),
     Workload(
         name="monorepo-changesets",
@@ -113,6 +114,45 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def command_stdout(command: list[str]) -> str | None:
+    try:
+        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def toolchain_allow_roots() -> list[str]:
+    roots: set[str] = set()
+    for executable in ("python", "node", "cargo", "rustc", "rustup", "go"):
+        path = shutil.which(executable)
+        if not path:
+            continue
+        try:
+            roots.add(str(Path(path).resolve().parent))
+        except OSError:
+            pass
+    for raw in (
+        os.environ.get("CARGO_HOME"),
+        os.environ.get("RUSTUP_HOME"),
+        str(Path.home() / ".cargo"),
+        str(Path.home() / ".rustup"),
+        command_stdout(["go", "env", "GOROOT"]),
+        command_stdout(["go", "env", "GOPATH"]),
+    ):
+        if not raw:
+            continue
+        try:
+            path = Path(raw).expanduser().resolve()
+        except OSError:
+            continue
+        if path.exists():
+            roots.add(str(path))
+    return sorted(roots)
+
+
 def tool_payload(result: dict[str, Any]) -> dict[str, Any]:
     if result.get("isError"):
         raise RuntimeError(json.dumps(result.get("structuredContent", result), indent=2, sort_keys=True))
@@ -137,7 +177,10 @@ def start_server(workspace: Path, port: int, raw_dir: Path, name: str) -> subpro
     raw_dir.mkdir(parents=True, exist_ok=True)
     stdout = (raw_dir / f"{name}-server.stdout.txt").open("wb")
     stderr = (raw_dir / f"{name}-server.stderr.txt").open("wb")
-    return subprocess.Popen(command, stdout=stdout, stderr=stderr)
+    env = os.environ.copy()
+    env["CODEX_TOOL_RUNTIME_EXEC_ALLOW_ROOTS"] = os.pathsep.join(toolchain_allow_roots())
+    (raw_dir / f"{name}-exec-allow-roots.txt").write_text(env["CODEX_TOOL_RUNTIME_EXEC_ALLOW_ROOTS"] + "\n", encoding="utf-8")
+    return subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env)
 
 
 def initialize_client(endpoint: str) -> McpHttpClient:

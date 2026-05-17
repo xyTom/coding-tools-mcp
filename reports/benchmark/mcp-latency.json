@@ -1,78 +1,78 @@
 {
   "comparisons": [
     {
-      "mcp_p95_ms": 0.779,
-      "native_p95_ms": 0.036,
+      "mcp_p95_ms": 0.751,
+      "native_p95_ms": 0.046,
       "operation": "read_file",
-      "p95_ratio": 21.639
+      "p95_ratio": 16.326
     },
     {
-      "mcp_p95_ms": 66.059,
-      "native_p95_ms": 4.33,
+      "mcp_p95_ms": 61.201,
+      "native_p95_ms": 4.392,
       "operation": "search_text",
-      "p95_ratio": 15.256
+      "p95_ratio": 13.935
     },
     {
-      "mcp_p95_ms": 47.126,
-      "native_p95_ms": 25.032,
+      "mcp_p95_ms": 46.803,
+      "native_p95_ms": 25.18,
       "operation": "exec_command",
-      "p95_ratio": 1.883
+      "p95_ratio": 1.859
     }
   ],
   "conclusion": "PASS",
-  "endpoint": "http://127.0.0.1:48803/mcp",
+  "endpoint": "http://127.0.0.1:54291/mcp",
   "exec_iterations": 4,
   "failures": [],
   "iterations": 8,
   "max_p95_ms": 5000,
   "metrics": {
     "mcp.exec_command": {
-      "max_ms": 47.163,
-      "min_ms": 46.722,
-      "p50_ms": 46.866,
-      "p95_ms": 47.126,
+      "max_ms": 46.807,
+      "min_ms": 46.454,
+      "p50_ms": 46.721,
+      "p95_ms": 46.803,
       "samples": 4
     },
     "mcp.read_file": {
-      "max_ms": 0.783,
-      "min_ms": 0.722,
-      "p50_ms": 0.76,
-      "p95_ms": 0.779,
+      "max_ms": 0.76,
+      "min_ms": 0.706,
+      "p50_ms": 0.728,
+      "p95_ms": 0.751,
       "samples": 8
     },
     "mcp.search_text": {
-      "max_ms": 66.561,
-      "min_ms": 57.91,
-      "p50_ms": 61.192,
-      "p95_ms": 66.059,
+      "max_ms": 62.117,
+      "min_ms": 57.462,
+      "p50_ms": 57.831,
+      "p95_ms": 61.201,
       "samples": 8
     },
     "mcp.tools_list": {
-      "max_ms": 1.188,
-      "min_ms": 0.948,
-      "p50_ms": 1.055,
-      "p95_ms": 1.166,
+      "max_ms": 1.138,
+      "min_ms": 0.937,
+      "p50_ms": 1.09,
+      "p95_ms": 1.132,
       "samples": 8
     },
     "native.exec_python": {
-      "max_ms": 25.136,
-      "min_ms": 23.513,
-      "p50_ms": 24.432,
-      "p95_ms": 25.032,
+      "max_ms": 25.209,
+      "min_ms": 23.796,
+      "p50_ms": 24.74,
+      "p95_ms": 25.18,
       "samples": 4
     },
     "native.read_text": {
-      "max_ms": 0.036,
+      "max_ms": 0.048,
       "min_ms": 0.034,
       "p50_ms": 0.035,
-      "p95_ms": 0.036,
+      "p95_ms": 0.046,
       "samples": 8
     },
     "native.search": {
-      "max_ms": 4.39,
-      "min_ms": 4.0,
-      "p50_ms": 4.155,
-      "p95_ms": 4.33,
+      "max_ms": 4.422,
+      "min_ms": 4.049,
+      "p50_ms": 4.164,
+      "p95_ms": 4.392,
       "samples": 8
     }
   },
@@ -81,5 +81,5 @@
     "Latency thresholds are intentionally broad; this smoke benchmark catches transport regressions and records trend evidence."
   ],
   "warmup": 2,
-  "workspace": "/tmp/codex-mcp-latency-d63mduay/workspace"
+  "workspace": "/tmp/codex-mcp-latency-jmmh6l6y/workspace"
 }

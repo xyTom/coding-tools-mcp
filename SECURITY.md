@@ -24,6 +24,7 @@ Commands run with:
 - Minimal environment with controlled `HOME` and `TMPDIR`.
 - Process group isolation for timeout and kill.
 - Linux Landlock rules that allow workspace access and read/execute access to interpreter/runtime roots.
+- Optional operator-supplied read/execute roots from `CODEX_TOOL_RUNTIME_EXEC_ALLOW_ROOTS` for toolchains installed outside standard system prefixes.
 - Policy denial for network-looking commands, destructive commands, shell expansion, setuid/setgid executables, and outside-workspace path arguments.
 
 Commands must not read or write outside-workspace files indirectly through interpreters, nested shells, or direct syscalls. The Landlock tests cover both normal Python file APIs and `syscall(SYS_openat, ...)`.

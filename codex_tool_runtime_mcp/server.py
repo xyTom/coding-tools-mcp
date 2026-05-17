@@ -1755,6 +1755,15 @@ def guard_allow_roots() -> list[str]:
             str(resolved).startswith(prefix) for prefix in ("/usr", "/bin", "/sbin", "/lib", "/lib64", str(Path(sys.prefix).resolve()))
         ):
             roots.add(str(resolved))
+    for item in os.environ.get("CODEX_TOOL_RUNTIME_EXEC_ALLOW_ROOTS", "").split(os.pathsep):
+        if not item:
+            continue
+        try:
+            resolved = Path(item).expanduser().resolve()
+        except OSError:
+            continue
+        if resolved.is_dir():
+            roots.add(str(resolved))
     return sorted(root for root in roots if root and Path(root).is_absolute())
 
 
