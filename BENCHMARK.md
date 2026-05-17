@@ -46,6 +46,25 @@ Artifacts:
 
 Default smoke conclusion: `PREFLIGHT_ONLY`.
 
+## MCP Runtime Latency
+
+Command:
+
+```bash
+make benchmark-latency
+```
+
+Reports:
+
+- [reports/benchmark/mcp-latency.md](reports/benchmark/mcp-latency.md)
+- [reports/benchmark/mcp-latency.json](reports/benchmark/mcp-latency.json)
+
+The latency smoke starts a local MCP HTTP server, measures `tools/list`,
+`read_file`, `search_text`, and `exec_command`, and records direct local
+baselines using Python file reads, `rg` or a Python search fallback, and a
+native Python subprocess. It is trend evidence and a regression tripwire, not a
+claim that MCP transport should be faster than direct local tool calls.
+
 An explicit official-harness attempt is documented as `BLOCKED` in [reports/benchmark/swebench-official-attempt.md](reports/benchmark/swebench-official-attempt.md) when Docker or the official harness is unavailable. Checked-in predictions are schema-valid placeholders, not real model-generated patches, so they must not be used as score claims.
 
 Official PASS requires:

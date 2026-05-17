@@ -1,14 +1,14 @@
 PYTHON ?= python3
 COMPLIANCE_RUNNER := PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m tests.compliance.runner
 PYTHON_SOURCES := codex_tool_runtime_mcp tests benchmarks
-MYPY_TARGETS := codex_tool_runtime_mcp benchmarks/mcp_http.py benchmarks/swebench/run_smoke.py
+MYPY_TARGETS := codex_tool_runtime_mcp benchmarks/mcp_http.py benchmarks/runtime_latency.py benchmarks/swebench/run_smoke.py
 REPORT_FLAG ?= --report
 SWE_BENCH_ARGS ?=
 DOGFOOD_PORT ?= 8765
 RUFF_FLAGS ?= --exclude benchmarks/dogfood --ignore=E501
 MYPY_FLAGS ?= --python-version 3.11 --disable-error-code union-attr --disable-error-code assignment --disable-error-code arg-type --disable-error-code no-untyped-def
 
-.PHONY: lint typecheck test ci compliance test-protocol test-integration test-mcp-contract test-tool-golden test-security test-e2e test-codex-compat test-docs-required test-schema-drift dogfood-mcp dogfood-runner dogfood-smoke benchmark-smoke swebench-preflight swebench-evaluate report
+.PHONY: lint typecheck test ci compliance test-protocol test-integration test-mcp-contract test-tool-golden test-security test-e2e test-codex-compat test-docs-required test-schema-drift dogfood-mcp dogfood-runner dogfood-smoke benchmark-latency benchmark-smoke swebench-preflight swebench-evaluate report
 
 lint:
 	$(PYTHON) -m ruff check $(RUFF_FLAGS) $(PYTHON_SOURCES)
@@ -19,7 +19,7 @@ typecheck:
 test:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
 
-ci: lint typecheck test test-protocol test-integration test-docs-required test-schema-drift dogfood-smoke benchmark-smoke
+ci: lint typecheck test test-protocol test-integration test-docs-required test-schema-drift dogfood-smoke benchmark-latency benchmark-smoke
 
 compliance:
 	$(COMPLIANCE_RUNNER) --suite all $(REPORT_FLAG)
@@ -58,6 +58,9 @@ dogfood-runner:
 		--server-command "codex-tool-runtime-mcp --workspace {workspace} --host 127.0.0.1 --port $(DOGFOOD_PORT)"
 
 dogfood-smoke: dogfood-mcp dogfood-runner
+
+benchmark-latency:
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) benchmarks/runtime_latency.py
 
 benchmark-smoke: swebench-preflight
 

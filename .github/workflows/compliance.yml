@@ -49,6 +49,9 @@ jobs:
       - name: Run dogfood smoke
         run: make dogfood-smoke DOGFOOD_PORT=8765
 
+      - name: Run latency benchmark
+        run: make benchmark-latency
+
       - name: Validate SWE-bench smoke preflight
         run: make benchmark-smoke
 

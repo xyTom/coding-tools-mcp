@@ -39,6 +39,8 @@ class RequiredDocsTests(unittest.TestCase):
             "reports/benchmark/swebench-regression.md",
             "reports/benchmark/swebench-official-attempt.json",
             "reports/benchmark/swebench-official-attempt.md",
+            "reports/benchmark/mcp-latency.json",
+            "reports/benchmark/mcp-latency.md",
         ]
         missing = [path for path in required_paths if not (ROOT / path).is_file()]
         self.assertEqual(missing, [])
@@ -48,7 +50,7 @@ class RequiredDocsTests(unittest.TestCase):
             "README.md": ["Quickstart", "Safety Boundary", "Dogfood", "SWE-bench"],
             "SECURITY.md": ["Linux Landlock", "Environment Scrubbing", "Session Lifecycle"],
             "COMPLIANCE.md": ["make compliance", "required_tools", "not_measured"],
-            "BENCHMARK.md": ["make dogfood-smoke", "PREFLIGHT_ONLY", "swebench-official-attempt"],
+            "BENCHMARK.md": ["make dogfood-smoke", "make benchmark-latency", "PREFLIGHT_ONLY", "swebench-official-attempt"],
             "docs/ci-and-tests.md": ["make ci", "workflow", "swebench-lite"],
             "docs/dogfood.md": ["MCP-Only Rule", "view_image", "Direct filesystem/shell bypass"],
             "docs/swe-bench.md": ["Official attempt report", "BLOCKED", "sympy__sympy-12419"],
@@ -70,6 +72,7 @@ class RequiredDocsTests(unittest.TestCase):
             "make test-protocol",
             "make test-integration",
             "make dogfood-smoke",
+            "make benchmark-latency",
             "make benchmark-smoke",
             "make compliance",
             "actions/upload-artifact",
