@@ -25,6 +25,20 @@ It is not a `codex(prompt)` wrapper. It does not expose Codex accounts, memory, 
 
 ## Quickstart
 
+Run directly with `uvx` against the current directory:
+
+```bash
+uvx codex-tool-runtime-mcp --workspace .
+```
+
+Use stdio for MCP clients:
+
+```bash
+uvx codex-tool-runtime-mcp --stdio --workspace /path/to/repo
+```
+
+If you are working from this checkout instead of a published package:
+
 ```bash
 cd /root/codex-tool-runtime-mcp
 python -m pip install -e ".[dev]"
@@ -51,8 +65,8 @@ Codex:
 
 ```toml
 [mcp_servers.codex_tool_runtime]
-command = "codex-tool-runtime-mcp"
-args = ["--stdio", "--workspace", "/path/to/repo"]
+command = "uvx"
+args = ["codex-tool-runtime-mcp", "--stdio", "--workspace", "/path/to/repo"]
 ```
 
 Claude Code:
@@ -61,8 +75,21 @@ Claude Code:
 {
   "mcpServers": {
     "codex-tool-runtime": {
-      "command": "codex-tool-runtime-mcp",
-      "args": ["--stdio", "--workspace", "/path/to/repo"]
+      "command": "uvx",
+      "args": ["codex-tool-runtime-mcp", "--stdio", "--workspace", "/path/to/repo"]
+    }
+  }
+}
+```
+
+Cursor:
+
+```json
+{
+  "mcpServers": {
+    "codex-tool-runtime": {
+      "command": "uvx",
+      "args": ["codex-tool-runtime-mcp", "--stdio", "--workspace", "/path/to/repo"]
     }
   }
 }
@@ -123,6 +150,8 @@ SWE-bench:
 - explicit official-harness attempt in this container: `BLOCKED`
 
 The repository does not claim SWE-bench pass. Docker or harness availability can block official evaluation, and checked-in predictions are placeholders until replaced with real baseline and MCP-candidate patches.
+
+Manual official SWE-bench attempts should run through `.github/workflows/swebench-lite.yml`. The workflow uploads `reports/benchmark/**` and fails by default unless the official harness produces parsed resolved counts with `candidate_mcp_resolved >= baseline_native_resolved` using real, non-placeholder predictions.
 
 ## Development Commands
 

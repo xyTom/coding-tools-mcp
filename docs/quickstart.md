@@ -1,6 +1,18 @@
 # Quickstart
 
-Install the runtime in editable mode:
+Run the runtime directly with `uvx` against the current directory:
+
+```bash
+uvx codex-tool-runtime-mcp --workspace .
+```
+
+Use stdio for MCP clients:
+
+```bash
+uvx codex-tool-runtime-mcp --stdio --workspace /path/to/repo
+```
+
+When working from this checkout instead of a published package, install the runtime in editable mode:
 
 ```bash
 python -m pip install -e ".[dev]"

@@ -8,6 +8,8 @@
 - Candidate predictions: `/root/codex-tool-runtime-mcp/benchmarks/swebench/predictions/candidate_mcp.jsonl`
 - Baseline resolved: `None`
 - Candidate resolved: `None`
+- Baseline completed: `None` / `None`
+- Candidate completed: `None` / `None`
 
 ## Preflight
 
@@ -32,9 +34,16 @@
 ## Evaluation Commands
 
 ```bash
-/root/venv/bin/python3 -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Lite --predictions_path /root/codex-tool-runtime-mcp/benchmarks/swebench/predictions/baseline_native.jsonl --max_workers 2 --run_id codex_tool_runtime_native_smoke --instance_ids astropy__astropy-12907 --instance_ids django__django-11099 --instance_ids matplotlib__matplotlib-18869 --instance_ids pallets__flask-4992 --instance_ids psf__requests-2317 --instance_ids pydata__xarray-3364 --instance_ids pytest-dev__pytest-5221 --instance_ids scikit-learn__scikit-learn-10297 --instance_ids sphinx-doc__sphinx-10325 --instance_ids sympy__sympy-12419
-/root/venv/bin/python3 -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Lite --predictions_path /root/codex-tool-runtime-mcp/benchmarks/swebench/predictions/candidate_mcp.jsonl --max_workers 2 --run_id codex_tool_runtime_mcp_smoke --instance_ids astropy__astropy-12907 --instance_ids django__django-11099 --instance_ids matplotlib__matplotlib-18869 --instance_ids pallets__flask-4992 --instance_ids psf__requests-2317 --instance_ids pydata__xarray-3364 --instance_ids pytest-dev__pytest-5221 --instance_ids scikit-learn__scikit-learn-10297 --instance_ids sphinx-doc__sphinx-10325 --instance_ids sympy__sympy-12419
+/root/venv/bin/python3 -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Lite --predictions_path /root/codex-tool-runtime-mcp/benchmarks/swebench/predictions/baseline_native.jsonl --max_workers 2 --run_id codex_tool_runtime_native_smoke --instance_ids astropy__astropy-12907 django__django-11099 matplotlib__matplotlib-18869 pallets__flask-4992 psf__requests-2317 pydata__xarray-3364 pytest-dev__pytest-5221 scikit-learn__scikit-learn-10297 sphinx-doc__sphinx-10325 sympy__sympy-12419
+/root/venv/bin/python3 -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Lite --predictions_path /root/codex-tool-runtime-mcp/benchmarks/swebench/predictions/candidate_mcp.jsonl --max_workers 2 --run_id codex_tool_runtime_mcp_smoke --instance_ids astropy__astropy-12907 django__django-11099 matplotlib__matplotlib-18869 pallets__flask-4992 psf__requests-2317 pydata__xarray-3364 pytest-dev__pytest-5221 scikit-learn__scikit-learn-10297 sphinx-doc__sphinx-10325 sympy__sympy-12419
 ```
+
+## Harness Reports
+
+### Baseline
+- No harness report artifacts captured.
+### Candidate
+- No harness report artifacts captured.
 
 ## Limitations
 

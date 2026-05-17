@@ -1,0 +1,10 @@
+PYTHONDONTWRITEBYTECODE=1 python3 -m tests.compliance.runner --suite docs-required --report
+test_ci_workflows_include_required_gates (tests.compliance.test_docs_required.RequiredDocsTests.test_ci_workflows_include_required_gates) ... ok
+test_docs_contain_required_operational_topics (tests.compliance.test_docs_required.RequiredDocsTests.test_docs_contain_required_operational_topics) ... ok
+test_required_evidence_artifacts_exist (tests.compliance.test_docs_required.RequiredDocsTests.test_required_evidence_artifacts_exist) ... ok
+test_required_operator_docs_exist (tests.compliance.test_docs_required.RequiredDocsTests.test_required_operator_docs_exist) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.001s
+
+OK

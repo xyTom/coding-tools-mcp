@@ -67,6 +67,8 @@ claim that MCP transport should be faster than direct local tool calls.
 
 An explicit official-harness attempt is documented as `BLOCKED` in [reports/benchmark/swebench-official-attempt.md](reports/benchmark/swebench-official-attempt.md) when Docker or the official harness is unavailable. Checked-in predictions are schema-valid placeholders, not real model-generated patches, so they must not be used as score claims.
 
+Manual official attempts run through [.github/workflows/swebench-lite.yml](.github/workflows/swebench-lite.yml). The workflow installs the harness, records Docker diagnostics, invokes `benchmarks/swebench/run_smoke.py --run-evaluation`, uploads `reports/benchmark/**`, and fails by default unless the official harness produces parsed resolved counts from real non-placeholder baseline and MCP-candidate predictions.
+
 Official PASS requires:
 
 ```text

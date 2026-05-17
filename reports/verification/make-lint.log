@@ -1,0 +1,2 @@
+python3 -m ruff check --exclude benchmarks/dogfood --ignore=E501 codex_tool_runtime_mcp tests benchmarks
+All checks passed!

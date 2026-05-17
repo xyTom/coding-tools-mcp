@@ -9,7 +9,13 @@ make benchmark-smoke
 The official-attempt path is:
 
 ```bash
-python benchmarks/swebench/run_smoke.py --install-swebench --run-evaluation --allow-placeholder-evaluation --instance-id sympy__sympy-12419 --max-workers 1 --report-json reports/benchmark/swebench-official-attempt.json --report-md reports/benchmark/swebench-official-attempt.md
+python benchmarks/swebench/run_smoke.py --install-swebench --run-evaluation --require-evaluation-pass --instance-id sympy__sympy-12419 --max-workers 1 --report-json reports/benchmark/swebench-official-attempt.json --report-md reports/benchmark/swebench-official-attempt.md
 ```
+
+Prefer `.github/workflows/swebench-lite.yml` for official attempts. It runs on
+GitHub-hosted Linux, records Docker and environment diagnostics, uploads
+`reports/benchmark/**`, and fails by default unless real non-placeholder
+baseline and MCP-candidate predictions produce parsed resolved counts with
+`candidate_mcp_resolved >= baseline_native_resolved`.
 
 The current checked-in official-attempt artifact is `reports/benchmark/swebench-official-attempt.md`.

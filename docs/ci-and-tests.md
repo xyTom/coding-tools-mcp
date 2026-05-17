@@ -61,4 +61,4 @@ Manual SWE-bench workflow:
 .github/workflows/swebench-lite.yml
 ```
 
-The manual `swebench-lite` workflow can install the official harness, record Docker diagnostics, run selected Lite instance IDs, and upload `reports/benchmark/**`.
+The manual `swebench-lite` workflow can install the official harness, record Docker diagnostics, run selected Lite instance IDs, and upload `reports/benchmark/**`. It fails by default unless official harness results include parsed resolved counts from real non-placeholder baseline and MCP-candidate predictions with `candidate_mcp_resolved >= baseline_native_resolved`.

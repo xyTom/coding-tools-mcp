@@ -1,0 +1,41 @@
+Obtaining file:///root/codex-tool-runtime-mcp
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Getting requirements to build editable: started
+  Getting requirements to build editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Collecting mypy<2.2,>=2.1 (from codex-tool-runtime-mcp==0.1.3)
+  Downloading mypy-2.1.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.3 kB)
+Collecting ruff<0.16,>=0.15 (from codex-tool-runtime-mcp==0.1.3)
+  Downloading ruff-0.15.13-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (26 kB)
+Requirement already satisfied: typing_extensions>=4.6.0 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from mypy<2.2,>=2.1->codex-tool-runtime-mcp==0.1.3) (4.13.2)
+Requirement already satisfied: mypy_extensions>=1.0.0 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from mypy<2.2,>=2.1->codex-tool-runtime-mcp==0.1.3) (1.0.0)
+Requirement already satisfied: pathspec>=1.0.0 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from mypy<2.2,>=2.1->codex-tool-runtime-mcp==0.1.3) (1.0.4)
+Collecting librt>=0.11.0 (from mypy<2.2,>=2.1->codex-tool-runtime-mcp==0.1.3)
+  Downloading librt-0.11.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (1.3 kB)
+Collecting ast-serialize<1.0.0,>=0.3.0 (from mypy<2.2,>=2.1->codex-tool-runtime-mcp==0.1.3)
+  Downloading ast_serialize-0.5.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (1.3 kB)
+Downloading mypy-2.1.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (14.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 14.9/14.9 MB 67.1 MB/s eta 0:00:00
+Downloading ruff-0.15.13-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (11.4 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 11.4/11.4 MB 89.4 MB/s eta 0:00:00
+Downloading ast_serialize-0.5.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (1.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 63.8 MB/s eta 0:00:00
+Downloading librt-0.11.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (497 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 497.1/497.1 kB 43.3 MB/s eta 0:00:00
+Checking if build backend supports build_editable: started
+Checking if build backend supports build_editable: finished with status 'done'
+Building wheels for collected packages: codex-tool-runtime-mcp
+  Building editable for codex-tool-runtime-mcp (pyproject.toml): started
+  Building editable for codex-tool-runtime-mcp (pyproject.toml): finished with status 'done'
+  Created wheel for codex-tool-runtime-mcp: filename=codex_tool_runtime_mcp-0.1.3-0.editable-py3-none-any.whl size=10048 sha256=25bacbcfd691a812e8edb3c63332608fa34ac1f773d25d7d6a1ef072dbab455b
+  Stored in directory: /tmp/pip-ephem-wheel-cache-hxtib8wr/wheels/cd/02/6e/b8e8594d9d8d581152d070585dcb38bff5446c5e147c891f78
+Successfully built codex-tool-runtime-mcp
+Installing collected packages: ruff, librt, codex-tool-runtime-mcp, ast-serialize, mypy
+Successfully installed ast-serialize-0.5.0 codex-tool-runtime-mcp-0.1.3 librt-0.11.0 mypy-2.1.0 ruff-0.15.13
+
+[notice] A new release of pip is available: 24.0 -> 26.1.1
+[notice] To update, run: pip install --upgrade pip

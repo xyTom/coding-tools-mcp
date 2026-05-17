@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import importlib.metadata
 import json
+import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -23,6 +26,7 @@ class PredictionSet:
     path: Path
     count: int
     instance_ids: list[str]
+    model_names: list[str]
     placeholder: bool
     errors: list[str]
 
@@ -43,8 +47,9 @@ def validate_predictions(path: Path, expected_ids: set[str]) -> PredictionSet:
     errors: list[str] = []
     ids: list[str] = []
     patches: list[str] = []
+    model_names: set[str] = set()
     if not path.exists():
-        return PredictionSet(path, 0, [], True, [f"{path} does not exist"])
+        return PredictionSet(path, 0, [], [], True, [f"{path} does not exist"])
     for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
@@ -61,10 +66,13 @@ def validate_predictions(path: Path, expected_ids: set[str]) -> PredictionSet:
             ids.append(instance_id)
             patch = row.get("model_patch")
             patches.append(patch if isinstance(patch, str) else "")
+            model_name = row.get("model_name_or_path")
+            if isinstance(model_name, str) and model_name:
+                model_names.add(model_name)
     missing = sorted(expected_ids - set(ids))
     if missing:
         errors.append(f"missing predictions for: {', '.join(missing)}")
-    return PredictionSet(path, len(ids), ids, all(not patch.strip() for patch in patches), errors)
+    return PredictionSet(path, len(ids), ids, sorted(model_names), all(not patch.strip() for patch in patches), errors)
 
 
 def capture(command: list[str], raw_dir: Path, name: str, *, timeout: int = 120) -> dict[str, Any]:
@@ -90,6 +98,43 @@ def capture(command: list[str], raw_dir: Path, name: str, *, timeout: int = 120)
     (raw_dir / f"{name}.json").write_text(json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (raw_dir / f"{name}.stdout.txt").write_text(str(output["stdout"]), encoding="utf-8")
     (raw_dir / f"{name}.stderr.txt").write_text(str(output["stderr"]), encoding="utf-8")
+    return output
+
+
+def package_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def capture_environment(raw_dir: Path) -> dict[str, Any]:
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    output = {
+        "cwd": str(Path.cwd()),
+        "python": sys.version,
+        "python_executable": sys.executable,
+        "platform": platform.platform(),
+        "packages": {
+            "swebench": package_version("swebench"),
+            "docker": package_version("docker"),
+            "datasets": package_version("datasets"),
+        },
+        "executables": {
+            "docker": shutil.which("docker"),
+            "git": shutil.which("git"),
+        },
+        "github": {
+            "actions": os.environ.get("GITHUB_ACTIONS"),
+            "repository": os.environ.get("GITHUB_REPOSITORY"),
+            "sha": os.environ.get("GITHUB_SHA"),
+            "ref": os.environ.get("GITHUB_REF"),
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+            "runner_os": os.environ.get("RUNNER_OS"),
+        },
+    }
+    (raw_dir / "environment.json").write_text(json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return output
 
 
@@ -130,8 +175,9 @@ def evaluation_command(predictions: Path, run_id: str, max_workers: int, instanc
         "--run_id",
         run_id,
     ]
-    for instance_id in instance_ids:
-        command.extend(["--instance_ids", instance_id])
+    if instance_ids:
+        command.append("--instance_ids")
+        command.extend(instance_ids)
     return command
 
 
@@ -139,6 +185,68 @@ def maybe_run(command: list[str], enabled: bool, raw_dir: Path, name: str) -> di
     if not enabled:
         return {"ran": False, "returncode": None, "stdout": "", "stderr": "", "command": command}
     return capture(command, raw_dir, name, timeout=7200)
+
+
+def safe_name(value: str) -> str:
+    return value.replace("/", "__")
+
+
+def copy_if_exists(source: Path, destination: Path) -> str | None:
+    if not source.exists():
+        return None
+    if destination.exists():
+        if destination.is_dir():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    if source.is_dir():
+        shutil.copytree(source, destination)
+    else:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    return str(destination)
+
+
+def collect_harness_artifacts(raw_dir: Path, run_id: str, label: str) -> list[str]:
+    copied: list[str] = []
+    for source, destination in (
+        (Path("logs/run_evaluation") / run_id, raw_dir / f"{label}-logs-run_evaluation"),
+        (Path("evaluation_results"), raw_dir / f"{label}-evaluation_results"),
+    ):
+        copied_path = copy_if_exists(source, destination)
+        if copied_path is not None:
+            copied.append(copied_path)
+    return copied
+
+
+def parse_resolved_count(run_id: str, model_names: list[str], expected_ids: set[str]) -> dict[str, Any]:
+    report_paths: list[str] = []
+    seen: dict[str, bool] = {}
+    for model_name in model_names:
+        report_root = Path("logs/run_evaluation") / run_id / safe_name(model_name)
+        for report_path in sorted(report_root.glob("*/report.json")):
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            report_paths.append(str(report_path))
+            if not isinstance(report, dict):
+                continue
+            for instance_id in expected_ids:
+                row = report.get(instance_id)
+                if isinstance(row, dict) and isinstance(row.get("resolved"), bool):
+                    seen[instance_id] = row["resolved"]
+
+    resolved = sum(1 for value in seen.values() if value)
+    return {
+        "resolved": resolved if seen else None,
+        "completed": len(seen),
+        "expected": len(expected_ids),
+        "report_paths": report_paths,
+        "resolved_ids": sorted(instance_id for instance_id, value in seen.items() if value),
+        "unresolved_ids": sorted(instance_id for instance_id, value in seen.items() if not value),
+        "missing_report_ids": sorted(expected_ids - set(seen)),
+    }
 
 
 def write_reports(report: dict[str, Any], json_path: Path, md_path: Path) -> None:
@@ -160,6 +268,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Candidate predictions: `{report['candidate']['path']}`",
         f"- Baseline resolved: `{report['baseline'].get('resolved')}`",
         f"- Candidate resolved: `{report['candidate'].get('resolved')}`",
+        f"- Baseline completed: `{report['baseline'].get('completed')}` / `{report['baseline'].get('expected')}`",
+        f"- Candidate completed: `{report['candidate'].get('completed')}` / `{report['candidate'].get('expected')}`",
         "",
         "## Preflight",
         "",
@@ -174,6 +284,15 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.append(" ".join(report["baseline"]["command"]))
     lines.append(" ".join(report["candidate"]["command"]))
     lines.append("```")
+    lines.extend(["", "## Harness Reports", ""])
+    for label in ("baseline", "candidate"):
+        lines.append(f"### {label.title()}")
+        for path in report[label].get("report_paths", []):
+            lines.append(f"- `{path}`")
+        for path in report[label].get("artifacts", []):
+            lines.append(f"- `{path}`")
+        if not report[label].get("report_paths") and not report[label].get("artifacts"):
+            lines.append("- No harness report artifacts captured.")
     lines.extend(["", "## Limitations", ""])
     for item in report.get("limitations", []):
         lines.append(f"- {item}")
@@ -201,6 +320,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-evaluation", action="store_true")
     parser.add_argument("--install-swebench", action="store_true")
     parser.add_argument("--allow-placeholder-evaluation", action="store_true")
+    parser.add_argument(
+        "--require-evaluation-pass",
+        action="store_true",
+        help="Exit nonzero unless official evaluation runs and candidate resolved count is >= baseline.",
+    )
     args = parser.parse_args(argv)
 
     raw_dir = args.raw_dir
@@ -214,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     candidate = validate_predictions(args.candidate_predictions, expected_ids)
     docker_ok, docker_detail, docker_run = check_docker(raw_dir)
     swebench_ok, swebench_detail, install_run, help_run = check_swebench(raw_dir, install=args.install_swebench)
+    environment = capture_environment(raw_dir)
     baseline_command = evaluation_command(
         args.baseline_predictions,
         "codex_tool_runtime_native_smoke",
@@ -257,9 +382,18 @@ def main(argv: list[str] | None = None) -> int:
 
     baseline_run = maybe_run(baseline_command, can_run, raw_dir, "baseline-evaluation")
     candidate_run = maybe_run(candidate_command, can_run, raw_dir, "candidate-evaluation")
+    baseline_artifacts = collect_harness_artifacts(raw_dir, "codex_tool_runtime_native_smoke", "baseline") if can_run else []
+    candidate_artifacts = collect_harness_artifacts(raw_dir, "codex_tool_runtime_mcp_smoke", "candidate") if can_run else []
+    baseline_counts = parse_resolved_count("codex_tool_runtime_native_smoke", baseline.model_names, expected_ids) if can_run else {}
+    candidate_counts = parse_resolved_count("codex_tool_runtime_mcp_smoke", candidate.model_names, expected_ids) if can_run else {}
     if can_run and baseline_run["returncode"] == 0 and candidate_run["returncode"] == 0:
-        conclusion = "INCONCLUSIVE"
-        limitations.append("Harness ran, but resolved-count parsing is not implemented in this scaffold.")
+        baseline_resolved = baseline_counts.get("resolved")
+        candidate_resolved = candidate_counts.get("resolved")
+        if isinstance(baseline_resolved, int) and isinstance(candidate_resolved, int):
+            conclusion = "PASS" if candidate_resolved >= baseline_resolved else "FAIL"
+        else:
+            conclusion = "INCONCLUSIVE"
+            limitations.append("Harness ran, but resolved counts could not be parsed from report.json files.")
     elif can_run:
         conclusion = "FAIL"
     elif args.run_evaluation:
@@ -276,29 +410,48 @@ def main(argv: list[str] | None = None) -> int:
         "instances": instances,
         "preflight": preflight,
         "limitations": limitations,
+        "environment": environment,
         "docker": docker_run,
         "swebench_install": install_run,
         "swebench_help": help_run,
         "baseline": {
             "path": str(args.baseline_predictions),
             "count": baseline.count,
+            "model_names": baseline.model_names,
             "placeholder": baseline.placeholder,
             "errors": baseline.errors,
-            "resolved": None,
+            "resolved": baseline_counts.get("resolved"),
+            "completed": baseline_counts.get("completed"),
+            "expected": baseline_counts.get("expected"),
+            "report_paths": baseline_counts.get("report_paths", []),
+            "resolved_ids": baseline_counts.get("resolved_ids", []),
+            "unresolved_ids": baseline_counts.get("unresolved_ids", []),
+            "missing_report_ids": baseline_counts.get("missing_report_ids", []),
+            "artifacts": baseline_artifacts,
             "command": baseline_command,
             "run": baseline_run,
         },
         "candidate": {
             "path": str(args.candidate_predictions),
             "count": candidate.count,
+            "model_names": candidate.model_names,
             "placeholder": candidate.placeholder,
             "errors": candidate.errors,
-            "resolved": None,
+            "resolved": candidate_counts.get("resolved"),
+            "completed": candidate_counts.get("completed"),
+            "expected": candidate_counts.get("expected"),
+            "report_paths": candidate_counts.get("report_paths", []),
+            "resolved_ids": candidate_counts.get("resolved_ids", []),
+            "unresolved_ids": candidate_counts.get("unresolved_ids", []),
+            "missing_report_ids": candidate_counts.get("missing_report_ids", []),
+            "artifacts": candidate_artifacts,
             "command": candidate_command,
             "run": candidate_run,
         },
     }
     write_reports(report, args.report_json, args.report_md)
+    if args.require_evaluation_pass and conclusion != "PASS":
+        return 1
     return 0 if conclusion != "FAIL" else 1
 
 

@@ -5,7 +5,7 @@
         "PASS search_text finds add: {\"matches\": [{\"after\": [], \"before\": [], \"column\": 1, \"line\": 1, \"path\": \"tiny-js-project/src/math.js\", \"preview\": \"function add(a, b) {\"}], \"ok\": true, \"query\": \"function add\",...",
         "PASS read_file returns buggy source: {\"bytes_read\": 66, \"content\": \"function add(a, b) {\\n  return a - b;\\n}\\n\\nmodule.exports = { add };\\n\", \"encoding\": \"utf-8\", \"end_line\": 5, \"ok\": true, \"path\": \"tiny-js-project...",
         "PASS apply_patch fixes add: {\"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-js-project/src/math.js\"}], \"clean\": true, \"dry_run\": false, \"ok\": true, \"summary\": \"M tiny-js-project/src/math.js\", \"wa...",
-        "PASS exec_command npm test passes: {\"elapsed_ms\": 326, \"exit_code\": 0, \"ok\": true, \"session_id\": \"7Atgvj3MQIZAj95R0VSgjtL9\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_om...",
+        "PASS exec_command npm test passes: {\"elapsed_ms\": 326, \"exit_code\": 0, \"ok\": true, \"session_id\": \"BlYV9k1pS5OWX6qtT3n_AYa_\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_om...",
         "PASS git_diff shows only math.js fix: {\"diff\": \"--- a/tiny-js-project/src/math.js\\n+++ b/tiny-js-project/src/math.js\\n@@ -1,5 +1,5 @@\\n function add(a, b) {\\n\\n-  return a - b;\\n\\n+  return a + b;\\n\\n }\\n\\n \\n\\n mod..."
       ],
       "failures": [],
@@ -16,7 +16,7 @@
       "checks": [
         "PASS read_file returns python source: {\"bytes_read\": 32, \"content\": \"def add(a, b):\\n    return a + b\\n\", \"encoding\": \"utf-8\", \"end_line\": 2, \"ok\": true, \"path\": \"tiny-python-project/src/math_utils.py\", \"start_line\"...",
         "PASS apply_patch adds multiply: {\"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-python-project/src/math_utils.py\"}], \"clean\": true, \"dry_run\": false, \"ok\": true, \"summary\": \"M tiny-python-project/src...",
-        "PASS exec_command unittest passes: {\"elapsed_ms\": 65, \"exit_code\": 0, \"ok\": true, \"session_id\": \"AWF5SoS3d6UPU_h5HDH8yNYe\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"..\\n-------------------------------------...",
+        "PASS exec_command unittest passes: {\"elapsed_ms\": 65, \"exit_code\": 0, \"ok\": true, \"session_id\": \"NNG4t2FJOJnn21uvGvevCEpn\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"..\\n-------------------------------------...",
         "PASS git_diff shows multiply: {\"diff\": \"--- a/tiny-python-project/src/math_utils.py\\n+++ b/tiny-python-project/src/math_utils.py\\n@@ -1,2 +1,6 @@\\n def add(a, b):\\n\\n     return a + b\\n\\n+\\n\\n+\\n\\n+def multi..."
       ],
       "failures": [],
@@ -25,10 +25,10 @@
     },
     {
       "checks": [
-        "PASS exec_command returns session_id: {\"elapsed_ms\": 5, \"exit_code\": null, \"ok\": true, \"session_id\": \"yg3Mu-_exTwKBPlxTuhxANuq\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_...",
-        "PASS write_stdin accepts hello: {\"exit_code\": null, \"ok\": true, \"session_id\": \"yg3Mu-_exTwKBPlxTuhxANuq\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0...",
-        "PASS write_stdin accepts exit: {\"exit_code\": 0, \"ok\": true, \"session_id\": \"yg3Mu-_exTwKBPlxTuhxANuq\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0, \"s...",
-        "PASS kill_session terminates or reports already closed: {\"exit_code\": 0, \"killed\": false, \"ok\": true, \"session_id\": \"yg3Mu-_exTwKBPlxTuhxANuq\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omit..."
+        "PASS exec_command returns session_id: {\"elapsed_ms\": 45, \"exit_code\": null, \"ok\": true, \"session_id\": \"AGHWrLSf9uztWOGrGJzOG_jU\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr...",
+        "PASS write_stdin accepts hello: {\"exit_code\": null, \"ok\": true, \"session_id\": \"AGHWrLSf9uztWOGrGJzOG_jU\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0...",
+        "PASS write_stdin accepts exit: {\"exit_code\": 0, \"ok\": true, \"session_id\": \"AGHWrLSf9uztWOGrGJzOG_jU\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0, \"s...",
+        "PASS kill_session terminates or reports already closed: {\"exit_code\": 0, \"killed\": false, \"ok\": true, \"session_id\": \"AGHWrLSf9uztWOGrGJzOG_jU\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omit..."
       ],
       "failures": [],
       "name": "long_running_stdin",
@@ -87,7 +87,7 @@
       },
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"elapsed_ms\": 326, \"exit_code\": 0, \"ok\": true, \"session_id\": \"7Atgvj3MQIZAj95R0VSgjtL9\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_om...",
+      "summary": "{\"elapsed_ms\": 326, \"exit_code\": 0, \"ok\": true, \"session_id\": \"BlYV9k1pS5OWX6qtT3n_AYa_\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_om...",
       "tool": "exec_command"
     },
     {
@@ -131,7 +131,7 @@
       },
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"elapsed_ms\": 65, \"exit_code\": 0, \"ok\": true, \"session_id\": \"AWF5SoS3d6UPU_h5HDH8yNYe\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"..\\n-------------------------------------...",
+      "summary": "{\"elapsed_ms\": 65, \"exit_code\": 0, \"ok\": true, \"session_id\": \"NNG4t2FJOJnn21uvGvevCEpn\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"..\\n-------------------------------------...",
       "tool": "exec_command"
     },
     {
@@ -157,36 +157,36 @@
       },
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"elapsed_ms\": 5, \"exit_code\": null, \"ok\": true, \"session_id\": \"yg3Mu-_exTwKBPlxTuhxANuq\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_...",
+      "summary": "{\"elapsed_ms\": 45, \"exit_code\": null, \"ok\": true, \"session_id\": \"AGHWrLSf9uztWOGrGJzOG_jU\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr...",
       "tool": "exec_command"
     },
     {
       "arguments": {
         "chars": "hello\n",
-        "session_id": "yg3Mu-_exTwKBPlxTuhxANuq"
+        "session_id": "AGHWrLSf9uztWOGrGJzOG_jU"
       },
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"exit_code\": null, \"ok\": true, \"session_id\": \"yg3Mu-_exTwKBPlxTuhxANuq\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0...",
+      "summary": "{\"exit_code\": null, \"ok\": true, \"session_id\": \"AGHWrLSf9uztWOGrGJzOG_jU\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0...",
       "tool": "write_stdin"
     },
     {
       "arguments": {
         "chars": "exit\n",
-        "session_id": "yg3Mu-_exTwKBPlxTuhxANuq"
+        "session_id": "AGHWrLSf9uztWOGrGJzOG_jU"
       },
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"exit_code\": 0, \"ok\": true, \"session_id\": \"yg3Mu-_exTwKBPlxTuhxANuq\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0, \"s...",
+      "summary": "{\"exit_code\": 0, \"ok\": true, \"session_id\": \"AGHWrLSf9uztWOGrGJzOG_jU\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0, \"s...",
       "tool": "write_stdin"
     },
     {
       "arguments": {
-        "session_id": "yg3Mu-_exTwKBPlxTuhxANuq"
+        "session_id": "AGHWrLSf9uztWOGrGJzOG_jU"
       },
       "expected_rejection": true,
       "ok": true,
-      "summary": "{\"exit_code\": 0, \"killed\": false, \"ok\": true, \"session_id\": \"yg3Mu-_exTwKBPlxTuhxANuq\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omit...",
+      "summary": "{\"exit_code\": 0, \"killed\": false, \"ok\": true, \"session_id\": \"AGHWrLSf9uztWOGrGJzOG_jU\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omit...",
       "tool": "kill_session"
     },
     {
@@ -228,5 +228,5 @@
       "tool": "git_diff"
     }
   ],
-  "workspace": "/tmp/codex-mcp-dogfood-va8lb3bk/workspace"
+  "workspace": "/tmp/codex-mcp-dogfood-gb7kl08w/workspace"
 }

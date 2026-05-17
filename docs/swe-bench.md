@@ -29,12 +29,31 @@ The repository must not claim SWE-bench pass until official harness results exis
 python benchmarks/swebench/run_smoke.py \
   --install-swebench \
   --run-evaluation \
-  --allow-placeholder-evaluation \
+  --require-evaluation-pass \
   --instance-id sympy__sympy-12419 \
   --max-workers 1 \
   --report-json reports/benchmark/swebench-official-attempt.json \
   --report-md reports/benchmark/swebench-official-attempt.md
 ```
+
+The preferred execution path is the manual GitHub Actions workflow, because the
+local Codex container may not have Docker:
+
+```bash
+gh workflow run swebench-lite.yml \
+  --ref recover-rollout-2026-05-16 \
+  -f instance_ids=sympy__sympy-12419 \
+  -f max_workers=1 \
+  -f install_swebench=true \
+  -f require_evaluation_pass=true
+```
+
+The workflow uploads `reports/benchmark/**`, including raw harness stdout/stderr,
+captured `logs/run_evaluation` files, prediction paths, Docker diagnostics, and
+environment metadata. It fails by default unless the official harness runs with
+non-placeholder baseline and MCP-candidate predictions, parses resolved counts,
+and satisfies the comparison below. Use `require_evaluation_pass=false` only for
+diagnostic attempts that are expected to end in `BLOCKED`.
 
 ## Acceptance Standard
 

@@ -11,6 +11,11 @@ on:
         description: "SWE-bench max workers"
         required: false
         default: "1"
+      require_evaluation_pass:
+        description: "Fail unless official harness resolves candidate >= baseline with real predictions"
+        required: false
+        type: boolean
+        default: true
       install_swebench:
         description: "Attempt to install the official SWE-bench package"
         required: false
@@ -35,27 +40,36 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
 
+      - name: Record Docker diagnostics
+        run: |
+          docker version
+          docker info
+
       - name: Attempt SWE-bench Lite official evaluation
         run: |
           ids="${{ inputs.instance_ids }}"
-          args=""
+          args=()
           IFS=',' read -ra parts <<< "$ids"
           for id in "${parts[@]}"; do
             trimmed="$(echo "$id" | xargs)"
             if [ -n "$trimmed" ]; then
-              args="$args --instance-id $trimmed"
+              args+=(--instance-id "$trimmed")
             fi
           done
-          install_flag=""
+          install_flag=()
           if [ "${{ inputs.install_swebench }}" = "true" ]; then
-            install_flag="--install-swebench"
+            install_flag=(--install-swebench)
+          fi
+          require_flag=()
+          if [ "${{ inputs.require_evaluation_pass }}" = "true" ]; then
+            require_flag=(--require-evaluation-pass)
           fi
           python benchmarks/swebench/run_smoke.py \
-            $install_flag \
+            "${install_flag[@]}" \
             --run-evaluation \
-            --allow-placeholder-evaluation \
             --max-workers "${{ inputs.max_workers }}" \
-            $args \
+            "${args[@]}" \
+            "${require_flag[@]}" \
             --report-json reports/benchmark/swebench-official-attempt.json \
             --report-md reports/benchmark/swebench-official-attempt.md
 

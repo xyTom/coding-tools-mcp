@@ -1,0 +1,1 @@
+PYTHONDONTWRITEBYTECODE=1 python3 benchmarks/swebench/run_smoke.py 

@@ -1,0 +1,24 @@
+{
+  "cwd": "/root/codex-tool-runtime-mcp",
+  "executables": {
+    "docker": null,
+    "git": "/usr/bin/git"
+  },
+  "github": {
+    "actions": null,
+    "ref": null,
+    "repository": null,
+    "run_attempt": null,
+    "run_id": null,
+    "runner_os": null,
+    "sha": null
+  },
+  "packages": {
+    "datasets": "4.8.5",
+    "docker": "7.1.0",
+    "swebench": "4.1.0"
+  },
+  "platform": "Linux-6.18.24-talos-x86_64-with-glibc2.36",
+  "python": "3.11.14 (main, Feb 20 2026, 09:55:14) [GCC 12.2.0]",
+  "python_executable": "/root/venv/bin/python3"
+}
