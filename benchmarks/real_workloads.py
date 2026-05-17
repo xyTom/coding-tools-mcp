@@ -75,7 +75,7 @@ WORKLOADS = [
         search_query="func New",
         command="go test",
         timeout_ms=180000,
-        env={"GOCACHE": ".gocache", "GOMODCACHE": ".gomodcache", "GOTOOLCHAIN": "local"},
+        env={"GOCACHE": ".gocache", "GOMODCACHE": ".gomodcache", "GO111MODULE": "off", "GOTOOLCHAIN": "local"},
     ),
     Workload(
         name="monorepo-changesets",
@@ -251,7 +251,8 @@ def run_workload(workload: Workload, checkout_root: Path, raw_dir: Path, port: i
             raise RuntimeError(f"missing MCP tools: {missing_tools}")
 
         listed = tool_payload(client.call_tool("list_files", {"path": ".", "max_results": 2000}))
-        result["checks"].append({"name": "list_files", "ok": bool(listed.get("files"))})
+        listed_files = listed.get("files") if isinstance(listed.get("files"), list) else []
+        result["checks"].append({"name": "list_files", "count": len(listed_files), "ok": bool(listed_files)})
 
         read = tool_payload(client.call_tool("read_file", {"path": workload.read_path, "max_bytes": 65536}))
         result["checks"].append({"name": "read_file", "path": workload.read_path, "ok": bool(read.get("content"))})
@@ -281,6 +282,8 @@ def run_workload(workload: Workload, checkout_root: Path, raw_dir: Path, port: i
                 "name": "exec_command",
                 "cmd": workload.command,
                 "exit_code": exec_payload.get("exit_code"),
+                "stdout": str(exec_payload.get("stdout", ""))[-1000:],
+                "stderr": str(exec_payload.get("stderr", ""))[-1000:],
                 "ok": exec_payload.get("exit_code") == 0,
             }
         )

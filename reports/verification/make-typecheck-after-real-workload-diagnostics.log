@@ -1,0 +1,2 @@
+python3 -m mypy --python-version 3.11 --disable-error-code union-attr --disable-error-code assignment --disable-error-code arg-type --disable-error-code no-untyped-def codex_tool_runtime_mcp benchmarks/mcp_http.py benchmarks/runtime_latency.py benchmarks/swebench/run_smoke.py benchmarks/real_workloads.py
+Success: no issues found in 7 source files
