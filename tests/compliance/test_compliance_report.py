@@ -104,3 +104,23 @@ class ComplianceReportTests(unittest.TestCase):
             self.assertEqual(report["skipped"], [])
             self.assertTrue(all(report["required_tools"][tool] == "not_run" for tool in REQUIRED_TOOLS))
             self.assertIn("No failures recorded.", md_report.read_text(encoding="utf-8"))
+
+    def test_partial_suite_does_not_claim_required_tool_coverage(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="codex-mcp-report-") as tmp:
+            report_dir = Path(tmp)
+            json_report = report_dir / "latest.json"
+            md_report = report_dir / "latest.md"
+
+            with (
+                patch.object(runner, "REPORT_DIR", report_dir),
+                patch.object(runner, "JSON_REPORT", json_report),
+                patch.object(runner, "MD_REPORT", md_report),
+                patch.object(runner, "git_commit", return_value="abc123"),
+            ):
+                report = runner.write_reports(
+                    suite_name="security",
+                    result=FakeResult(successful=True),
+                    elapsed_seconds=1.0,
+                )
+
+            self.assertTrue(all(report["required_tools"][tool] == "not_measured" for tool in REQUIRED_TOOLS))

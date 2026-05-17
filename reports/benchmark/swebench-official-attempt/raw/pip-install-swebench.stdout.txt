@@ -1,0 +1,138 @@
+l->swebench)
+  Downloading multidict-6.7.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (5.3 kB)
+Collecting propcache>=0.2.0 (from aiohttp->modal->swebench)
+  Downloading propcache-0.5.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (16 kB)
+Collecting yarl<2.0,>=1.17.0 (from aiohttp->modal->swebench)
+  Downloading yarl-1.23.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (79 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 79.6/79.6 kB 2.6 MB/s eta 0:00:00
+Requirement already satisfied: smmap<6,>=3.0.1 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from gitdb<5,>=4.0.1->GitPython->swebench) (5.0.1)
+Collecting h2<5,>=3.1.0 (from grpclib<0.4.10,>=0.4.7->modal->swebench)
+  Downloading h2-4.3.0-py3-none-any.whl.metadata (5.1 kB)
+Requirement already satisfied: anyio in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from httpx<1.0.0->datasets->swebench) (4.4.0)
+Collecting httpcore==1.* (from httpx<1.0.0->datasets->swebench)
+  Downloading httpcore-1.0.9-py3-none-any.whl.metadata (21 kB)
+Collecting h11>=0.16 (from httpcore==1.*->httpx<1.0.0->datasets->swebench)
+  Downloading h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)
+Collecting hf-xet<2.0.0,>=1.4.3 (from huggingface-hub<2.0,>=0.25.0->datasets->swebench)
+  Downloading hf_xet-1.5.0-cp37-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (4.9 kB)
+Requirement already satisfied: mdurl~=0.1 in /root/venv/lib/python3.11/site-packages (from markdown-it-py>=2.2.0->rich->swebench) (0.1.2)
+Collecting dill<0.4.2,>=0.3.0 (from datasets->swebench)
+  Downloading dill-0.4.1-py3-none-any.whl.metadata (10 kB)
+Collecting click~=8.1 (from modal->swebench)
+  Downloading click-8.4.0-py3-none-any.whl.metadata (2.6 kB)
+Requirement already satisfied: shellingham>=1.3.0 in /root/venv/lib/python3.11/site-packages (from typer>=0.9->modal->swebench) (1.5.4)
+Requirement already satisfied: annotated-doc>=0.0.2 in /root/venv/lib/python3.11/site-packages (from typer>=0.9->modal->swebench) (0.0.4)
+Collecting distlib<1,>=0.3.7 (from virtualenv>=20.10.0->pre-commit->swebench)
+  Downloading distlib-0.4.0-py2.py3-none-any.whl.metadata (5.2 kB)
+Collecting filelock (from datasets->swebench)
+  Downloading filelock-3.29.0-py3-none-any.whl.metadata (2.0 kB)
+Requirement already satisfied: platformdirs<5,>=3.9.1 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from virtualenv>=20.10.0->pre-commit->swebench) (4.2.2)
+Collecting python-discovery>=1.3.1 (from virtualenv>=20.10.0->pre-commit->swebench)
+  Downloading python_discovery-1.3.1-py3-none-any.whl.metadata (5.6 kB)
+Requirement already satisfied: python-dateutil>=2.8.2 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from pandas->datasets->swebench) (2.9.0.post0)
+Requirement already satisfied: pytz>=2020.1 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from pandas->datasets->swebench) (2024.1)
+Requirement already satisfied: tzdata>=2022.1 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from pandas->datasets->swebench) (2024.1)
+Requirement already satisfied: sniffio>=1.1 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from anyio->httpx<1.0.0->datasets->swebench) (1.3.1)
+Collecting hyperframe<7,>=6.1 (from h2<5,>=3.1.0->grpclib<0.4.10,>=0.4.7->modal->swebench)
+  Downloading hyperframe-6.1.0-py3-none-any.whl.metadata (4.3 kB)
+Collecting hpack<5,>=4.1 (from h2<5,>=3.1.0->grpclib<0.4.10,>=0.4.7->modal->swebench)
+  Downloading hpack-4.1.0-py3-none-any.whl.metadata (4.6 kB)
+Requirement already satisfied: six>=1.5 in /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages (from python-dateutil>=2.8.2->pandas->datasets->swebench) (1.16.0)
+Collecting platformdirs<5,>=3.9.1 (from virtualenv>=20.10.0->pre-commit->swebench)
+  Downloading platformdirs-4.9.6-py3-none-any.whl.metadata (4.7 kB)
+Downloading swebench-4.1.0-py3-none-any.whl (157 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 157.2/157.2 kB 5.7 MB/s eta 0:00:00
+Downloading chardet-7.4.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (883 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 883.4/883.4 kB 27.0 MB/s eta 0:00:00
+Downloading datasets-4.8.5-py3-none-any.whl (528 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 529.0/529.0 kB 22.3 MB/s eta 0:00:00
+Downloading docker-7.1.0-py3-none-any.whl (147 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 147.8/147.8 kB 6.2 MB/s eta 0:00:00
+Downloading ghapi-1.0.13-py3-none-any.whl (71 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 71.4/71.4 kB 4.4 MB/s eta 0:00:00
+Downloading modal-1.4.2-py3-none-any.whl (802 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 802.8/802.8 kB 29.0 MB/s eta 0:00:00
+Downloading pre_commit-4.6.0-py2.py3-none-any.whl (226 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 226.5/226.5 kB 8.3 MB/s eta 0:00:00
+Downloading python_dotenv-1.2.2-py3-none-any.whl (22 kB)
+Downloading unidiff-0.7.5-py2.py3-none-any.whl (14 kB)
+Downloading cfgv-3.5.0-py2.py3-none-any.whl (7.4 kB)
+Downloading fastcore-1.13.2-py3-none-any.whl (105 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 105.1/105.1 kB 5.9 MB/s eta 0:00:00
+Downloading aiohttp-3.13.5-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.8/1.8 MB 45.3 MB/s eta 0:00:00
+Downloading grpclib-0.4.9-py3-none-any.whl (77 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 77.1/77.1 kB 4.8 MB/s eta 0:00:00
+Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 73.5/73.5 kB 3.5 MB/s eta 0:00:00
+Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 78.8/78.8 kB 4.0 MB/s eta 0:00:00
+Downloading huggingface_hub-1.15.0-py3-none-any.whl (663 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 663.6/663.6 kB 27.1 MB/s eta 0:00:00
+Downloading identify-2.6.19-py2.py3-none-any.whl (99 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 99.4/99.4 kB 6.3 MB/s eta 0:00:00
+Downloading multiprocess-0.70.19-py311-none-any.whl (144 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 144.5/144.5 kB 7.2 MB/s eta 0:00:00
+Downloading dill-0.4.1-py3-none-any.whl (120 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 120.0/120.0 kB 6.5 MB/s eta 0:00:00
+Downloading nodeenv-1.10.0-py2.py3-none-any.whl (23 kB)
+Downloading pyarrow-24.0.0-cp311-cp311-manylinux_2_28_x86_64.whl (48.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 48.8/48.8 MB 55.8 MB/s eta 0:00:00
+Downloading synchronicity-0.12.2-py3-none-any.whl (41 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 41.3/41.3 kB 1.8 MB/s eta 0:00:00
+Downloading click-8.4.0-py3-none-any.whl (116 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 116.1/116.1 kB 7.2 MB/s eta 0:00:00
+Downloading virtualenv-21.3.3-py3-none-any.whl (7.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.6/7.6 MB 77.3 MB/s eta 0:00:00
+Downloading filelock-3.29.0-py3-none-any.whl (39 kB)
+Downloading cbor2-6.1.1-cp311-cp311-manylinux_2_28_x86_64.whl (469 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 469.0/469.0 kB 19.5 MB/s eta 0:00:00
+Downloading types_certifi-2021.10.8.3-py3-none-any.whl (2.1 kB)
+Downloading types_toml-0.10.8.20260508-py3-none-any.whl (9.7 kB)
+Downloading watchfiles-1.1.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (456 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 456.1/456.1 kB 19.3 MB/s eta 0:00:00
+Downloading xxhash-3.7.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (193 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 193.9/193.9 kB 9.8 MB/s eta 0:00:00
+Downloading aiohappyeyeballs-2.6.1-py3-none-any.whl (15 kB)
+Downloading aiosignal-1.4.0-py3-none-any.whl (7.5 kB)
+Downloading distlib-0.4.0-py2.py3-none-any.whl (469 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 469.0/469.0 kB 19.5 MB/s eta 0:00:00
+Downloading frozenlist-1.8.0-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (231 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 231.1/231.1 kB 11.7 MB/s eta 0:00:00
+Downloading h2-4.3.0-py3-none-any.whl (61 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 61.8/61.8 kB 3.1 MB/s eta 0:00:00
+Downloading hf_xet-1.5.0-cp37-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (4.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.5/4.5 MB 72.4 MB/s eta 0:00:00
+Downloading multidict-6.7.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (246 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 246.3/246.3 kB 12.0 MB/s eta 0:00:00
+Downloading propcache-0.5.2-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (58 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 58.9/58.9 kB 2.6 MB/s eta 0:00:00
+Downloading python_discovery-1.3.1-py3-none-any.whl (33 kB)
+Downloading platformdirs-4.9.6-py3-none-any.whl (21 kB)
+Downloading yarl-1.23.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (102 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 102.7/102.7 kB 5.4 MB/s eta 0:00:00
+Downloading h11-0.16.0-py3-none-any.whl (37 kB)
+Downloading hpack-4.1.0-py3-none-any.whl (34 kB)
+Downloading hyperframe-6.1.0-py3-none-any.whl (13 kB)
+Installing collected packages: unidiff, types-certifi, distlib, xxhash, types-toml, synchronicity, python-dotenv, pyarrow, propcache, platformdirs, nodeenv, multidict, identify, hyperframe, hpack, hf-xet, h11, frozenlist, filelock, fastcore, dill, click, chardet, cfgv, cbor2, aiohappyeyeballs, yarl, watchfiles, python-discovery, multiprocess, httpcore, h2, ghapi, docker, aiosignal, virtualenv, httpx, grpclib, aiohttp, pre-commit, modal, huggingface-hub, datasets, swebench
+  Attempting uninstall: pyarrow
+    Found existing installation: pyarrow 16.1.0
+    Not uninstalling pyarrow at /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages, outside environment /root/venv
+    Can't uninstall 'pyarrow'. No files were found to uninstall.
+  Attempting uninstall: platformdirs
+    Found existing installation: platformdirs 4.2.2
+    Not uninstalling platformdirs at /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages, outside environment /root/venv
+    Can't uninstall 'platformdirs'. No files were found to uninstall.
+  Attempting uninstall: filelock
+    Found existing installation: filelock 3.20.3
+    Not uninstalling filelock at /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages, outside environment /root/venv
+    Can't uninstall 'filelock'. No files were found to uninstall.
+  Attempting uninstall: dill
+    Found existing installation: dill 0.4.0
+    Not uninstalling dill at /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages, outside environment /root/venv
+    Can't uninstall 'dill'. No files were found to uninstall.
+  Attempting uninstall: click
+    Found existing installation: click 8.1.7
+    Not uninstalling click at /toolkit-cache/2.3.0/python3.11/server-libs/lib/python3.11/site-packages, outside environment /root/venv
+    Can't uninstall 'click'. No files were found to uninstall.
+Successfully installed aiohappyeyeballs-2.6.1 aiohttp-3.13.5 aiosignal-1.4.0 cbor2-6.1.1 cfgv-3.5.0 chardet-7.4.3 click-8.4.0 datasets-4.8.5 dill-0.4.1 distlib-0.4.0 docker-7.1.0 fastcore-1.13.2 filelock-3.29.0 frozenlist-1.8.0 ghapi-1.0.13 grpclib-0.4.9 h11-0.16.0 h2-4.3.0 hf-xet-1.5.0 hpack-4.1.0 httpcore-1.0.9 httpx-0.28.1 huggingface-hub-1.15.0 hyperframe-6.1.0 identify-2.6.19 modal-1.4.2 multidict-6.7.1 multiprocess-0.70.19 nodeenv-1.10.0 platformdirs-4.9.6 pre-commit-4.6.0 propcache-0.5.2 pyarrow-24.0.0 python-discovery-1.3.1 python-dotenv-1.2.2 swebench-4.1.0 synchronicity-0.12.2 types-certifi-2021.10.8.3 types-toml-0.10.8.20260508 unidiff-0.7.5 virtualenv-21.3.3 watchfiles-1.1.1 xxhash-3.7.0 yarl-1.23.0

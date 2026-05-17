@@ -2,33 +2,28 @@
 
 This project includes deterministic MCP dogfood plus a SWE-bench smoke/regression scaffold.
 
+Detailed operator docs:
+
+- [docs/dogfood.md](docs/dogfood.md)
+- [docs/swe-bench.md](docs/swe-bench.md)
+
 ## Dogfood
 
 Command:
 
 ```bash
-make dogfood-mcp
+make dogfood-smoke
 ```
 
-Report:
+Reports:
 
 - [reports/dogfood/codex-on-mcp.md](reports/dogfood/codex-on-mcp.md)
 - [reports/dogfood/codex-on-mcp.json](reports/dogfood/codex-on-mcp.json)
+- [docs/dogfood/codex-on-mcp-transcript.json](docs/dogfood/codex-on-mcp-transcript.json)
 
-Current conclusion:
+Current conclusion: `PASS`.
 
-```text
-PASS
-```
-
-The dogfood runner starts the MCP server, then completes coding loops through MCP tool calls only:
-
-- JavaScript bugfix: search, read, patch, `npm test`, diff.
-- Python function add: read, patch, unittest, diff.
-- Long-running stdin session.
-- Workspace escape denial.
-
-The report records tool calls and direct bypass status.
+The runner completes repository inspection, JavaScript and Python failing/passing tests, patching, git status/diff, timeout handling, long-running stdin, kill/closed-session behavior, binary/image behavior with `view_image`, and workspace escape denial using MCP calls only.
 
 ## SWE-bench Smoke Scaffold
 
@@ -45,46 +40,25 @@ Artifacts:
 - [benchmarks/swebench/predictions/candidate_mcp.jsonl](benchmarks/swebench/predictions/candidate_mcp.jsonl)
 - [reports/benchmark/swebench-regression.md](reports/benchmark/swebench-regression.md)
 - [reports/benchmark/swebench-regression.json](reports/benchmark/swebench-regression.json)
+- [reports/benchmark/swebench-regression/raw](reports/benchmark/swebench-regression/raw)
+- [reports/benchmark/swebench-official-attempt.md](reports/benchmark/swebench-official-attempt.md)
+- [reports/benchmark/swebench-official-attempt/raw](reports/benchmark/swebench-official-attempt/raw)
 
-Current conclusion:
+Default smoke conclusion: `PREFLIGHT_ONLY`.
 
-```text
-INCONCLUSIVE
-```
+An explicit official-harness attempt is documented as `BLOCKED` in [reports/benchmark/swebench-official-attempt.md](reports/benchmark/swebench-official-attempt.md) when Docker or the official harness is unavailable. Checked-in predictions are schema-valid placeholders, not real model-generated patches, so they must not be used as score claims.
 
-The official SWE-bench harness was not run because:
-
-- Docker is not installed in this container.
-- The `swebench` Python package is not installed.
-- Checked-in predictions are schema-valid placeholders, not real model-generated patches.
-
-The project intentionally does not claim SWE-bench PASS without official harness evidence.
-
-## Official Harness Commands
-
-Baseline:
-
-```bash
-python -m swebench.harness.run_evaluation \
-  --dataset_name princeton-nlp/SWE-bench_Lite \
-  --predictions_path benchmarks/swebench/predictions/baseline_native.jsonl \
-  --max_workers 2 \
-  --run_id codex_tool_runtime_native_smoke
-```
-
-Candidate:
-
-```bash
-python -m swebench.harness.run_evaluation \
-  --dataset_name princeton-nlp/SWE-bench_Lite \
-  --predictions_path benchmarks/swebench/predictions/candidate_mcp.jsonl \
-  --max_workers 2 \
-  --run_id codex_tool_runtime_mcp_smoke
-```
-
-PASS requires:
+Official PASS requires:
 
 ```text
 candidate_mcp_resolved >= baseline_native_resolved
 ```
 
+Both numbers must come from official SWE-bench harness output over the same subset and prediction-generation budget.
+
+## Remaining Benchmark TODOs
+
+- Generate real baseline and MCP-candidate predictions instead of placeholder patches.
+- Run at least one official SWE-bench Lite instance end-to-end with Docker.
+- Save raw harness logs and resolved counts as artifacts from a successful official run.
+- Use `.github/workflows/swebench-lite.yml` for manual official-harness attempts.

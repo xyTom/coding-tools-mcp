@@ -1,0 +1,36 @@
+2026-05-17 08:58:30,898 - datasets - INFO - TensorFlow version 2.15.1 available.
+Traceback (most recent call last):
+  File "<frozen runpy>", line 189, in _run_module_as_main
+  File "<frozen runpy>", line 112, in _get_module_details
+  File "/root/venv/lib/python3.11/site-packages/swebench/__init__.py", line 7, in <module>
+    from swebench.harness.constants import (
+  File "/root/venv/lib/python3.11/site-packages/swebench/harness/__init__.py", line 1, in <module>
+    from swebench.harness import (
+  File "/root/venv/lib/python3.11/site-packages/swebench/harness/docker_build.py", line 19, in <module>
+    from swebench.harness.test_spec.test_spec import (
+  File "/root/venv/lib/python3.11/site-packages/swebench/harness/test_spec/__init__.py", line 1, in <module>
+    from swebench.harness.test_spec import (
+  File "/root/venv/lib/python3.11/site-packages/swebench/harness/test_spec/test_spec.py", line 20, in <module>
+    from swebench.harness.test_spec.create_scripts import (
+  File "/root/venv/lib/python3.11/site-packages/swebench/harness/test_spec/create_scripts.py", line 2, in <module>
+    from swebench.harness.test_spec.javascript import (
+  File "/root/venv/lib/python3.11/site-packages/swebench/harness/test_spec/javascript.py", line 9, in <module>
+    from swebench.harness.test_spec.utils import make_eval_script_list_common
+  File "/root/venv/lib/python3.11/site-packages/swebench/harness/test_spec/utils.py", line 6, in <module>
+    from swebench.harness.utils import get_modified_files
+  File "/root/venv/lib/python3.11/site-packages/swebench/harness/utils.py", line 10, in <module>
+    from datasets import Dataset, load_dataset, load_from_disk
+  File "/root/venv/lib/python3.11/site-packages/datasets/__init__.py", line 17, in <module>
+    from .arrow_dataset import Column, Dataset
+  File "/root/venv/lib/python3.11/site-packages/datasets/arrow_dataset.py", line 80, in <module>
+    from .arrow_writer import ArrowWriter, OptimizedTypedSequence
+  File "/root/venv/lib/python3.11/site-packages/datasets/arrow_writer.py", line 30, in <module>
+    from .features import Audio, Features, Image, Pdf, Value, Video
+  File "/root/venv/lib/python3.11/site-packages/datasets/features/__init__.py", line 22, in <module>
+    from .features import Array2D, Array3D, Array4D, Array5D, ClassLabel, Features, Json, LargeList, List, Sequence, Value
+  File "/root/venv/lib/python3.11/site-packages/datasets/features/features.py", line 1183, in <module>
+    class Json:
+  File "/root/venv/lib/python3.11/site-packages/datasets/features/features.py", line 1221, in Json
+    pa_type: ClassVar[Any] = pa.json_()
+                             ^^^^^^^^
+AttributeError: module 'pyarrow' has no attribute 'json_'. Did you mean: 'json'?

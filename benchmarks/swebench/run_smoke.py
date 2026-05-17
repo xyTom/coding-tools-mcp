@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,6 +29,14 @@ class PredictionSet:
 
 def load_subset(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def selected_instances(subset: dict[str, Any], requested: list[str]) -> list[dict[str, Any]]:
+    instances = [item for item in subset.get("instances", []) if isinstance(item, dict)]
+    if not requested:
+        return instances
+    wanted = set(requested)
+    return [item for item in instances if item.get("instance_id") in wanted]
 
 
 def validate_predictions(path: Path, expected_ids: set[str]) -> PredictionSet:
@@ -48,50 +57,67 @@ def validate_predictions(path: Path, expected_ids: set[str]) -> PredictionSet:
             if key not in row:
                 errors.append(f"line {line_no}: missing {key}")
         instance_id = row.get("instance_id")
-        if isinstance(instance_id, str):
+        if isinstance(instance_id, str) and instance_id in expected_ids:
             ids.append(instance_id)
-            if instance_id not in expected_ids:
-                errors.append(f"line {line_no}: instance_id {instance_id} is not in subset")
-        patch = row.get("model_patch")
-        patches.append(patch if isinstance(patch, str) else "")
+            patch = row.get("model_patch")
+            patches.append(patch if isinstance(patch, str) else "")
     missing = sorted(expected_ids - set(ids))
-    extra = sorted(set(ids) - expected_ids)
     if missing:
         errors.append(f"missing predictions for: {', '.join(missing)}")
-    if extra:
-        errors.append(f"unexpected predictions for: {', '.join(extra)}")
     return PredictionSet(path, len(ids), ids, all(not patch.strip() for patch in patches), errors)
 
 
-def check_docker() -> tuple[bool, str]:
-    docker = shutil.which("docker")
-    if docker is None:
-        return False, "docker executable not found"
+def capture(command: list[str], raw_dir: Path, name: str, *, timeout: int = 120) -> dict[str, Any]:
+    raw_dir.mkdir(parents=True, exist_ok=True)
     try:
         result = subprocess.run(
-            [docker, "version", "--format", "{{.Server.Version}}"],
+            command,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=10,
+            timeout=timeout,
             check=False,
         )
+        output = {
+            "ran": True,
+            "returncode": result.returncode,
+            "stdout": result.stdout[-12000:],
+            "stderr": result.stderr[-12000:],
+            "command": command,
+        }
     except Exception as exc:  # pragma: no cover - environment dependent
-        return False, f"docker check failed: {exc}"
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        return False, f"docker daemon unavailable: {detail}"
-    return True, result.stdout.strip()
+        output = {"ran": False, "returncode": None, "stdout": "", "stderr": repr(exc), "command": command}
+    (raw_dir / f"{name}.json").write_text(json.dumps(output, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (raw_dir / f"{name}.stdout.txt").write_text(str(output["stdout"]), encoding="utf-8")
+    (raw_dir / f"{name}.stderr.txt").write_text(str(output["stderr"]), encoding="utf-8")
+    return output
 
 
-def check_swebench() -> tuple[bool, str]:
-    if importlib.util.find_spec("swebench") is None:
-        return False, "Python package swebench is not installed"
-    return True, "swebench Python package importable"
+def check_docker(raw_dir: Path) -> tuple[bool, str, dict[str, Any]]:
+    docker = shutil.which("docker")
+    if docker is None:
+        return False, "docker executable not found", {"ran": False, "returncode": None, "stdout": "", "stderr": ""}
+    result = capture([docker, "version"], raw_dir, "docker-version", timeout=20)
+    if result["returncode"] != 0:
+        detail = (str(result["stderr"]) or str(result["stdout"])).strip()
+        return False, f"docker daemon unavailable: {detail[:500]}", result
+    return True, "docker version succeeded", result
 
 
-def evaluation_command(predictions: Path, run_id: str, max_workers: int) -> list[str]:
-    return [
+def check_swebench(raw_dir: Path, *, install: bool) -> tuple[bool, str, dict[str, Any] | None, dict[str, Any]]:
+    install_result: dict[str, Any] | None = None
+    if install and importlib.util.find_spec("swebench") is None:
+        install_result = capture([sys.executable, "-m", "pip", "install", "swebench"], raw_dir, "pip-install-swebench", timeout=900)
+    help_result = capture([sys.executable, "-m", "swebench.harness.run_evaluation", "--help"], raw_dir, "swebench-help", timeout=120)
+    if help_result["returncode"] != 0:
+        if importlib.util.find_spec("swebench") is None:
+            return False, "Python package swebench is not installed or not importable", install_result, help_result
+        return False, "swebench harness help/import failed", install_result, help_result
+    return True, "swebench harness help succeeded", install_result, help_result
+
+
+def evaluation_command(predictions: Path, run_id: str, max_workers: int, instance_ids: list[str]) -> list[str]:
+    command = [
         sys.executable,
         "-m",
         "swebench.harness.run_evaluation",
@@ -104,18 +130,15 @@ def evaluation_command(predictions: Path, run_id: str, max_workers: int) -> list
         "--run_id",
         run_id,
     ]
+    for instance_id in instance_ids:
+        command.extend(["--instance_ids", instance_id])
+    return command
 
 
-def maybe_run(command: list[str], enabled: bool) -> dict[str, Any]:
+def maybe_run(command: list[str], enabled: bool, raw_dir: Path, name: str) -> dict[str, Any]:
     if not enabled:
-        return {"ran": False, "returncode": None, "stdout": "", "stderr": ""}
-    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    return {
-        "ran": True,
-        "returncode": result.returncode,
-        "stdout": result.stdout[-12000:],
-        "stderr": result.stderr[-12000:],
-    }
+        return {"ran": False, "returncode": None, "stdout": "", "stderr": "", "command": command}
+    return capture(command, raw_dir, name, timeout=7200)
 
 
 def write_reports(report: dict[str, Any], json_path: Path, md_path: Path) -> None:
@@ -132,6 +155,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Conclusion: **{report['conclusion']}**",
         f"- Dataset: `{report['dataset_name']}` split `{report['split']}`",
         f"- Smoke subset: `{report['subset_path']}`",
+        f"- Raw log directory: `{report['raw_dir']}`",
         f"- Baseline predictions: `{report['baseline']['path']}`",
         f"- Candidate predictions: `{report['candidate']['path']}`",
         f"- Baseline resolved: `{report['baseline'].get('resolved')}`",
@@ -144,7 +168,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- {item}")
     lines.extend(["", "## Instances", ""])
     for instance in report.get("instances", []):
-        lines.append(f"- `{instance['instance_id']}` ({instance['project']})")
+        lines.append(f"- `{instance['instance_id']}` ({instance.get('project', 'unknown')})")
     lines.extend(["", "## Evaluation Commands", ""])
     lines.append("```bash")
     lines.append(" ".join(report["baseline"]["command"]))
@@ -171,20 +195,37 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--report-json", type=Path, default=Path("reports/benchmark/swebench-regression.json"))
     parser.add_argument("--report-md", type=Path, default=Path("reports/benchmark/swebench-regression.md"))
+    parser.add_argument("--raw-dir", type=Path)
     parser.add_argument("--max-workers", type=int, default=2)
+    parser.add_argument("--instance-id", action="append", default=[])
     parser.add_argument("--run-evaluation", action="store_true")
+    parser.add_argument("--install-swebench", action="store_true")
     parser.add_argument("--allow-placeholder-evaluation", action="store_true")
     args = parser.parse_args(argv)
 
+    raw_dir = args.raw_dir
+    if raw_dir is None:
+        raw_dir = args.report_json.parent / args.report_json.stem / "raw"
+
     subset = load_subset(args.subset)
-    instances = subset.get("instances", [])
-    expected_ids = {item["instance_id"] for item in instances}
+    instances = selected_instances(subset, args.instance_id)
+    expected_ids = {str(item["instance_id"]) for item in instances}
     baseline = validate_predictions(args.baseline_predictions, expected_ids)
     candidate = validate_predictions(args.candidate_predictions, expected_ids)
-    docker_ok, docker_detail = check_docker()
-    swebench_ok, swebench_detail = check_swebench()
-    baseline_command = evaluation_command(args.baseline_predictions, "codex_tool_runtime_native_smoke", args.max_workers)
-    candidate_command = evaluation_command(args.candidate_predictions, "codex_tool_runtime_mcp_smoke", args.max_workers)
+    docker_ok, docker_detail, docker_run = check_docker(raw_dir)
+    swebench_ok, swebench_detail, install_run, help_run = check_swebench(raw_dir, install=args.install_swebench)
+    baseline_command = evaluation_command(
+        args.baseline_predictions,
+        "codex_tool_runtime_native_smoke",
+        args.max_workers,
+        sorted(expected_ids),
+    )
+    candidate_command = evaluation_command(
+        args.candidate_predictions,
+        "codex_tool_runtime_mcp_smoke",
+        args.max_workers,
+        sorted(expected_ids),
+    )
 
     limitations: list[str] = []
     preflight = [
@@ -201,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     if not docker_ok:
         limitations.append("Official SWE-bench evaluation requires a working Docker daemon.")
     if not swebench_ok:
-        limitations.append("Official SWE-bench evaluation requires the swebench Python package.")
+        limitations.append("Official SWE-bench evaluation requires an importable swebench harness.")
 
     can_run = (
         args.run_evaluation
@@ -214,23 +255,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.run_evaluation and not can_run:
         limitations.append("Evaluation was requested but preflight/resource checks prevent a valid comparison.")
 
-    baseline_run = maybe_run(baseline_command, can_run)
-    candidate_run = maybe_run(candidate_command, can_run)
-    conclusion = "INCONCLUSIVE"
+    baseline_run = maybe_run(baseline_command, can_run, raw_dir, "baseline-evaluation")
+    candidate_run = maybe_run(candidate_command, can_run, raw_dir, "candidate-evaluation")
     if can_run and baseline_run["returncode"] == 0 and candidate_run["returncode"] == 0:
         conclusion = "INCONCLUSIVE"
         limitations.append("Harness ran, but resolved-count parsing is not implemented in this scaffold.")
     elif can_run:
         conclusion = "FAIL"
+    elif args.run_evaluation:
+        conclusion = "BLOCKED"
+    else:
+        conclusion = "PREFLIGHT_ONLY"
 
     report = {
         "conclusion": conclusion,
         "dataset_name": subset.get("dataset_name"),
         "split": subset.get("split"),
         "subset_path": str(args.subset),
+        "raw_dir": str(raw_dir),
         "instances": instances,
         "preflight": preflight,
         "limitations": limitations,
+        "docker": docker_run,
+        "swebench_install": install_run,
+        "swebench_help": help_run,
         "baseline": {
             "path": str(args.baseline_predictions),
             "count": baseline.count,

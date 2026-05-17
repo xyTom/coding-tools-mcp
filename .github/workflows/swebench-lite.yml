@@ -1,0 +1,69 @@
+name: swebench-lite
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_ids:
+        description: "Comma-separated SWE-bench Lite instance IDs"
+        required: false
+        default: "sympy__sympy-12419"
+      max_workers:
+        description: "SWE-bench max workers"
+        required: false
+        default: "1"
+      install_swebench:
+        description: "Attempt to install the official SWE-bench package"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  swebench-lite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Attempt SWE-bench Lite official evaluation
+        run: |
+          ids="${{ inputs.instance_ids }}"
+          args=""
+          IFS=',' read -ra parts <<< "$ids"
+          for id in "${parts[@]}"; do
+            trimmed="$(echo "$id" | xargs)"
+            if [ -n "$trimmed" ]; then
+              args="$args --instance-id $trimmed"
+            fi
+          done
+          install_flag=""
+          if [ "${{ inputs.install_swebench }}" = "true" ]; then
+            install_flag="--install-swebench"
+          fi
+          python benchmarks/swebench/run_smoke.py \
+            $install_flag \
+            --run-evaluation \
+            --allow-placeholder-evaluation \
+            --max-workers "${{ inputs.max_workers }}" \
+            $args \
+            --report-json reports/benchmark/swebench-official-attempt.json \
+            --report-md reports/benchmark/swebench-official-attempt.md
+
+      - name: Upload SWE-bench evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swebench-lite-evidence
+          path: reports/benchmark/**
+          if-no-files-found: ignore
+          retention-days: 14

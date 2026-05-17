@@ -14,3 +14,5 @@ build/
 target/
 .DS_Store
 reports/compliance/latest*.tmp
+rollout-*.jsonl
+successful_apply_patch_blocks.txt

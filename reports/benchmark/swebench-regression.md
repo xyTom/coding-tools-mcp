@@ -1,17 +1,18 @@
 # SWE-bench Smoke Regression Report
 
-- Conclusion: **INCONCLUSIVE**
+- Conclusion: **PREFLIGHT_ONLY**
 - Dataset: `princeton-nlp/SWE-bench_Lite` split `test`
-- Smoke subset: `/root/workspace/benchmarks/swebench/subsets/smoke-lite-10.json`
-- Baseline predictions: `/root/workspace/benchmarks/swebench/predictions/baseline_native.jsonl`
-- Candidate predictions: `/root/workspace/benchmarks/swebench/predictions/candidate_mcp.jsonl`
+- Smoke subset: `/root/codex-tool-runtime-mcp/benchmarks/swebench/subsets/smoke-lite-10.json`
+- Raw log directory: `reports/benchmark/swebench-regression/raw`
+- Baseline predictions: `/root/codex-tool-runtime-mcp/benchmarks/swebench/predictions/baseline_native.jsonl`
+- Candidate predictions: `/root/codex-tool-runtime-mcp/benchmarks/swebench/predictions/candidate_mcp.jsonl`
 - Baseline resolved: `None`
 - Candidate resolved: `None`
 
 ## Preflight
 
 - docker: missing - docker executable not found
-- swebench package: missing - Python package swebench is not installed
+- swebench package: missing - swebench harness help/import failed
 - baseline predictions: 10 rows, placeholder=True
 - candidate predictions: 10 rows, placeholder=True
 
@@ -31,12 +32,12 @@
 ## Evaluation Commands
 
 ```bash
-/root/venv/bin/python3 -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Lite --predictions_path /root/workspace/benchmarks/swebench/predictions/baseline_native.jsonl --max_workers 2 --run_id codex_tool_runtime_native_smoke
-/root/venv/bin/python3 -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Lite --predictions_path /root/workspace/benchmarks/swebench/predictions/candidate_mcp.jsonl --max_workers 2 --run_id codex_tool_runtime_mcp_smoke
+/root/venv/bin/python3 -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Lite --predictions_path /root/codex-tool-runtime-mcp/benchmarks/swebench/predictions/baseline_native.jsonl --max_workers 2 --run_id codex_tool_runtime_native_smoke --instance_ids astropy__astropy-12907 --instance_ids django__django-11099 --instance_ids matplotlib__matplotlib-18869 --instance_ids pallets__flask-4992 --instance_ids psf__requests-2317 --instance_ids pydata__xarray-3364 --instance_ids pytest-dev__pytest-5221 --instance_ids scikit-learn__scikit-learn-10297 --instance_ids sphinx-doc__sphinx-10325 --instance_ids sympy__sympy-12419
+/root/venv/bin/python3 -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Lite --predictions_path /root/codex-tool-runtime-mcp/benchmarks/swebench/predictions/candidate_mcp.jsonl --max_workers 2 --run_id codex_tool_runtime_mcp_smoke --instance_ids astropy__astropy-12907 --instance_ids django__django-11099 --instance_ids matplotlib__matplotlib-18869 --instance_ids pallets__flask-4992 --instance_ids psf__requests-2317 --instance_ids pydata__xarray-3364 --instance_ids pytest-dev__pytest-5221 --instance_ids scikit-learn__scikit-learn-10297 --instance_ids sphinx-doc__sphinx-10325 --instance_ids sympy__sympy-12419
 ```
 
 ## Limitations
 
 - Prediction files are schema-valid placeholders, not model-generated patches.
 - Official SWE-bench evaluation requires a working Docker daemon.
-- Official SWE-bench evaluation requires the swebench Python package.
+- Official SWE-bench evaluation requires an importable swebench harness.

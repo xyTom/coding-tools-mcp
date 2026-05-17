@@ -1,0 +1,7 @@
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+databricks-sqlalchemy 1.0.5 requires pyarrow<17,>=14.0.1, but you have pyarrow 24.0.0 which is incompatible.
+deepnote-toolkit 2.3.0 requires dill<=0.4,>=0.3.8; python_version <= "3.12", but you have dill 0.4.1 which is incompatible.
+deepnote-toolkit 2.3.0 requires pyarrow<=17.0.0,>=13.0.0; python_version == "3.11" and sys_platform != "darwin", but you have pyarrow 24.0.0 which is incompatible.
+
+[notice] A new release of pip is available: 24.0 -> 26.1.1
+[notice] To update, run: pip install --upgrade pip

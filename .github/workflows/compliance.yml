@@ -2,7 +2,7 @@ name: compliance
 
 on:
   push:
-    branches: [main]
+    branches: [main, "recover-*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
 jobs:
   compliance:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -20,11 +20,50 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install runtime
-        run: python -m pip install -e .
+      - name: Install runtime and CI tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
 
-      - name: Run compliance suite
+      - name: Run lint
+        run: make lint
+
+      - name: Run typecheck
+        run: make typecheck
+
+      - name: Run unit discovery
+        run: make test
+
+      - name: Run protocol gate
+        run: make test-protocol
+
+      - name: Run integration gate
+        run: make test-integration
+
+      - name: Run required docs gate
+        run: make test-docs-required
+
+      - name: Run schema drift gate
+        run: make test-schema-drift
+
+      - name: Run dogfood smoke
+        run: make dogfood-smoke DOGFOOD_PORT=8765
+
+      - name: Validate SWE-bench smoke preflight
+        run: make benchmark-smoke
+
+      - name: Refresh full compliance report
         run: make compliance
 
-      - name: Validate benchmark smoke preflight
-        run: make benchmark-smoke
+      - name: Upload CI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-evidence
+          path: |
+            reports/compliance/**
+            reports/benchmark/**
+            reports/dogfood/**
+            docs/dogfood/**
+          if-no-files-found: ignore
+          retention-days: 14

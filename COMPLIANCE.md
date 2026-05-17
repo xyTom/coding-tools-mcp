@@ -6,60 +6,31 @@ The one-command acceptance gate is:
 make compliance
 ```
 
-It runs:
-
-- `make test-mcp-contract`
-- `make test-tool-golden`
-- `make test-security`
-- `make test-e2e`
-- `make test-codex-compat`
-- `make dogfood-mcp`
-- compliance report self-tests
-
-## Current Result
-
-Latest local report files:
+It runs protocol, golden tool, security, E2E, Codex compatibility, dogfood, compliance-report, required docs/evidence/workflow, and schema-drift checks. Report files:
 
 - [reports/compliance/latest.json](reports/compliance/latest.json)
 - [reports/compliance/latest.md](reports/compliance/latest.md)
 
-Current status in `latest.json`:
+Always inspect `suite`, `passed`, `tests_run`, `security`, `e2e`, `codex_dogfood`, and `required_tools`. If `suite` is not `all`, required tool coverage is `not_measured` by design.
 
-- `passed`: `true`
-- `tests_run`: `43`
-- required tools, including `view_image`: all `passed`
-- `security`: `passed`
-- `e2e`: `passed`
-- `codex_dogfood`: `passed`
+The CI-shaped local gate is:
 
-There are no skipped tests in the current default profile.
+```bash
+make ci
+```
 
-## CI Evidence
-
-GitHub Actions workflow:
-
-- [.github/workflows/compliance.yml](.github/workflows/compliance.yml)
-
-Latest verified run:
-
-- https://github.com/ytagent/codex-tool-runtime-mcp/actions/runs/25957328972
-- conclusion: `success`
-- head SHA at run time: `16ab9ace68b1241f1f2a2b63a1b62c35102e95da`
+It adds lint, typecheck, unittest discovery, required docs checks, schema-drift checks, full deterministic dogfood runner, and SWE-bench preflight.
 
 ## Coverage
 
-The suite verifies:
-
-- MCP initialize, tools/list, tools/call, schemas, structured success/failure output, unknown tool behavior, and stdout protocol cleanliness.
-- Fresh-client `tools/list` discovery, stdio transport, unsupported HTTP protocol-version rejection, tool annotations, and mirrored structured/text tool results.
+- MCP initialize, `tools/list`, `tools/call`, schemas, annotations, structured success/failure output, unknown tool behavior, protocol errors, trace redaction, and stdout cleanliness.
 - Tool golden cases for read/list/search/patch/exec/stdin/kill/git status/git diff/image.
-- Security cases for traversal, absolute paths, symlink escape, command workdir escape, direct and interpreter-mediated outside reads, destructive command policy, obfuscated network access, risky env rejection, session timeout enforcement, stdout JSON-RPC pollution, request-permission non-grants, and concurrent read-only calls.
+- Security cases for traversal, absolute paths, symlink escape, command workdir escape, direct and interpreter-mediated outside reads, direct syscall outside reads and writes, destructive command policy, shell-expansion gating, obfuscated network access, risky env rejection, Linux Landlock confinement, session timeout enforcement, watchdog cleanup, bounded output buffers, request-permission non-grants, and concurrent read-only calls.
 - Deterministic E2E loops for JavaScript bugfix, Python function add, long-running stdin, session close behavior, workspace escape denial, and image viewing.
-- Codex compatibility vectors for patch envelope, exec/session/stdin behavior, and image viewing.
 - MCP-only dogfood without direct filesystem or shell bypass during task execution.
-- Compliance report generation semantics.
+- Compliance report generation semantics, including non-overclaiming partial-suite tool coverage.
 
-## Running Individual Gates
+## Individual Gates
 
 ```bash
 make test-mcp-contract
@@ -67,6 +38,15 @@ make test-tool-golden
 make test-security
 make test-e2e
 make test-codex-compat
+make test-docs-required
+make test-schema-drift
 make dogfood-mcp
+make dogfood-runner
+make dogfood-smoke
 make benchmark-smoke
 ```
+
+GitHub Actions workflows:
+
+- [.github/workflows/compliance.yml](.github/workflows/compliance.yml)
+- [.github/workflows/swebench-lite.yml](.github/workflows/swebench-lite.yml)

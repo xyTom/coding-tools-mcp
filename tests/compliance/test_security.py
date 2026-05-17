@@ -68,6 +68,78 @@ class SecurityComplianceTests(ComplianceTestCase):
                 "max_output_bytes": 4096,
             },
         )
+        computed = self.client.call_tool(
+            "exec_command",
+            {
+                "cmd": (
+                    "python -c "
+                    "\"import os; "
+                    "print(open(os.path.dirname(os.getcwd()) + chr(47) + 'outside-secret.txt').read())\""
+                ),
+                "timeout_ms": 5000,
+                "max_output_bytes": 4096,
+            },
+        )
+        payload = self.assert_tool_success(computed)
+        self.assertNotEqual(payload.get("exit_code"), 0, f"computed outside read should fail: {payload!r}")
+        self.assertNotIn("TOP_SECRET_DO_NOT_READ", self.tool_text(computed))
+        direct_syscall = self.client.call_tool(
+            "exec_command",
+            {
+                "cmd": (
+                    "python -c "
+                    "\"import os, ctypes as c; "
+                    "lib=c.CDLL(None, use_errno=True); "
+                    "p=(os.path.dirname(os.getcwd()) + chr(47) + 'outside-secret.txt').encode(); "
+                    "fd=lib.syscall(257, -100, c.c_char_p(p), 0); "
+                    "raise OSError(c.get_errno(), 'blocked') if fd < 0 else print(os.read(fd, 80))\""
+                ),
+                "timeout_ms": 5000,
+                "max_output_bytes": 4096,
+            },
+        )
+        syscall_payload = self.assert_tool_success(direct_syscall)
+        self.assertNotEqual(syscall_payload.get("exit_code"), 0, f"direct syscall outside read should fail: {syscall_payload!r}")
+        self.assertNotIn("TOP_SECRET_DO_NOT_READ", self.tool_text(direct_syscall))
+        direct_syscall_write = self.client.call_tool(
+            "exec_command",
+            {
+                "cmd": (
+                    "python -c "
+                    "\"import os, ctypes as c; "
+                    "lib=c.CDLL(None, use_errno=True); "
+                    "p=(os.path.dirname(os.getcwd()) + chr(47) + 'outside-secret.txt').encode(); "
+                    "fd=lib.syscall(257, -100, c.c_char_p(p), os.O_WRONLY | os.O_TRUNC); "
+                    "raise OSError(c.get_errno(), 'blocked') if fd < 0 else os.write(fd, b'MODIFIED')\""
+                ),
+                "timeout_ms": 5000,
+                "max_output_bytes": 4096,
+            },
+        )
+        syscall_write_payload = self.assert_tool_success(direct_syscall_write)
+        self.assertNotEqual(
+            syscall_write_payload.get("exit_code"),
+            0,
+            f"direct syscall outside write should fail: {syscall_write_payload!r}",
+        )
+        self.assertEqual(self.workspace.outside_secret.read_text(encoding="utf-8"), "TOP_SECRET_DO_NOT_READ\n")
+        self.assert_denied_or_permission_required(
+            "exec_command",
+            {
+                "cmd": "cat $(dirname \"$PWD\")/outside-secret.txt",
+                "timeout_ms": 5000,
+                "max_output_bytes": 4096,
+            },
+        )
+
+    def test_exec_command_long_non_path_tokens_do_not_become_internal_errors(self) -> None:
+        result = self.client.call_tool(
+            "exec_command",
+            {"cmd": "python -c " + ("a" * 300), "timeout_ms": 5000, "max_output_bytes": 4096},
+        )
+        payload = self.assert_tool_success(result)
+        self.assertEqual(payload.get("status"), "exited", payload)
+        self.assertNotEqual(payload.get("exit_code"), 0, payload)
 
     def test_exec_command_rejects_destructive_workspace_mutations(self) -> None:
         dangerous_commands = [
@@ -145,6 +217,57 @@ class SecurityComplianceTests(ComplianceTestCase):
         finally:
             if isinstance(session_id, str):
                 self.client.call_tool("kill_session", {"session_id": session_id, "signal": "KILL"})
+
+    def test_exec_command_timeout_is_enforced_without_client_polling(self) -> None:
+        started = self.client.call_tool(
+            "exec_command",
+            {
+                "cmd": "python -c \"import time; time.sleep(2)\"",
+                "tty": True,
+                "timeout_ms": 100,
+                "yield_time_ms": 0,
+                "max_output_bytes": 4096,
+            },
+        )
+        payload = self.assert_tool_success(started)
+        session_id = payload.get("session_id")
+        self.assertIsInstance(session_id, str, payload)
+
+        time.sleep(0.35)
+        polled = self.client.call_tool(
+            "write_stdin",
+            {"session_id": session_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 4096},
+        )
+        poll_payload = self.assert_tool_success(polled)
+        self.assertEqual(poll_payload.get("status"), "timeout", poll_payload)
+        self.assertIs(poll_payload.get("timed_out"), True, poll_payload)
+
+    def test_exec_command_long_running_output_buffer_is_bounded(self) -> None:
+        started = self.client.call_tool(
+            "exec_command",
+            {
+                "cmd": (
+                    "python -c \"import sys, time; "
+                    "sys.stdout.write('x' * 1500000); sys.stdout.flush(); time.sleep(2)\""
+                ),
+                "tty": True,
+                "timeout_ms": 5000,
+                "yield_time_ms": 0,
+                "max_output_bytes": 1024,
+            },
+        )
+        payload = self.assert_tool_success(started)
+        session_id = payload.get("session_id")
+        self.assertIsInstance(session_id, str, payload)
+        time.sleep(0.5)
+        polled = self.client.call_tool(
+            "write_stdin",
+            {"session_id": session_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 1024},
+        )
+        poll_payload = self.assert_tool_success(polled)
+        self.assertGreater(poll_payload.get("stdout_dropped_bytes", 0), 0, poll_payload)
+        self.assertTrue(poll_payload.get("truncated"), poll_payload)
+        self.client.call_tool("kill_session", {"session_id": session_id, "signal": "KILL"})
 
     def test_sensitive_environment_is_not_leaked_to_child_processes(self) -> None:
         result = self.client.call_tool(

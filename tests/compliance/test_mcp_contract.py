@@ -123,6 +123,40 @@ class MCPContractTests(ComplianceTestCase):
         stdout = self.client.stdout_snapshot()
         self.assertEqual(stdout, "", f"server must log to stderr, not stdout: {stdout!r}")
 
+    def test_trace_logs_are_structured_redacted_and_stderr_only(self) -> None:
+        old_trace = os.environ.get("CODEX_TOOL_RUNTIME_TRACE")
+        os.environ["CODEX_TOOL_RUNTIME_TRACE"] = "1"
+        try:
+            with MCPClient(self.workspace.root) as traced:
+                traced.call_tool(
+                    "request_permissions",
+                    {
+                        "tool_name": "exec_command",
+                        "permission": "sensitive_env",
+                        "reason": "trace redaction check",
+                        "arguments": {"token": "COMPLIANCE_SHOULD_NOT_LEAK"},
+                    },
+                )
+                stderr = traced.stderr_snapshot()
+                stdout = traced.stdout_snapshot()
+        finally:
+            if old_trace is None:
+                os.environ.pop("CODEX_TOOL_RUNTIME_TRACE", None)
+            else:
+                os.environ["CODEX_TOOL_RUNTIME_TRACE"] = old_trace
+
+        self.assertEqual(stdout, "", f"trace logs must not pollute stdout: {stdout!r}")
+        events = [json.loads(line) for line in stderr.splitlines() if line.startswith("{")]
+        trace_events = [event for event in events if event.get("event") == "tool_call"]
+        self.assertTrue(trace_events, f"expected structured tool_call trace in stderr: {stderr!r}")
+        event = trace_events[-1]
+        self.assertEqual(event.get("tool"), "request_permissions")
+        self.assertFalse(event.get("ok"))
+        self.assertEqual(event.get("error_code"), "ELICITATION_UNSUPPORTED")
+        serialized = json.dumps(event, sort_keys=True)
+        self.assertNotIn("COMPLIANCE_SHOULD_NOT_LEAK", serialized)
+        self.assertIn("[REDACTED]", serialized)
+
     def test_http_rejects_unsupported_protocol_version_header(self) -> None:
         request = urllib.request.Request(
             str(self.client.url),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import difflib
 import fnmatch
 import http.server
@@ -16,7 +17,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -45,6 +45,9 @@ DEFAULT_EXCLUDED_NAMES = {
     "__pycache__",
 }
 SENSITIVE_ENV_RE = re.compile(r"(token|secret|credential|api[_-]?key|password|passwd|private)", re.I)
+SENSITIVE_VALUE_RE = re.compile(
+    r"(COMPLIANCE_SHOULD_NOT_LEAK|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})"
+)
 RISKY_ENV_NAMES = {
     "BASH_ENV",
     "ENV",
@@ -58,14 +61,39 @@ RISKY_ENV_NAMES = {
     "PERL5OPT",
 }
 NETWORK_RE = re.compile(
-    r"(https?://|urllib\.request|urllib3|requests\.|http\.client|HTTPConnection|HTTPSConnection|socket\.|aiohttp|httpx|curl\b|wget\b|nc\b|netcat\b|ssh\b|scp\b|ftp\b)",
+    r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
     re.I,
 )
+SHELL_EXPANSION_RE = re.compile(r"(`|\$\(|\$\{)")
 DESTRUCTIVE_RE = re.compile(
     r"(^|\s)(sudo|su|chmod\s+-R|chown\s+-R|mkfs|mount|umount|find\b[^;&|]*\s-delete\b|git\b[^;&|]*\breset\s+--hard\b|git\b[^;&|]*\bclean\s+-[^\s]*[fx][^\s]*|rm\s+-[^\s]*r[^\s]*f|rm\s+-[^\s]*f[^\s]*r)\b",
     re.I,
 )
 ABSOLUTE_PATH_RE = re.compile(r"(?<![:\w])/(?:[A-Za-z0-9._+@%=-]+/)*[A-Za-z0-9._+@%=-]+")
+SESSION_BUFFER_BYTES = 1_048_576
+
+LANDLOCK_CREATE_RULESET_VERSION = 1
+LANDLOCK_RULE_PATH_BENEATH = 1
+PR_SET_NO_NEW_PRIVS = 38
+SYS_LANDLOCK_CREATE_RULESET = 444
+SYS_LANDLOCK_ADD_RULE = 445
+SYS_LANDLOCK_RESTRICT_SELF = 446
+LANDLOCK_ACCESS_FS_EXECUTE = 1 << 0
+LANDLOCK_ACCESS_FS_WRITE_FILE = 1 << 1
+LANDLOCK_ACCESS_FS_READ_FILE = 1 << 2
+LANDLOCK_ACCESS_FS_READ_DIR = 1 << 3
+LANDLOCK_ACCESS_FS_REMOVE_DIR = 1 << 4
+LANDLOCK_ACCESS_FS_REMOVE_FILE = 1 << 5
+LANDLOCK_ACCESS_FS_MAKE_CHAR = 1 << 6
+LANDLOCK_ACCESS_FS_MAKE_DIR = 1 << 7
+LANDLOCK_ACCESS_FS_MAKE_REG = 1 << 8
+LANDLOCK_ACCESS_FS_MAKE_SOCK = 1 << 9
+LANDLOCK_ACCESS_FS_MAKE_FIFO = 1 << 10
+LANDLOCK_ACCESS_FS_MAKE_BLOCK = 1 << 11
+LANDLOCK_ACCESS_FS_MAKE_SYM = 1 << 12
+LANDLOCK_ACCESS_FS_REFER = 1 << 13
+LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14
+LANDLOCK_ACCESS_FS_IOCTL_DEV = 1 << 15
 
 
 class ToolFailure(Exception):
@@ -254,6 +282,25 @@ class Workspace:
         return completed.returncode == 0
 
 
+def trim_buffer(
+    buffer: bytearray,
+    *,
+    total_bytes: int,
+    start_offset_attr: str,
+    cursor_attr: str,
+    session: Any,
+) -> int:
+    overflow = len(buffer) - session.buffer_limit
+    if overflow <= 0:
+        return 0
+    del buffer[:overflow]
+    setattr(session, start_offset_attr, total_bytes - len(buffer))
+    cursor = getattr(session, cursor_attr)
+    if cursor < getattr(session, start_offset_attr):
+        setattr(session, cursor_attr, getattr(session, start_offset_attr))
+    return overflow
+
+
 @dataclass
 class ExecSession:
     session_id: str
@@ -261,9 +308,17 @@ class ExecSession:
     timeout_at: float | None = None
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
+    stdout_start_offset: int = 0
+    stderr_start_offset: int = 0
     stdout_cursor: int = 0
     stderr_cursor: int = 0
+    stdout_total_bytes: int = 0
+    stderr_total_bytes: int = 0
+    stdout_dropped_bytes: int = 0
+    stderr_dropped_bytes: int = 0
+    buffer_limit: int = SESSION_BUFFER_BYTES
     lock: threading.Lock = field(default_factory=threading.Lock)
+    reader_threads: list[threading.Thread] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
     closed: bool = False
     exit_code: int | None = None
@@ -273,18 +328,38 @@ class ExecSession:
     def append_stdout(self, chunk: bytes) -> None:
         with self.lock:
             self.stdout.extend(chunk)
+            self.stdout_total_bytes += len(chunk)
+            self.stdout_dropped_bytes += trim_buffer(
+                self.stdout,
+                total_bytes=self.stdout_total_bytes,
+                start_offset_attr="stdout_start_offset",
+                cursor_attr="stdout_cursor",
+                session=self,
+            )
 
     def append_stderr(self, chunk: bytes) -> None:
         with self.lock:
             self.stderr.extend(chunk)
+            self.stderr_total_bytes += len(chunk)
+            self.stderr_dropped_bytes += trim_buffer(
+                self.stderr,
+                total_bytes=self.stderr_total_bytes,
+                start_offset_attr="stderr_start_offset",
+                cursor_attr="stderr_cursor",
+                session=self,
+            )
 
     def snapshot_since_cursor(self, max_output_bytes: int) -> dict[str, Any]:
         self.refresh_status()
         with self.lock:
-            stdout_bytes = bytes(self.stdout[self.stdout_cursor :])
-            stderr_bytes = bytes(self.stderr[self.stderr_cursor :])
-            self.stdout_cursor = len(self.stdout)
-            self.stderr_cursor = len(self.stderr)
+            stdout_omitted = max(0, self.stdout_start_offset - self.stdout_cursor)
+            stderr_omitted = max(0, self.stderr_start_offset - self.stderr_cursor)
+            stdout_start = max(0, self.stdout_cursor - self.stdout_start_offset)
+            stderr_start = max(0, self.stderr_cursor - self.stderr_start_offset)
+            stdout_bytes = bytes(self.stdout[stdout_start:])
+            stderr_bytes = bytes(self.stderr[stderr_start:])
+            self.stdout_cursor = self.stdout_total_bytes
+            self.stderr_cursor = self.stderr_total_bytes
         stdout, stdout_truncated = truncate_bytes(stdout_bytes, max_output_bytes)
         stderr, stderr_truncated = truncate_bytes(stderr_bytes, max_output_bytes)
         if self.timed_out:
@@ -301,7 +376,11 @@ class ExecSession:
             "stderr": stderr,
             "stdout_truncated": stdout_truncated,
             "stderr_truncated": stderr_truncated,
-            "truncated": stdout_truncated or stderr_truncated,
+            "stdout_dropped_bytes": self.stdout_dropped_bytes,
+            "stderr_dropped_bytes": self.stderr_dropped_bytes,
+            "stdout_omitted_bytes": stdout_omitted,
+            "stderr_omitted_bytes": stderr_omitted,
+            "truncated": stdout_truncated or stderr_truncated or stdout_omitted > 0 or stderr_omitted > 0,
             "ok": True,
         }
 
@@ -314,13 +393,23 @@ class ExecSession:
         ):
             self.timed_out = True
             terminate_process_group(self.process, signal.SIGTERM)
+            self.drain_readers()
         code = self.process.poll()
         if code is None:
             return
+        self.drain_readers()
         self.exit_code = code
         if code < 0:
             self.signal_name = signal.Signals(-code).name if -code in [s.value for s in signal.Signals] else str(-code)
         self.closed = True
+
+    def drain_readers(self, timeout: float = 0.2) -> None:
+        deadline = time.time() + timeout
+        for thread in list(self.reader_threads):
+            remaining = max(0.0, deadline - time.time())
+            if remaining <= 0:
+                break
+            thread.join(timeout=remaining)
 
 
 class Runtime:
@@ -331,6 +420,7 @@ class Runtime:
         self.sessions_lock = threading.Lock()
         self.http_session_id = secrets.token_urlsafe(24)
         self.patch_baselines: dict[str, str | None] = {}
+        self.initialized = False
 
     def initialize(self) -> dict[str, Any]:
         return {
@@ -363,6 +453,7 @@ class Runtime:
         return {"tools": [tool_definition(name) for name in names]}
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+        started_at = time.time()
         args = arguments or {}
         handlers = {
             "read_file": self.read_file,
@@ -386,6 +477,7 @@ class Runtime:
         try:
             payload = handler(args)
             payload.setdefault("ok", True)
+            self.emit_tool_trace(name, args, payload, started_at)
             content = None
             if name == "view_image" and args.get("output", "mcp_image") == "mcp_image":
                 content = [
@@ -417,6 +509,7 @@ class Runtime:
                 }
             if exc.code == "ELICITATION_UNSUPPORTED":
                 payload["status"] = "unsupported"
+            self.emit_tool_trace(name, args, payload, started_at)
             return tool_result(payload, is_error=True)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured
             payload = {
@@ -429,7 +522,26 @@ class Runtime:
                     "details": {},
                 },
             }
+            self.emit_tool_trace(name, args, payload, started_at)
             return tool_result(payload, is_error=True)
+
+    def emit_tool_trace(self, name: str, args: dict[str, Any], payload: dict[str, Any], started_at: float) -> None:
+        if os.environ.get("CODEX_TOOL_RUNTIME_TRACE") != "1":
+            return
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+        event = {
+            "event": "tool_call",
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "tool": name,
+            "ok": bool(payload.get("ok", False)),
+            "status": payload.get("status"),
+            "error_code": error.get("code") if isinstance(error, dict) else None,
+            "duration_ms": int((time.time() - started_at) * 1000),
+            "session_id": payload.get("session_id"),
+            "truncated": payload.get("truncated"),
+            "args": redact_for_trace(args),
+        }
+        print(json.dumps(event, sort_keys=True, separators=(",", ":")), file=sys.stderr, flush=True)
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.workspace.resolve_existing(str(args.get("path", "")))
@@ -750,18 +862,27 @@ class Runtime:
         env = self._command_env(args.get("env", {}))
         start = time.time()
         deadline = start + (timeout_ms / 1000.0)
-        process = subprocess.Popen(
-            cmd,
-            cwd=str(workdir.path),
-            shell=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            start_new_session=True,
-        )
+        landlock_fd = open_landlock_ruleset(self.workspace.root, guard_allow_roots())
+        try:
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(workdir.path),
+                shell=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                start_new_session=True,
+                preexec_fn=lambda: restrict_self_with_landlock(landlock_fd),
+            )
+        finally:
+            try:
+                os.close(landlock_fd)
+            except OSError:
+                pass
         session = self._make_session(process, timeout_at=deadline)
         start_reader_threads(session)
+        start_session_watchdog(session)
         if process.stdin is not None:
             try:
                 if stdin_text:
@@ -779,18 +900,21 @@ class Runtime:
         while True:
             if process.poll() is not None:
                 session.refresh_status()
+                session.drain_readers()
                 payload = session.snapshot_since_cursor(max_output_bytes)
                 payload.update(
                     {
-                        "status": "exited",
+                        "status": "timeout" if session.timed_out else "exited",
                         "elapsed_ms": int((time.time() - start) * 1000),
                     }
                 )
                 return payload
             now = time.time()
             if not tty and now >= deadline:
+                session.timed_out = True
                 self._terminate_process_group(process, signal.SIGTERM)
                 session.refresh_status()
+                session.drain_readers()
                 payload = session.snapshot_since_cursor(max_output_bytes)
                 payload.update(
                     {
@@ -815,7 +939,12 @@ class Runtime:
 
     def _check_command_policy(self, cmd: str, args: dict[str, Any]) -> None:
         env = args.get("env", {})
-        if isinstance(env, dict) and any(SENSITIVE_ENV_RE.search(str(key)) or str(key).upper() in RISKY_ENV_NAMES for key in env):
+        if isinstance(env, dict) and any(
+            SENSITIVE_ENV_RE.search(str(key))
+            or str(key).upper() in RISKY_ENV_NAMES
+            or SENSITIVE_VALUE_RE.search(str(value))
+            for key, value in env.items()
+        ):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Sensitive or loader/startup environment variables require explicit permission.",
@@ -824,6 +953,13 @@ class Runtime:
             )
         self._check_command_paths(cmd)
         compact = " ".join(cmd.split()).lower()
+        if SHELL_EXPANSION_RE.search(cmd):
+            raise ToolFailure(
+                "PERMISSION_REQUIRED",
+                "Shell command substitution and parameter expansion require explicit permission.",
+                category="permission",
+                details={"permission": "shell_expansion", "command": compact},
+            )
         if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
@@ -852,6 +988,7 @@ class Runtime:
         except ValueError:
             tokens = cmd.split()
         executable = strip_redirection_prefix(tokens[0]) if tokens else ""
+        self._reject_setuid_executable(executable)
         for index, token in enumerate(tokens):
             if not token or token.startswith("-"):
                 continue
@@ -867,6 +1004,13 @@ class Runtime:
                     )
                 try:
                     self.workspace.resolve_existing(candidate)
+                except OSError as exc:
+                    raise ToolFailure(
+                        "INVALID_ARGUMENT",
+                        "Command path could not be inspected safely.",
+                        category="validation",
+                        details={"path": candidate[:200], "errno": exc.errno, "reason": exc.strerror},
+                    ) from exc
                 except ToolFailure as exc:
                     if exc.code in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
                         raise ToolFailure(
@@ -886,6 +1030,24 @@ class Runtime:
                 details={"permission": "filesystem_escape", "path": candidate},
             )
 
+    def _reject_setuid_executable(self, executable: str) -> None:
+        if not executable:
+            return
+        executable_path = Path(executable) if "/" in executable else Path(shutil.which(executable) or "")
+        if not str(executable_path):
+            return
+        try:
+            stat = executable_path.stat()
+        except OSError:
+            return
+        if stat.st_mode & 0o6000:
+            raise ToolFailure(
+                "PERMISSION_REQUIRED",
+                "Setuid/setgid executables are denied because they can bypass runtime process guards.",
+                category="permission",
+                details={"permission": "privileged_executable", "path": str(executable_path)},
+            )
+
     def _command_env(self, extra: Any) -> dict[str, str]:
         env: dict[str, str] = {}
         for key in ("PATH", "LANG", "LC_ALL"):
@@ -897,9 +1059,14 @@ class Runtime:
         if isinstance(extra, dict):
             for key, value in extra.items():
                 key_text = str(key)
-                if SENSITIVE_ENV_RE.search(key_text) or key_text.upper() in RISKY_ENV_NAMES:
+                value_text = str(value)
+                if (
+                    SENSITIVE_ENV_RE.search(key_text)
+                    or key_text.upper() in RISKY_ENV_NAMES
+                    or SENSITIVE_VALUE_RE.search(value_text)
+                ):
                     continue
-                env[key_text] = str(value)
+                env[key_text] = value_text
         return env
 
     def _make_session(self, process: subprocess.Popen[bytes], *, timeout_at: float | None = None) -> ExecSession:
@@ -947,7 +1114,18 @@ class Runtime:
             status = "exited"
         payload = session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
         payload.update({"killed": killed, "status": status})
+        with self.sessions_lock:
+            self.sessions.pop(session_id, None)
         return payload
+
+    def cancel_session(self, session_id: str) -> None:
+        with self.sessions_lock:
+            session = self.sessions.pop(session_id, None)
+        if session is None:
+            return
+        session.refresh_status()
+        if session.process.poll() is None:
+            self._terminate_process_group(session.process, signal.SIGTERM)
 
     def _get_session(self, session_id: str) -> ExecSession:
         with self.sessions_lock:
@@ -1279,12 +1457,20 @@ def command_path_candidates(token: str) -> list[str]:
     stripped = strip_redirection_prefix(token)
     if not stripped or stripped in {"-", "--"}:
         return []
-    candidates = [stripped]
+    candidates = [stripped] if is_path_like_token(stripped) else []
     if "=" in stripped and not stripped.startswith("="):
         _key, value = stripped.split("=", 1)
-        if value:
+        if value and is_path_like_token(value):
             candidates.append(value)
     return list(dict.fromkeys(candidates))
+
+
+def is_path_like_token(value: str) -> bool:
+    if value.startswith(("/", "~", ".", "../")) or "/" in value:
+        return True
+    if len(value) > 255:
+        return False
+    return "." in PurePosixPath(value).name
 
 
 def entry_for_path(path: Path, root: Path) -> dict[str, Any]:
@@ -1367,6 +1553,193 @@ def require_git() -> str:
     return git
 
 
+def redact_for_trace(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): "[REDACTED]" if SENSITIVE_ENV_RE.search(str(key)) else redact_for_trace(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_for_trace(item) for item in value[:50]]
+    if isinstance(value, tuple):
+        return [redact_for_trace(item) for item in value[:50]]
+    if isinstance(value, str):
+        if SENSITIVE_VALUE_RE.search(value):
+            return "[REDACTED]"
+        if len(value) > 240:
+            return value[:240] + "...[truncated]"
+        return value
+    return value
+
+
+class LandlockRulesetAttr(ctypes.Structure):
+    _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+
+class LandlockPathBeneathAttr(ctypes.Structure):
+    _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
+
+
+_LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def libc_syscall(number: int, *args: Any) -> int:
+    ctypes.set_errno(0)
+    return int(_LIBC.syscall(number, *args))
+
+
+def landlock_abi_version() -> int:
+    if sys.platform != "linux":
+        raise ToolFailure(
+            "SANDBOX_UNAVAILABLE",
+            "exec_command requires Linux Landlock support for kernel filesystem confinement.",
+            category="security",
+        )
+    version = libc_syscall(SYS_LANDLOCK_CREATE_RULESET, 0, 0, LANDLOCK_CREATE_RULESET_VERSION)
+    if version <= 0:
+        err = ctypes.get_errno()
+        raise ToolFailure(
+            "SANDBOX_UNAVAILABLE",
+            "Linux Landlock is unavailable; exec_command refuses to run without kernel filesystem confinement.",
+            category="security",
+            details={"errno": err, "reason": os.strerror(err) if err else "unknown"},
+        )
+    return version
+
+
+def landlock_handled_access(version: int) -> int:
+    handled = (
+        LANDLOCK_ACCESS_FS_EXECUTE
+        | LANDLOCK_ACCESS_FS_WRITE_FILE
+        | LANDLOCK_ACCESS_FS_READ_FILE
+        | LANDLOCK_ACCESS_FS_READ_DIR
+        | LANDLOCK_ACCESS_FS_REMOVE_DIR
+        | LANDLOCK_ACCESS_FS_REMOVE_FILE
+        | LANDLOCK_ACCESS_FS_MAKE_CHAR
+        | LANDLOCK_ACCESS_FS_MAKE_DIR
+        | LANDLOCK_ACCESS_FS_MAKE_REG
+        | LANDLOCK_ACCESS_FS_MAKE_SOCK
+        | LANDLOCK_ACCESS_FS_MAKE_FIFO
+        | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+        | LANDLOCK_ACCESS_FS_MAKE_SYM
+    )
+    if version >= 2:
+        handled |= LANDLOCK_ACCESS_FS_REFER
+    if version >= 3:
+        handled |= LANDLOCK_ACCESS_FS_TRUNCATE
+    if version >= 5:
+        handled |= LANDLOCK_ACCESS_FS_IOCTL_DEV
+    return handled
+
+
+def open_landlock_ruleset(workspace: Path, read_roots: list[str]) -> int:
+    version = landlock_abi_version()
+    handled = landlock_handled_access(version)
+    ruleset_attr = LandlockRulesetAttr(handled)
+    ruleset_fd = libc_syscall(
+        SYS_LANDLOCK_CREATE_RULESET,
+        ctypes.byref(ruleset_attr),
+        ctypes.sizeof(ruleset_attr),
+        0,
+    )
+    if ruleset_fd < 0:
+        err = ctypes.get_errno()
+        raise ToolFailure(
+            "SANDBOX_UNAVAILABLE",
+            "Failed to create Linux Landlock ruleset for exec_command.",
+            category="security",
+            details={"errno": err, "reason": os.strerror(err) if err else "unknown"},
+        )
+    try:
+        workspace_access = handled
+        readonly_access = handled & (
+            LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
+        )
+        device_access = readonly_access | (handled & LANDLOCK_ACCESS_FS_WRITE_FILE)
+        add_landlock_path(ruleset_fd, workspace, workspace_access)
+        for root in read_roots:
+            add_landlock_path(ruleset_fd, Path(root), readonly_access, required=False)
+        for special in ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"):
+            add_landlock_path(ruleset_fd, Path(special), device_access, required=False)
+        for special_dir in ("/proc/self", "/proc/thread-self", "/dev/fd"):
+            add_landlock_path(ruleset_fd, Path(special_dir), readonly_access, required=False)
+    except Exception:
+        os.close(ruleset_fd)
+        raise
+    return ruleset_fd
+
+
+def add_landlock_path(ruleset_fd: int, path: Path, allowed_access: int, *, required: bool = True) -> None:
+    try:
+        fd = os.open(path, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+    except OSError as exc:
+        if required:
+            raise ToolFailure(
+                "SANDBOX_UNAVAILABLE",
+                "Failed to open path while preparing Landlock sandbox.",
+                category="security",
+                details={"path": str(path), "errno": exc.errno, "reason": exc.strerror},
+            ) from exc
+        return
+    try:
+        path_attr = LandlockPathBeneathAttr(allowed_access, fd)
+        rc = libc_syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
+        if rc < 0 and required:
+            err = ctypes.get_errno()
+            raise ToolFailure(
+                "SANDBOX_UNAVAILABLE",
+                "Failed to add path to Landlock sandbox.",
+                category="security",
+                details={"path": str(path), "errno": err, "reason": os.strerror(err) if err else "unknown"},
+            )
+    finally:
+        os.close(fd)
+
+
+def restrict_self_with_landlock(ruleset_fd: int) -> None:
+    rc = int(_LIBC.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
+    if rc != 0:
+        os._exit(126)
+    rc = libc_syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0)
+    if rc != 0:
+        os._exit(126)
+    try:
+        os.close(ruleset_fd)
+    except OSError:
+        pass
+
+
+def guard_allow_roots() -> list[str]:
+    roots = {
+        "/bin",
+        "/lib",
+        "/lib64",
+        "/sbin",
+        "/usr",
+        "/etc/alternatives",
+        "/etc/ca-certificates",
+        "/etc/localtime",
+        "/etc/npmrc",
+        "/etc/pki",
+        "/etc/ssl",
+        str(Path(sys.executable).resolve().parent),
+        str(Path(sys.prefix).resolve()),
+        str(Path(sys.base_prefix).resolve()),
+    }
+    for item in os.environ.get("PATH", "").split(os.pathsep):
+        if not item:
+            continue
+        try:
+            resolved = Path(item).resolve()
+        except OSError:
+            continue
+        if resolved.is_dir() and any(
+            str(resolved).startswith(prefix) for prefix in ("/usr", "/bin", "/sbin", "/lib", "/lib64", str(Path(sys.prefix).resolve()))
+        ):
+            roots.add(str(resolved))
+    return sorted(root for root in roots if root and Path(root).is_absolute())
+
+
 def parse_diff_files(diff_text: str) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
@@ -1396,11 +1769,37 @@ def start_reader_threads(session: ExecSession) -> None:
                 append(chunk)
         except Exception:
             return
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
 
     if session.process.stdout is not None:
-        threading.Thread(target=reader, args=(session.process.stdout, session.append_stdout), daemon=True).start()
+        thread = threading.Thread(target=reader, args=(session.process.stdout, session.append_stdout), daemon=True)
+        session.reader_threads.append(thread)
+        thread.start()
     if session.process.stderr is not None:
-        threading.Thread(target=reader, args=(session.process.stderr, session.append_stderr), daemon=True).start()
+        thread = threading.Thread(target=reader, args=(session.process.stderr, session.append_stderr), daemon=True)
+        session.reader_threads.append(thread)
+        thread.start()
+
+
+def start_session_watchdog(session: ExecSession) -> None:
+    if session.timeout_at is None:
+        return
+
+    def watchdog() -> None:
+        delay = session.timeout_at - time.time() if session.timeout_at is not None else 0
+        if delay > 0:
+            time.sleep(delay)
+        if session.process.poll() is not None or session.timed_out:
+            return
+        session.timed_out = True
+        terminate_process_group(session.process, signal.SIGTERM)
+        session.refresh_status()
+
+    threading.Thread(target=watchdog, daemon=True).start()
 
 
 def identify_image(data: bytes, path: Path) -> tuple[str | None, int | None, int | None]:
@@ -1430,6 +1829,39 @@ class JsonRpcError(Exception):
 
 def invalid_request_response() -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
+
+
+def validate_rpc_envelope(request: dict[str, Any]) -> None:
+    if request.get("jsonrpc") != "2.0":
+        raise JsonRpcError(-32600, "Invalid Request: jsonrpc must be 2.0", {"reason": "jsonrpc_version"})
+    method = request.get("method")
+    if not isinstance(method, str) or not method:
+        raise JsonRpcError(-32600, "Invalid Request: method must be a string", {"reason": "method"})
+    if "id" in request and not (
+        request["id"] is None
+        or isinstance(request["id"], str)
+        or (isinstance(request["id"], int) and not isinstance(request["id"], bool))
+    ):
+        raise JsonRpcError(-32600, "Invalid Request: id must be string, integer, or null", {"reason": "id"})
+
+
+def rpc_params(request: dict[str, Any]) -> dict[str, Any]:
+    params = request.get("params", {})
+    if params is None:
+        return {}
+    if not isinstance(params, dict):
+        raise JsonRpcError(-32602, "MCP method params must be an object")
+    return params
+
+
+def validate_initialize_params(params: dict[str, Any]) -> None:
+    requested = params.get("protocolVersion")
+    if requested is not None and requested != PROTOCOL_VERSION:
+        raise JsonRpcError(
+            -32602,
+            "Unsupported MCP protocol version",
+            {"supported": [PROTOCOL_VERSION], "received": requested},
+        )
 
 
 def tool_result(payload: dict[str, Any], *, is_error: bool, content: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -1711,7 +2143,15 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "tool_name": {**string, "enum": ["exec_command", "apply_patch"]},
                 "permission": {
                     **string,
-                    "enum": ["network", "destructive_command", "long_timeout", "sensitive_env", "write_generated_or_ignored"],
+                    "enum": [
+                        "network",
+                        "destructive_command",
+                        "long_timeout",
+                        "sensitive_env",
+                        "shell_expansion",
+                        "privileged_executable",
+                        "write_generated_or_ignored",
+                    ],
                 },
                 "reason": {**string, "minLength": 1},
                 "arguments": {"type": "object", "additionalProperties": True},
@@ -1774,7 +2214,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         try:
             request = json.loads(body.decode("utf-8"))
         except json.JSONDecodeError:
-            self.send_json({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}}, status=400)
+            self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, status=400)
             return
         if isinstance(request, list):
             if not request:
@@ -1808,19 +2248,29 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
         request_id = request.get("id")
-        method = request.get("method")
-        params = request.get("params") or {}
         try:
+            validate_rpc_envelope(request)
+            method = request["method"]
+            params = rpc_params(request)
+            if not self.runtime.initialized and method not in {"initialize", "ping"}:
+                raise JsonRpcError(-32002, "Server not initialized")
             if method == "initialize":
+                validate_initialize_params(params)
                 result = self.runtime.initialize()
+                self.runtime.initialized = True
             elif method == "notifications/initialized":
+                return None
+            elif method == "notifications/cancelled":
+                session_id = params.get("session_id")
+                if isinstance(session_id, str):
+                    self.runtime.cancel_session(session_id)
                 return None
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
                 result = self.runtime.list_tools()
             elif method == "tools/call":
-                if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+                if not isinstance(params.get("name"), str):
                     raise JsonRpcError(-32602, "tools/call requires a tool name")
                 arguments = params.get("arguments") or {}
                 if not isinstance(arguments, dict):
@@ -1880,18 +2330,18 @@ def run_http(args: argparse.Namespace) -> int:
 def run_stdio(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace or os.environ.get("CODEX_TOOL_RUNTIME_WORKSPACE") or os.getcwd())
     runtime = Runtime(workspace, enable_view_image=args.enable_view_image)
+    dispatcher = StdioDispatcher(runtime)
     for line in sys.stdin:
         if not line.strip():
             continue
         try:
             request = json.loads(line)
-            fake = StdioDispatcher(runtime)
             if isinstance(request, list) and request:
-                response = [item for item in (fake.handle_rpc(part) if isinstance(part, dict) else invalid_request_response() for part in request) if item is not None]
+                response = [item for item in (dispatcher.handle_rpc(part) if isinstance(part, dict) else invalid_request_response() for part in request) if item is not None]
             elif isinstance(request, list):
                 response = invalid_request_response()
             elif isinstance(request, dict):
-                response = fake.handle_rpc(request)
+                response = dispatcher.handle_rpc(request)
             else:
                 response = invalid_request_response()
             if response is not None:
@@ -1906,22 +2356,33 @@ def run_stdio(args: argparse.Namespace) -> int:
 class StdioDispatcher:
     def __init__(self, runtime: Runtime) -> None:
         self.runtime = runtime
+        self.initialized = False
 
     def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
-        method = request.get("method")
         request_id = request.get("id")
-        params = request.get("params") or {}
         try:
+            validate_rpc_envelope(request)
+            method = request["method"]
+            params = rpc_params(request)
+            if not self.initialized and method not in {"initialize", "ping"}:
+                raise JsonRpcError(-32002, "Server not initialized")
             if method == "initialize":
+                validate_initialize_params(params)
                 result = self.runtime.initialize()
+                self.initialized = True
             elif method == "notifications/initialized":
+                return None
+            elif method == "notifications/cancelled":
+                session_id = params.get("session_id")
+                if isinstance(session_id, str):
+                    self.runtime.cancel_session(session_id)
                 return None
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
                 result = self.runtime.list_tools()
             elif method == "tools/call":
-                if not isinstance(params, dict) or not isinstance(params.get("name"), str):
+                if not isinstance(params.get("name"), str):
                     raise JsonRpcError(-32602, "tools/call requires a tool name")
                 arguments = params.get("arguments") or {}
                 if not isinstance(arguments, dict):

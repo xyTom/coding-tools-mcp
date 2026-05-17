@@ -28,6 +28,8 @@ SUITES = {
     "codex-compat": ["tests.compliance.test_codex_compat"],
     "dogfood": ["tests.compliance.test_dogfood"],
     "compliance-report": ["tests.compliance.test_compliance_report"],
+    "docs-required": ["tests.compliance.test_docs_required"],
+    "schema-drift": ["tests.compliance.test_schema_drift"],
 }
 SUITES["all"] = [module for name in SUITES for module in SUITES[name]]
 
@@ -116,10 +118,11 @@ def write_reports(
         "suite": suite_name,
         "passed": passed,
         "elapsed_seconds": round(elapsed_seconds, 3),
-        "required_tools": {
-            tool: ("passed" if passed else "failed" if result is not None else "not_run")
-            for tool in REQUIRED_TOOLS
-        },
+        "required_tools": required_tool_statuses(
+            suite_name=suite_name,
+            result=result,
+            passed=passed,
+        ),
         "security": category_status(result, "tests.compliance.test_security"),
         "e2e": category_status(result, "tests.compliance.test_e2e"),
         "codex_dogfood": category_status(result, "tests.compliance.test_dogfood"),
@@ -131,6 +134,23 @@ def write_reports(
     JSON_REPORT.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     MD_REPORT.write_text(markdown_report(report), encoding="utf-8")
     return report
+
+
+def required_tool_statuses(
+    *,
+    suite_name: str,
+    result: RecordingResult | None,
+    passed: bool,
+) -> dict[str, str]:
+    if result is None:
+        status = "not_run"
+    elif suite_name != "all":
+        status = "not_measured"
+    elif passed:
+        status = "passed"
+    else:
+        status = "failed"
+    return {tool: status for tool in REQUIRED_TOOLS}
 
 
 def category_status(result: RecordingResult | None, module_prefix: str) -> str:

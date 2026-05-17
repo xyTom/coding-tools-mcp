@@ -9,49 +9,45 @@ inspect repo -> search/read files -> apply structured patches -> run tests/comma
 
 It is not a `codex(prompt)` wrapper. It does not expose Codex accounts, memory, cloud tasks, web search, image generation, model routing, plugin marketplace, or subagent orchestration as MCP tools.
 
-## Install
+## Documentation Map
+
+- [Quickstart](docs/quickstart.md)
+- [MCP client configuration](docs/mcp-client-config.md)
+- [Tools and schemas](docs/tools-and-schemas.md)
+- [Security policy](SECURITY.md)
+- [CI and test commands](docs/ci-and-tests.md)
+- [Dogfood](docs/dogfood.md)
+- [SWE-bench evaluation](docs/swe-bench.md)
+- [Known limitations](docs/limitations.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Competitive analysis](docs/competitive-analysis.md)
+- Normative MCP runtime profile: [docs/profile-v0.1.md](docs/profile-v0.1.md)
+
+## Quickstart
 
 ```bash
-python -m pip install -e .
-```
-
-The package installs:
-
-```bash
-codex-tool-runtime-mcp
-```
-
-## Start
-
-Streamable HTTP, the P0 transport:
-
-```bash
+cd /root/codex-tool-runtime-mcp
+python -m pip install -e ".[dev]"
 codex-tool-runtime-mcp --workspace /path/to/repo --host 127.0.0.1 --port 8765
 ```
 
-Environment variable form:
+HTTP endpoint:
 
-```bash
-CODEX_TOOL_RUNTIME_WORKSPACE=/path/to/repo codex-tool-runtime-mcp
+```text
+http://127.0.0.1:8765/mcp
 ```
 
-Stdio, implemented as P1:
+Stdio:
 
 ```bash
 codex-tool-runtime-mcp --stdio --workspace /path/to/repo
 ```
 
-Image viewing is enabled by default. To disable it for a constrained deployment:
-
-```bash
-CODEX_TOOL_RUNTIME_ENABLE_VIEW_IMAGE=0 codex-tool-runtime-mcp --workspace /path/to/repo
-```
-
-Logs go to stderr. JSON-RPC protocol output is kept clean.
+Set `CODEX_TOOL_RUNTIME_TRACE=1` to emit redacted JSON tool-call trace events to stderr for local debugging. Logs stay off stdout so stdio JSON-RPC remains clean.
 
 ## MCP Client Examples
 
-### Codex
+Codex:
 
 ```toml
 [mcp_servers.codex_tool_runtime]
@@ -59,7 +55,7 @@ command = "codex-tool-runtime-mcp"
 args = ["--stdio", "--workspace", "/path/to/repo"]
 ```
 
-### Claude Code
+Claude Code:
 
 ```json
 {
@@ -72,15 +68,7 @@ args = ["--stdio", "--workspace", "/path/to/repo"]
 }
 ```
 
-### Generic Streamable HTTP Client
-
-Point the MCP client at:
-
-```text
-http://127.0.0.1:8765/mcp
-```
-
-Use MCP protocol version `2025-06-18`.
+Generic Streamable HTTP clients should use MCP protocol version `2025-06-18` and point at `http://127.0.0.1:8765/mcp`.
 
 ## Tools
 
@@ -102,11 +90,13 @@ Additional image tool exposed by default:
 
 - `view_image`
 
+For input/output schemas and result envelopes, see [docs/tools-and-schemas.md](docs/tools-and-schemas.md) and [docs/profile-v0.1.md](docs/profile-v0.1.md).
+
 ## Safety Boundary
 
 The runtime binds one workspace root per server process. Paths are workspace-relative by default. Absolute paths, `..` traversal, and symlink escapes are rejected. Recursive listing/search excludes `.git`, `.reference`, `node_modules`, `target`, `dist`, build outputs, virtualenvs, and common caches by default.
 
-`exec_command` runs under policy controls with workspace-bound cwd, timeout, output caps, sensitive and loader/startup environment rejection, destructive command checks, network-looking command checks, indirect absolute-path checks, and session deadline enforcement. This is still not an OS/container sandbox; see [SECURITY.md](SECURITY.md).
+`exec_command` runs under policy controls with workspace-bound cwd, timeout, output caps, sensitive-value and loader/startup environment rejection, destructive command checks, network-looking command checks, shell-expansion permission gates, indirect absolute-path checks, Linux Landlock filesystem confinement, cancellation/kill cleanup, session deadline watchdogs, and bounded session buffers. This is still not a complete OS/container sandbox; see [SECURITY.md](SECURITY.md).
 
 ## Compliance
 
@@ -114,40 +104,43 @@ The runtime binds one workspace root per server process. Paths are workspace-rel
 make compliance
 ```
 
-Current local result:
+The compliance report files are overwritten by the most recent reported suite. Inspect the `suite` field in [reports/compliance/latest.json](reports/compliance/latest.json) before citing the result as full compliance evidence. Non-`all` reports mark required tool coverage as `not_measured`.
 
-- report: [reports/compliance/latest.md](reports/compliance/latest.md)
-- JSON: [reports/compliance/latest.json](reports/compliance/latest.json)
-- status: `passed=true`
-- tests: 44 run, 44 passed, 0 skips
-
-GitHub Actions also runs compliance:
-
-- latest verified run for the previous pushed commit: https://github.com/ytagent/codex-tool-runtime-mcp/actions/runs/25957328972
+GitHub Actions also runs compliance. Historical run `25957328972` passed for an earlier commit; final release evidence must cite the final pushed commit and its GitHub Actions run.
 
 ## Dogfood And Benchmark
 
-Dogfood report:
+Dogfood:
 
 - [reports/dogfood/codex-on-mcp.md](reports/dogfood/codex-on-mcp.md)
 - conclusion: `PASS`
 
-SWE-bench smoke/regression report:
+SWE-bench:
 
 - [reports/benchmark/swebench-regression.md](reports/benchmark/swebench-regression.md)
-- conclusion: `INCONCLUSIVE`
+- [reports/benchmark/swebench-official-attempt.md](reports/benchmark/swebench-official-attempt.md)
+- default smoke conclusion: `PREFLIGHT_ONLY`
+- explicit official-harness attempt in this container: `BLOCKED`
 
-The SWE-bench official harness was not run in this container because Docker and the `swebench` package are missing. Placeholder predictions and the smoke subset are checked in so the official command path is reproducible once infrastructure is available.
+The repository does not claim SWE-bench pass. Docker or harness availability can block official evaluation, and checked-in predictions are placeholders until replaced with real baseline and MCP-candidate patches.
 
 ## Development Commands
 
 ```bash
+make lint
+make typecheck
+make test
 make test-mcp-contract
 make test-tool-golden
 make test-security
 make test-e2e
 make test-codex-compat
+make test-docs-required
+make test-schema-drift
 make dogfood-mcp
+make dogfood-runner
+make dogfood-smoke
 make benchmark-smoke
-make report
+make compliance
+make ci
 ```

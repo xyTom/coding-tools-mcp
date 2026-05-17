@@ -165,17 +165,23 @@ class MCPClient:
         )
 
     def close(self) -> None:
-        if self.process is None or self.process.poll() is not None:
+        if self.process is None:
             return
         try:
-            os.killpg(self.process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        try:
-            self.process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            os.killpg(self.process.pid, signal.SIGKILL)
-            self.process.wait(timeout=2)
+            if self.process.poll() is None:
+                try:
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                    self.process.wait(timeout=2)
+        finally:
+            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                if stream is not None:
+                    stream.close()
 
     def initialize(self) -> dict[str, Any]:
         if self.initialized:
@@ -269,12 +275,20 @@ class MCPClient:
     def stdout_snapshot(self) -> str:
         if self.process is None or self.process.stdout is None:
             return ""
+        return self._stream_snapshot(self.process.stdout)
+
+    def stderr_snapshot(self) -> str:
+        if self.process is None or self.process.stderr is None:
+            return ""
+        return self._stream_snapshot(self.process.stderr)
+
+    def _stream_snapshot(self, stream: Any) -> str:
         chunks: list[str] = []
         while True:
-            readable, _, _ = select.select([self.process.stdout], [], [], 0)
+            readable, _, _ = select.select([stream], [], [], 0)
             if not readable:
                 break
-            chunk = os.read(self.process.stdout.fileno(), 4096).decode("utf-8", errors="replace")
+            chunk = os.read(stream.fileno(), 4096).decode("utf-8", errors="replace")
             if not chunk:
                 break
             chunks.append(chunk)

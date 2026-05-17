@@ -45,30 +45,8 @@
       "status": "PASS"
     }
   ],
-  "codex_version": null,
-  "conclusion": "PASS",
   "direct_bypass": false,
   "endpoint": "http://127.0.0.1:8765/mcp",
-  "final_git_diff": "{\"diff\": \"--- a/tiny-js-project/src/math.js\\n+++ b/tiny-js-project/src/math.js\\n@@ -1,5 +1,5 @@\\n function add(a, b) {\\n\\n-  return a - b;\\n\\n+  return a + b;\\n\\n }\\n\\n \\n\\n module.exports = { add };\\n\\n--- a/tiny-python-project/src/math_utils.py\\n+++ b/tiny-python-project/src/math_utils.py\\n@@ -1,2 +1,6 @@\\n def add(a, b):\\n\\n     return a + b\\n\\n+\\n\\n+\\n\\n+def multiply(a, b):\\n\\n+    return a * b\\n\", \"files\": [{\"binary\": false, \"path\": \"tiny-js-project/src/math.js\", \"status\": \"modified\"}, {\"binary\": false, \"path\": \"tiny-python-project/src/math_utils.py\", \"status\": \"modified\"}], \"ok\": true, \"truncated\": false, \"warnings\": [\"non-git diff fallback\"]}",
-  "fixture_root": "/tmp/codex-mcp-dogfood-jpejrw23",
-  "initialize": {
-    "capabilities": {
-      "logging": {},
-      "tools": {
-        "listChanged": false
-      }
-    },
-    "instructions": "Use these tools only for local coding runtime operations inside the configured workspace.",
-    "protocolVersion": "2025-06-18",
-    "serverInfo": {
-      "name": "codex-tool-runtime-mcp",
-      "title": "Codex Tool Runtime MCP",
-      "version": "0.1.3"
-    }
-  },
-  "known_limitations": [],
-  "prompt": "Use only MCP tools to search/read, patch, test, exercise stdin, and inspect diff for deterministic fixtures.",
-  "server_command": "codex-tool-runtime-mcp --workspace {workspace} --host 127.0.0.1 --port 8765",
   "tool_calls": [
     {
       "arguments": {
@@ -249,20 +227,6 @@
       "summary": "{\"diff\": \"--- a/tiny-js-project/src/math.js\\n+++ b/tiny-js-project/src/math.js\\n@@ -1,5 +1,5 @@\\n function add(a, b) {\\n\\n-  return a - b;\\n\\n+  return a + b;\\n\\n }\\n\\n \\n\\n mod...",
       "tool": "git_diff"
     }
-  ],
-  "tools": [
-    "apply_patch",
-    "exec_command",
-    "git_diff",
-    "git_status",
-    "kill_session",
-    "list_dir",
-    "list_files",
-    "read_file",
-    "request_permissions",
-    "search_text",
-    "view_image",
-    "write_stdin"
   ],
   "workspace": "/tmp/codex-mcp-dogfood-jpejrw23/workspace"
 }

@@ -495,6 +495,18 @@ def write_reports(report_json: Path, report_md: Path, report: dict[str, Any]) ->
     report_md.write_text(render_markdown(report), encoding="utf-8")
 
 
+def write_transcript(path: Path, report: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    transcript = {
+        "endpoint": report.get("endpoint"),
+        "workspace": report.get("workspace"),
+        "direct_bypass": report.get("direct_bypass"),
+        "tool_calls": report.get("tool_calls", []),
+        "cases": report.get("cases", []),
+    }
+    path.write_text(json.dumps(transcript, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     lines = [
         "# Codex-on-MCP Dogfood Report",
@@ -541,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--startup-timeout", type=float, default=5.0)
     parser.add_argument("--report-json", type=Path, default=ROOT / "reports/dogfood/codex-on-mcp.json")
     parser.add_argument("--report-md", type=Path, default=ROOT / "reports/dogfood/codex-on-mcp.md")
+    parser.add_argument("--transcript-json", type=Path, default=ROOT / "docs/dogfood/codex-on-mcp-transcript.json")
     args = parser.parse_args(argv)
 
     fixture_root, workspace = prepare_workspace(args.fixture_root)
@@ -567,6 +580,7 @@ def main(argv: list[str] | None = None) -> int:
         if client is None:
             report["known_limitations"].append(f"No local MCP HTTP server was reachable: {connect_error}")
             write_reports(args.report_json, args.report_md, report)
+            write_transcript(args.transcript_json, report)
             return 2
         tools = client.list_tools()
         adapter = ToolAdapter(tools)
@@ -585,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
             report["conclusion"] = "FAIL"
             report["known_limitations"].append(f"Required MCP tools missing: {', '.join(missing)}")
             write_reports(args.report_json, args.report_md, report)
+            write_transcript(args.transcript_json, report)
             return 1
         runner = DogfoodRunner(client, adapter)
         cases = runner.run_all()
@@ -594,6 +609,7 @@ def main(argv: list[str] | None = None) -> int:
         report["final_git_diff"] = result_text(final_diff)
         report["conclusion"] = "PASS" if all(case.status == "PASS" for case in cases) else "FAIL"
         write_reports(args.report_json, args.report_md, report)
+        write_transcript(args.transcript_json, report)
         return 0 if report["conclusion"] == "PASS" else 1
     finally:
         if server is not None:

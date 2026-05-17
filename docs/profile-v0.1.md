@@ -51,7 +51,7 @@ The server must support `initialize`, `notifications/initialized`, `ping`, `tool
   "serverInfo": {
     "name": "codex-tool-runtime-mcp",
     "title": "Codex Tool Runtime MCP",
-    "version": "0.1.0"
+    "version": "0.1.3"
   },
   "instructions": "Use these tools only for local coding runtime operations inside the configured workspace."
 }
@@ -413,6 +413,7 @@ Input schema:
       "items": { "type": "string" },
       "default": ["**/*"]
     },
+    "glob": { "type": "string" },
     "exclude_patterns": {
       "type": "array",
       "items": { "type": "string" },
@@ -484,6 +485,7 @@ Input schema:
     "regex": { "type": "boolean", "default": false },
     "case_sensitive": { "type": "boolean", "default": false },
     "include_globs": { "type": "array", "items": { "type": "string" }, "default": [] },
+    "glob": { "type": "string" },
     "exclude_globs": { "type": "array", "items": { "type": "string" }, "default": [] },
     "context_lines": { "type": "integer", "minimum": 0, "maximum": 5, "default": 0 },
     "max_results": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 },
@@ -986,7 +988,15 @@ Input schema:
     },
     "permission": {
       "type": "string",
-      "enum": ["network", "destructive_command", "long_timeout", "sensitive_env", "write_generated_or_ignored"]
+      "enum": [
+        "network",
+        "destructive_command",
+        "long_timeout",
+        "sensitive_env",
+        "shell_expansion",
+        "privileged_executable",
+        "write_generated_or_ignored"
+      ]
     },
     "reason": { "type": "string", "minLength": 1 },
     "arguments": { "type": "object", "additionalProperties": true },
