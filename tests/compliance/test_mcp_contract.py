@@ -6,11 +6,20 @@ import select
 import signal
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
 
-from tests.compliance.mcp_client import FORBIDDEN_TOOL_NAMES, FORBIDDEN_TOOL_TERMS, MCPClient, MCPError, REQUIRED_TOOLS
+from tests.compliance.mcp_client import (
+    FORBIDDEN_TOOL_NAMES,
+    FORBIDDEN_TOOL_TERMS,
+    MCPClient,
+    MCPError,
+    REQUIRED_TOOLS,
+    default_server_command,
+    free_port,
+)
 from tests.compliance.test_support import ComplianceTestCase
 
 
@@ -175,6 +184,37 @@ class MCPContractTests(ComplianceTestCase):
         self.assertEqual(body.get("error", {}).get("code"), -32600)
         self.assertIn("Unsupported MCP protocol version", body.get("error", {}).get("message", ""))
 
+    def test_http_rejects_malformed_json_rpc_envelopes_and_params(self) -> None:
+        cases = [
+            ({"id": 1, "method": "ping", "params": {}}, -32600),
+            ({"jsonrpc": "2.0", "id": True, "method": "ping", "params": {}}, -32600),
+            ({"jsonrpc": "2.0", "id": 2, "method": "ping", "params": []}, -32602),
+            (
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "1900-01-01"},
+                },
+                -32602,
+            ),
+        ]
+        for payload, code in cases:
+            with self.subTest(payload=payload):
+                response = self.raw_post(payload)
+                self.assertEqual(response.get("jsonrpc"), "2.0")
+                self.assertEqual(response.get("error", {}).get("code"), code)
+
+    def test_http_rejects_tools_before_initialize(self) -> None:
+        process, url = self.start_raw_http_server()
+        try:
+            self.wait_for_ping(url)
+            response = self.raw_post_to(url, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+            self.assertEqual(response.get("error", {}).get("code"), -32002)
+            self.assertIn("not initialized", response.get("error", {}).get("message", "").lower())
+        finally:
+            self.stop_process(process)
+
     def test_stdio_transport_uses_newline_delimited_json_rpc_only(self) -> None:
         process = subprocess.Popen(
             [
@@ -232,6 +272,49 @@ class MCPContractTests(ComplianceTestCase):
                 if stream is not None:
                     stream.close()
 
+    def test_stdio_rejects_preinitialize_calls_and_accepts_cancel_notification(self) -> None:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "codex_tool_runtime_mcp",
+                "--workspace",
+                str(self.workspace.root),
+                "--stdio",
+            ],
+            cwd=str(self.workspace.root),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            rejected = self.stdio_rpc_allow_error(
+                process,
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            )
+            self.assertEqual(rejected.get("error", {}).get("code"), -32002)
+
+            initialize = self.stdio_rpc(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "x"}},
+                },
+            )
+            self.assertEqual(initialize.get("result", {}).get("protocolVersion"), "2025-06-18")
+
+            self.stdio_send(
+                process,
+                {"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"session_id": "missing"}},
+            )
+            self.assert_no_stdio_response(process)
+        finally:
+            self.stop_process(process)
+
     def assert_content_text_mirrors_structured_content(self, result: dict[str, Any]) -> dict[str, Any]:
         structured = result.get("structuredContent")
         self.assertIsInstance(structured, dict, f"structuredContent must be an object: {result!r}")
@@ -252,6 +335,15 @@ class MCPContractTests(ComplianceTestCase):
 
     def stdio_rpc(self, process: subprocess.Popen[str], payload: dict[str, Any]) -> dict[str, Any]:
         self.stdio_send(process, payload)
+        response = self.stdio_read_response(process, payload)
+        self.assertNotIn("error", response, f"unexpected stdio JSON-RPC error: {response!r}")
+        return response
+
+    def stdio_rpc_allow_error(self, process: subprocess.Popen[str], payload: dict[str, Any]) -> dict[str, Any]:
+        self.stdio_send(process, payload)
+        return self.stdio_read_response(process, payload)
+
+    def stdio_read_response(self, process: subprocess.Popen[str], payload: dict[str, Any]) -> dict[str, Any]:
         self.assertIsNotNone(process.stdout)
         readable, _, _ = select.select([process.stdout], [], [], 5)
         self.assertTrue(readable, "stdio server did not produce a JSON-RPC response")
@@ -261,7 +353,6 @@ class MCPContractTests(ComplianceTestCase):
         response = json.loads(line)
         self.assertEqual(response.get("jsonrpc"), "2.0")
         self.assertEqual(response.get("id"), payload.get("id"))
-        self.assertNotIn("error", response, f"unexpected stdio JSON-RPC error: {response!r}")
         return response
 
     def assert_no_stdio_response(self, process: subprocess.Popen[str]) -> None:
@@ -292,6 +383,64 @@ class MCPContractTests(ComplianceTestCase):
             for key in ("anyOf", "oneOf", "allOf"):
                 for child in node.get(key, []):
                     self.assert_schema_node(child)
+
+    def raw_post(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.assertIsNotNone(self.client.url)
+        return self.raw_post_to(str(self.client.url), payload)
+
+    def raw_post_to(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        data = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                "MCP-Protocol-Version": "2025-06-18",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def start_raw_http_server(self) -> tuple[subprocess.Popen[str], str]:
+        port = free_port()
+        cmd = default_server_command(self.workspace.root, port)
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(self.workspace.root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        return process, f"http://127.0.0.1:{port}/mcp"
+
+    def wait_for_ping(self, url: str) -> None:
+        deadline = time.time() + 10
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            try:
+                self.raw_post_to(url, {"jsonrpc": "2.0", "id": 99, "method": "ping", "params": {}})
+                return
+            except Exception as exc:  # noqa: BLE001 - startup retry records last failure
+                last_error = exc
+                time.sleep(0.1)
+        raise AssertionError(f"server did not accept ping: {last_error!r}")
+
+    def stop_process(self, process: subprocess.Popen[str]) -> None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=2)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
 
 
 def canonical_tool_catalog(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -8,9 +8,9 @@ This report summarizes the recovered rollout on branch `recover-rollout-2026-05-
 - `python -m pip install -e ".[dev]"`: passed.
 - `make lint`: passed.
 - `make typecheck`: passed.
-- `make test`: passed, `56` tests.
+- `make test`: passed, `59` tests.
 - `make ci`: passed with lint, typecheck, unittest discovery, protocol/integration gates, docs/schema gates, dogfood smoke, and SWE-bench preflight.
-- `make compliance`: passed, `56` tests, `suite: all`.
+- `make compliance`: passed, `59` tests, `suite: all`.
 - `make dogfood-runner DOGFOOD_PORT=8765`: passed; deterministic HTTP dogfood report conclusion `PASS`.
 - `make benchmark-smoke`: passed; default SWE-bench smoke conclusion `PREFLIGHT_ONLY`.
 - Explicit official SWE-bench attempt command: ran and produced `BLOCKED` with raw pip-install and harness-help logs.
@@ -27,6 +27,7 @@ This report summarizes the recovered rollout on branch `recover-rollout-2026-05-
 ## Implemented Improvements
 
 - MCP protocol handling validates JSON-RPC envelopes, params objects, initialize protocol version, initialized state, cancellation notifications, stdio session continuity, and parse-error IDs.
+- Adversarial protocol tests now pin malformed JSON-RPC envelopes, invalid params, pre-initialize tool calls, stdio pre-initialize rejection, and cancellation notifications.
 - Security hardening includes shell-expansion gating, setuid/setgid executable rejection, secret-value environment filtering, Linux Landlock filesystem confinement, direct syscall read/write denial coverage, cancellation/kill cleanup, watchdog-backed session deadlines, bounded session buffers, and reader-thread drain on process exit.
 - Observability includes opt-in `CODEX_TOOL_RUNTIME_TRACE=1` JSON tool-call traces on stderr with secret redaction and no stdout protocol pollution.
 - Compliance report semantics no longer overclaim all required tools for partial suites; non-`all` suites mark required tool coverage as `not_measured`.

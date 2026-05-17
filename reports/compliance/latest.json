@@ -1,8 +1,8 @@
 {
   "codex_dogfood": "passed",
-  "commit": "180184cdc9371a5f0e22f8cf67cc1a3a6a9db3d4",
+  "commit": "52a6249ee18b31fcc536040ad24139c7c62f1d9b",
   "e2e": "passed",
-  "elapsed_seconds": 13.128,
+  "elapsed_seconds": 14.071,
   "failures": [],
   "passed": true,
   "profile": "codex-tool-runtime-mcp-v0.1",
@@ -23,6 +23,6 @@
   "security": "passed",
   "skipped": [],
   "suite": "all",
-  "tests_run": 56,
+  "tests_run": 59,
   "write_only": false
 }
