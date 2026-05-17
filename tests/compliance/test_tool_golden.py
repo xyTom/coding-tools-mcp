@@ -246,6 +246,7 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             payload = self.assert_tool_success(started)
             session_id = payload.get("session_id")
             self.assertIsInstance(session_id, str, f"long-running command must return session_id: {payload!r}")
+            self.assertIn("ready", self.tool_text(started))
             hello = client.call_tool("write_stdin", {"session_id": session_id, "chars": "hello\n"})
             self.assertIn("echo:hello", self.tool_text(hello))
             client.call_tool("write_stdin", {"session_id": session_id, "chars": "exit\n"})
