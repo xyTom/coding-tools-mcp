@@ -5,10 +5,10 @@
     "--depth",
     "1",
     "https://github.com/pallets/click.git",
-    "/tmp/codex-real-workloads-5clvami6/python-click"
+    "/tmp/codex-real-workloads-34cnnc2e/python-click"
   ],
-  "elapsed_seconds": 0.575,
+  "elapsed_seconds": 0.825,
   "returncode": 0,
-  "stderr": "Cloning into '/tmp/codex-real-workloads-5clvami6/python-click'...\n",
+  "stderr": "Cloning into '/tmp/codex-real-workloads-34cnnc2e/python-click'...\n",
   "stdout": ""
 }

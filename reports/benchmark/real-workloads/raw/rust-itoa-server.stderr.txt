@@ -1,0 +1,8 @@
+codex-tool-runtime-mcp listening on http://127.0.0.1:8872/mcp
+"POST /mcp HTTP/1.1" 200 -
+"POST /mcp HTTP/1.1" 202 -
+"POST /mcp HTTP/1.1" 200 -
+"POST /mcp HTTP/1.1" 200 -
+"POST /mcp HTTP/1.1" 200 -
+"POST /mcp HTTP/1.1" 200 -
+"POST /mcp HTTP/1.1" 200 -

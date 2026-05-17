@@ -1,0 +1,14 @@
+{
+  "command": [
+    "git",
+    "clone",
+    "--depth",
+    "1",
+    "https://github.com/dtolnay/itoa.git",
+    "/tmp/codex-real-workloads-34cnnc2e/rust-itoa"
+  ],
+  "elapsed_seconds": 0.491,
+  "returncode": 0,
+  "stderr": "Cloning into '/tmp/codex-real-workloads-34cnnc2e/rust-itoa'...\n",
+  "stdout": ""
+}

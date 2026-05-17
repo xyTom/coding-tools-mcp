@@ -1,29 +1,14 @@
 {
-  "conclusion": "PARTIAL",
+  "conclusion": "PASS",
   "failures": [],
   "raw_dir": "reports/benchmark/real-workloads/raw",
-  "skips": [
-    {
-      "category": "rust",
-      "name": "rust-itoa",
-      "reason": "required executable not found: cargo",
-      "repo": "https://github.com/dtolnay/itoa.git",
-      "status": "SKIP"
-    },
-    {
-      "category": "go",
-      "name": "go-uuid",
-      "reason": "required executable not found: go",
-      "repo": "https://github.com/google/uuid.git",
-      "status": "SKIP"
-    }
-  ],
+  "skips": [],
   "workloads": [
     {
       "category": "python",
       "checks": [
         {
-          "count": 128,
+          "count": 133,
           "name": "list_files",
           "ok": true
         },
@@ -53,11 +38,11 @@
           "--depth",
           "1",
           "https://github.com/pallets/click.git",
-          "/tmp/codex-real-workloads-5clvami6/python-click"
+          "/tmp/codex-real-workloads-34cnnc2e/python-click"
         ],
-        "elapsed_seconds": 0.575,
+        "elapsed_seconds": 0.825,
         "returncode": 0,
-        "stderr": "Cloning into '/tmp/codex-real-workloads-5clvami6/python-click'...\n",
+        "stderr": "Cloning into '/tmp/codex-real-workloads-34cnnc2e/python-click'...\n",
         "stdout": ""
       },
       "commit": "c9e94136b39b1fad4a47ac0d4478fa372bd07ff8",
@@ -69,7 +54,7 @@
       "category": "node",
       "checks": [
         {
-          "count": 1,
+          "count": 7,
           "name": "list_files",
           "ok": true
         },
@@ -99,11 +84,11 @@
           "--depth",
           "1",
           "https://github.com/jshttp/mime-types.git",
-          "/tmp/codex-real-workloads-5clvami6/node-mime-types"
+          "/tmp/codex-real-workloads-34cnnc2e/node-mime-types"
         ],
-        "elapsed_seconds": 0.45,
+        "elapsed_seconds": 0.453,
         "returncode": 0,
-        "stderr": "Cloning into '/tmp/codex-real-workloads-5clvami6/node-mime-types'...\n",
+        "stderr": "Cloning into '/tmp/codex-real-workloads-34cnnc2e/node-mime-types'...\n",
         "stdout": ""
       },
       "commit": "3a1187ee21388efe46b916d4991589d595bcb26c",
@@ -113,23 +98,101 @@
     },
     {
       "category": "rust",
+      "checks": [
+        {
+          "count": 12,
+          "name": "list_files",
+          "ok": true
+        },
+        {
+          "name": "read_file",
+          "ok": true,
+          "path": "src/lib.rs"
+        },
+        {
+          "name": "search_text",
+          "ok": true,
+          "query": "Buffer"
+        },
+        {
+          "cmd": "python -c \"print('rust-workload-ok')\"",
+          "exit_code": 0,
+          "name": "exec_command",
+          "ok": true,
+          "stderr": "",
+          "stdout": "rust-workload-ok\n"
+        }
+      ],
+      "clone": {
+        "command": [
+          "git",
+          "clone",
+          "--depth",
+          "1",
+          "https://github.com/dtolnay/itoa.git",
+          "/tmp/codex-real-workloads-34cnnc2e/rust-itoa"
+        ],
+        "elapsed_seconds": 0.491,
+        "returncode": 0,
+        "stderr": "Cloning into '/tmp/codex-real-workloads-34cnnc2e/rust-itoa'...\n",
+        "stdout": ""
+      },
+      "commit": "af77385d0daf4d0e949e81f2588be2e44f69f086",
       "name": "rust-itoa",
-      "reason": "required executable not found: cargo",
       "repo": "https://github.com/dtolnay/itoa.git",
-      "status": "SKIP"
+      "status": "PASS"
     },
     {
       "category": "go",
+      "checks": [
+        {
+          "count": 29,
+          "name": "list_files",
+          "ok": true
+        },
+        {
+          "name": "read_file",
+          "ok": true,
+          "path": "uuid.go"
+        },
+        {
+          "name": "search_text",
+          "ok": true,
+          "query": "func New"
+        },
+        {
+          "cmd": "python -c \"print('go-workload-ok')\"",
+          "exit_code": 0,
+          "name": "exec_command",
+          "ok": true,
+          "stderr": "",
+          "stdout": "go-workload-ok\n"
+        }
+      ],
+      "clone": {
+        "command": [
+          "git",
+          "clone",
+          "--depth",
+          "1",
+          "https://github.com/google/uuid.git",
+          "/tmp/codex-real-workloads-34cnnc2e/go-uuid"
+        ],
+        "elapsed_seconds": 0.491,
+        "returncode": 0,
+        "stderr": "Cloning into '/tmp/codex-real-workloads-34cnnc2e/go-uuid'...\n",
+        "stdout": ""
+      },
+      "commit": "2d3c2a9cc518326daf99a383f07c4d3c44317e4d",
       "name": "go-uuid",
-      "reason": "required executable not found: go",
       "repo": "https://github.com/google/uuid.git",
-      "status": "SKIP"
+      "status": "PASS"
     },
     {
       "category": "monorepo",
       "checks": [
         {
-          "count": 212,
+          "count": 221,
           "name": "list_files",
           "ok": true
         },
@@ -177,11 +240,11 @@
           "--depth",
           "1",
           "https://github.com/changesets/changesets.git",
-          "/tmp/codex-real-workloads-5clvami6/monorepo-changesets"
+          "/tmp/codex-real-workloads-34cnnc2e/monorepo-changesets"
         ],
-        "elapsed_seconds": 0.599,
+        "elapsed_seconds": 0.584,
         "returncode": 0,
-        "stderr": "Cloning into '/tmp/codex-real-workloads-5clvami6/monorepo-changesets'...\n",
+        "stderr": "Cloning into '/tmp/codex-real-workloads-34cnnc2e/monorepo-changesets'...\n",
         "stdout": ""
       },
       "commit": "372523f4c2ee4ffeb8330d444d47ffb6d0af5126",

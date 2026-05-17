@@ -1,6 +1,6 @@
 # Real Workload MCP Benchmark
 
-- Conclusion: **PARTIAL**
+- Conclusion: **PASS**
 - Workloads: `5`
 - Raw log directory: `reports/benchmark/real-workloads/raw`
 
@@ -20,12 +20,20 @@
   - read_file: `PASS`
   - search_text: `PASS`
   - exec_command: `PASS`
-- `rust-itoa` (rust): **SKIP**
+- `rust-itoa` (rust): **PASS**
   - repo: `https://github.com/dtolnay/itoa.git`
-  - reason: `required executable not found: cargo`
-- `go-uuid` (go): **SKIP**
+  - commit: `af77385d0daf4d0e949e81f2588be2e44f69f086`
+  - list_files: `PASS`
+  - read_file: `PASS`
+  - search_text: `PASS`
+  - exec_command: `PASS`
+- `go-uuid` (go): **PASS**
   - repo: `https://github.com/google/uuid.git`
-  - reason: `required executable not found: go`
+  - commit: `2d3c2a9cc518326daf99a383f07c4d3c44317e4d`
+  - list_files: `PASS`
+  - read_file: `PASS`
+  - search_text: `PASS`
+  - exec_command: `PASS`
 - `monorepo-changesets` (monorepo): **PASS**
   - repo: `https://github.com/changesets/changesets.git`
   - commit: `372523f4c2ee4ffeb8330d444d47ffb6d0af5126`

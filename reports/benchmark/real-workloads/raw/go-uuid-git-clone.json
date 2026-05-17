@@ -1,0 +1,14 @@
+{
+  "command": [
+    "git",
+    "clone",
+    "--depth",
+    "1",
+    "https://github.com/google/uuid.git",
+    "/tmp/codex-real-workloads-34cnnc2e/go-uuid"
+  ],
+  "elapsed_seconds": 0.491,
+  "returncode": 0,
+  "stderr": "Cloning into '/tmp/codex-real-workloads-34cnnc2e/go-uuid'...\n",
+  "stdout": ""
+}
