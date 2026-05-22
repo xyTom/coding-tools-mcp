@@ -7,6 +7,9 @@ name = "coding-tools-mcp"
 version = "0.1.4"
 description = "Workspace-confined coding tools exposed as an MCP server."
 requires-python = ">=3.11"
+dependencies = [
+  "PyJWT>=2.8",
+]
 readme = "README.md"
 license = "LicenseRef-Coding-Tools-MCP-Source-Available"
 authors = [{ name = "Coding Tools MCP Contributors" }]
