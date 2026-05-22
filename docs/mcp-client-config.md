@@ -62,4 +62,4 @@ Configure the remote MCP client with:
 URL: https://<tunnel-host>/mcp
 ```
 
-Static bearer-token auth is available for MCP clients that support custom `Authorization` headers. Clients that cannot send custom bearer headers should use anonymous `read-only` mode only for local/testing tunnels, or be placed behind an external auth proxy for production use. See [Remote MCP](remote-mcp.md) for details.
+Static bearer-token auth is available for MCP clients that support custom `Authorization` headers. MCP clients that speak OAuth 2.1 Authorization Code + PKCE can use `--oauth-mode` instead, which publishes the standard discovery endpoints (`/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`) and an HTML password gate on `/oauth/authorize`. Clients that cannot send custom bearer headers and do not speak OAuth should use anonymous `read-only` mode only for local/testing tunnels, or be placed behind an external auth proxy for production use. See [Remote MCP](remote-mcp.md) for details.
