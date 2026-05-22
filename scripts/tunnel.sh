@@ -28,11 +28,15 @@ Defaults:
 
 Environment:
   CODING_TOOLS_MCP_AUTO_INSTALL_TUNNEL=1  install missing tunnel CLI without prompting
-  CODING_TOOLS_MCP_AUTH_MODE=bearer       bearer or noauth
+  CODING_TOOLS_MCP_AUTH_MODE=bearer       bearer, noauth, or oauth
   CODING_TOOLS_MCP_PORT=8765
   CODING_TOOLS_MCP_TOOL_PROFILE=read-only
   CODING_TOOLS_MCP_AUTH_TOKEN=<existing-token>
   CODING_TOOLS_MCP_SERVER_BIN=coding-tools-mcp
+
+OAuth mode also requires CODING_TOOLS_MCP_OAUTH_CLIENT_ID,
+CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET, CODING_TOOLS_MCP_OAUTH_PASSWORD,
+and CODING_TOOLS_MCP_SERVER_URL. See docs/remote-mcp.md.
 EOF
     ;;
   *)

@@ -125,6 +125,23 @@ ensure_tunnel_command() {
   fi
 }
 
+require_oauth_env() {
+  local missing=()
+  [[ -n "${CODING_TOOLS_MCP_OAUTH_CLIENT_ID:-}" ]] || missing+=(CODING_TOOLS_MCP_OAUTH_CLIENT_ID)
+  [[ -n "${CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET:-}" ]] || missing+=(CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET)
+  [[ -n "${CODING_TOOLS_MCP_OAUTH_PASSWORD:-}" ]] || missing+=(CODING_TOOLS_MCP_OAUTH_PASSWORD)
+  [[ -n "${CODING_TOOLS_MCP_SERVER_URL:-}" ]] || missing+=(CODING_TOOLS_MCP_SERVER_URL)
+  if (( ${#missing[@]} > 0 )); then
+    echo "CODING_TOOLS_MCP_AUTH_MODE=oauth requires the following env vars:" >&2
+    local v
+    for v in "${missing[@]}"; do
+      echo "  - $v" >&2
+    done
+    echo "See docs/remote-mcp.md for details." >&2
+    return 1
+  fi
+}
+
 start_coding_tools_mcp() {
   local workspace="$1"
   local port="$2"
@@ -138,9 +155,10 @@ start_coding_tools_mcp() {
     --port "$port"
     --tool-profile "$profile"
   )
-  if [[ "$auth_mode" == "bearer" ]]; then
-    args+=(--auth-token "$token")
-  fi
+  case "$auth_mode" in
+    bearer) args+=(--auth-token "$token") ;;
+    oauth) args+=(--oauth-mode) ;;
+  esac
 
   "$server_bin" "${args[@]}" &
   SERVER_PID=$!
@@ -163,8 +181,9 @@ Auth mode: $auth_mode
 $label will print an HTTPS URL.
 EOF
 
-  if [[ "$auth_mode" == "bearer" ]]; then
-    cat <<EOF
+  case "$auth_mode" in
+    bearer)
+      cat <<EOF
 
 Generic MCP clients that support custom headers should use:
 URL: https://<$host_placeholder>/mcp
@@ -174,8 +193,27 @@ Remote MCP clients that cannot send custom bearer headers should use
 CODING_TOOLS_MCP_AUTH_MODE=noauth only with read-only local/testing tunnels,
 or rely on an external auth proxy for authenticated production deployments.
 EOF
-  else
-    cat <<EOF
+      ;;
+    oauth)
+      local base="${CODING_TOOLS_MCP_SERVER_URL%/}"
+      cat <<EOF
+
+OAuth 2.1 Authorization Code + PKCE is active. MCP clients should discover
+and authenticate against CODING_TOOLS_MCP_SERVER_URL:
+
+CODING_TOOLS_MCP_SERVER_URL: $base
+Authorization metadata: $base/.well-known/oauth-authorization-server
+Protected resource:     $base/.well-known/oauth-protected-resource
+MCP endpoint:           $base/mcp
+
+The tunnel below must terminate at $base. Ephemeral tunnels (random
+subdomain per run) do not work with OAuth -- use a named cloudflared
+tunnel, an ngrok reserved domain, or a persistent devtunnel so the
+external URL matches CODING_TOOLS_MCP_SERVER_URL across restarts.
+EOF
+      ;;
+    *)
+      cat <<EOF
 
 Remote MCP client URL:
 https://<$host_placeholder>/mcp
@@ -183,5 +221,6 @@ https://<$host_placeholder>/mcp
 No Authorization header is used. Keep this profile read-only unless you
 understand the risk of exposing this tunnel publicly.
 EOF
-  fi
+      ;;
+  esac
 }

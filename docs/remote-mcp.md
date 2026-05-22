@@ -62,29 +62,27 @@ Header: Authorization: Bearer <token>
 
 ## MCP Clients With OAuth 2.1
 
-For MCP clients that perform OAuth 2.1 Authorization Code + PKCE discovery on the server URL, start the server with `--oauth-mode` (or `CODING_TOOLS_MCP_OAUTH_MODE=1`). The tunnel scripts in `scripts/` only wire up `bearer` and `noauth`, so run the server yourself and point a tunnel at the loopback port:
+For MCP clients that perform OAuth 2.1 Authorization Code + PKCE discovery on the server URL, run the tunnel script with `CODING_TOOLS_MCP_AUTH_MODE=oauth`:
 
 ```bash
 export CODING_TOOLS_MCP_OAUTH_CLIENT_ID="$(python3 -c 'import secrets; print(secrets.token_urlsafe(16))')"
 export CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export CODING_TOOLS_MCP_OAUTH_PASSWORD="<password-shown-on-the-authorize-page>"
-export CODING_TOOLS_MCP_SERVER_URL="https://<tunnel-host>"
+export CODING_TOOLS_MCP_SERVER_URL="https://<stable-tunnel-host>"
 
-coding-tools-mcp \
-  --workspace /path/to/repo \
-  --host 127.0.0.1 --port 8765 \
-  --tool-profile read-only \
-  --oauth-mode &
-
-cloudflared tunnel --url http://127.0.0.1:8765
+CODING_TOOLS_MCP_AUTH_MODE=oauth \
+CODING_TOOLS_MCP_TOOL_PROFILE=read-only \
+scripts/tunnel.sh cloudflared /path/to/repo
 ```
+
+The script adds `--oauth-mode` to the server, validates that the four required env vars are present, and prints the OAuth metadata URLs derived from `CODING_TOOLS_MCP_SERVER_URL`. The same env vars work with `scripts/install.sh --tunnel <provider> --auth-mode oauth`.
 
 Required environment variables:
 
 - `CODING_TOOLS_MCP_OAUTH_CLIENT_ID` — the only client_id the server accepts.
 - `CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET` — paired with the client_id on `/oauth/token` (accepts `client_secret_post` or HTTP Basic).
 - `CODING_TOOLS_MCP_OAUTH_PASSWORD` — the password an operator types on the `/oauth/authorize` HTML form to grant the authorization code.
-- `CODING_TOOLS_MCP_SERVER_URL` — public base URL (no trailing `/mcp`); used as the `issuer`/`aud` claim in issued tokens and in discovery metadata.
+- `CODING_TOOLS_MCP_SERVER_URL` — public base URL (no trailing `/mcp`); used as the `issuer`/`aud` claim in issued tokens and in discovery metadata. **Must match the tunnel's actual external URL.**
 
 Optional environment variables:
 
@@ -101,6 +99,16 @@ Endpoints exposed when `--oauth-mode` is active:
 
 `/mcp` accepts the issued token as `Authorization: Bearer <token>`; unauthenticated requests get HTTP `401` with a `WWW-Authenticate` header pointing at the protected-resource metadata. `--auth-token` is ignored while OAuth is active.
 
+### Stable Tunnel URLs
+
+OAuth metadata and issued JWT claims pin the public URL at server start. Ephemeral tunnels (e.g. `cloudflared tunnel --url`, default ngrok, default devtunnel) generate a fresh random subdomain each run, so the URL the script advertises to clients will not match the tunnel's actual host after any restart. Use one of:
+
+- **cloudflared named tunnel** — `cloudflared tunnel create <name>` + `cloudflared tunnel route dns <name> mcp.example.com`, then set `CODING_TOOLS_MCP_SERVER_URL=https://mcp.example.com`.
+- **ngrok reserved domain** — claim a domain in the ngrok dashboard and either configure it in `~/.config/ngrok/ngrok.yml`, or run `ngrok` yourself (`ngrok http --domain=<reserved> 8765`) and set `CODING_TOOLS_MCP_SERVER_URL=https://<reserved>` before launching the server. The bundled `scripts/tunnel-ngrok.sh` runs `ngrok http http://127.0.0.1:$PORT` without extra flags, so to attach a reserved domain you either point ngrok at it via config or run ngrok separately and start the server with `coding-tools-mcp --oauth-mode` directly.
+- **devtunnel persistent tunnel** — `devtunnel create <id>` + `devtunnel port create <id> -p 8765 --protocol http`, then `devtunnel host <id>`.
+
+If you only need ephemeral testing, prefer `bearer` mode over `oauth`.
+
 ## Tunnel Scripts
 
 Each script starts `coding-tools-mcp` on `127.0.0.1` and then starts the selected tunnel provider. If the provider CLI is missing, the script asks before installing it.
@@ -115,11 +123,20 @@ Optional environment variables:
 
 ```bash
 CODING_TOOLS_MCP_AUTO_INSTALL_TUNNEL=1
-CODING_TOOLS_MCP_AUTH_MODE=bearer
+CODING_TOOLS_MCP_AUTH_MODE=bearer        # bearer | noauth | oauth
 CODING_TOOLS_MCP_PORT=8765
 CODING_TOOLS_MCP_TOOL_PROFILE=read-only
 CODING_TOOLS_MCP_AUTH_TOKEN=<existing-token>
 CODING_TOOLS_MCP_SERVER_BIN=coding-tools-mcp
+
+# Required when CODING_TOOLS_MCP_AUTH_MODE=oauth:
+CODING_TOOLS_MCP_OAUTH_CLIENT_ID=<client-id>
+CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=<client-secret>
+CODING_TOOLS_MCP_OAUTH_PASSWORD=<authorize-page-password>
+CODING_TOOLS_MCP_SERVER_URL=https://<stable-tunnel-host>
+# Optional (oauth):
+CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=<hex-encoded-32-bytes>
+CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=2592000
 ```
 
 If the selected tunnel CLI is missing, the scripts prompt before installing it. `cloudflared` installs into `~/.local/bin` when Homebrew is unavailable; `ngrok` uses Homebrew or npm; `devtunnel` uses the Microsoft installer script.
