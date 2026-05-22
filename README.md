@@ -162,7 +162,7 @@ scripts/tunnel.sh ngrok /path/to/repo
 scripts/tunnel.sh devtunnel /path/to/repo
 ```
 
-For clients that support custom headers, use bearer-token auth with `Authorization: Bearer <token>`. Clients that cannot send custom bearer headers should use anonymous `read-only` mode only for local/testing tunnels, or be placed behind an external auth proxy for production use.
+For clients that support custom headers, use bearer-token auth with `Authorization: Bearer <token>`. For MCP clients that speak OAuth 2.1 Authorization Code + PKCE, start the server with `--oauth-mode` (or `CODING_TOOLS_MCP_OAUTH_MODE=1`) and set `CODING_TOOLS_MCP_OAUTH_CLIENT_ID`, `CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET`, `CODING_TOOLS_MCP_OAUTH_PASSWORD`, and `CODING_TOOLS_MCP_SERVER_URL`. Clients that cannot send custom bearer headers and do not speak OAuth should use anonymous `read-only` mode only for local/testing tunnels, or be placed behind an external auth proxy for production use.
 
 See [docs/remote-mcp.md](docs/remote-mcp.md) for the exact modes and security notes.
 
