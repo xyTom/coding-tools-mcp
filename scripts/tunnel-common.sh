@@ -126,20 +126,24 @@ ensure_tunnel_command() {
 }
 
 require_oauth_env() {
-  local missing=()
-  [[ -n "${CODING_TOOLS_MCP_OAUTH_CLIENT_ID:-}" ]] || missing+=(CODING_TOOLS_MCP_OAUTH_CLIENT_ID)
-  [[ -n "${CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET:-}" ]] || missing+=(CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET)
-  [[ -n "${CODING_TOOLS_MCP_OAUTH_PASSWORD:-}" ]] || missing+=(CODING_TOOLS_MCP_OAUTH_PASSWORD)
-  [[ -n "${CODING_TOOLS_MCP_SERVER_URL:-}" ]] || missing+=(CODING_TOOLS_MCP_SERVER_URL)
-  if (( ${#missing[@]} > 0 )); then
-    echo "CODING_TOOLS_MCP_AUTH_MODE=oauth requires the following env vars:" >&2
-    local v
-    for v in "${missing[@]}"; do
-      echo "  - $v" >&2
-    done
-    echo "See docs/remote-mcp.md for details." >&2
+  if [[ -z "${CODING_TOOLS_MCP_SERVER_URL:-}" ]]; then
+    {
+      echo "CODING_TOOLS_MCP_AUTH_MODE=oauth requires CODING_TOOLS_MCP_SERVER_URL"
+      echo "(the public base URL the tunnel will terminate at, e.g. https://mcp.example.com)."
+      echo "See docs/remote-mcp.md for details."
+    } >&2
     return 1
   fi
+  if [[ -z "${CODING_TOOLS_MCP_OAUTH_CLIENT_ID:-}" ]]; then
+    CODING_TOOLS_MCP_OAUTH_CLIENT_ID="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  fi
+  if [[ -z "${CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET:-}" ]]; then
+    CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  fi
+  if [[ -z "${CODING_TOOLS_MCP_OAUTH_PASSWORD:-}" ]]; then
+    CODING_TOOLS_MCP_OAUTH_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+  fi
+  export CODING_TOOLS_MCP_OAUTH_CLIENT_ID CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET CODING_TOOLS_MCP_OAUTH_PASSWORD
 }
 
 start_coding_tools_mcp() {
@@ -198,10 +202,15 @@ EOF
       local base="${CODING_TOOLS_MCP_SERVER_URL%/}"
       cat <<EOF
 
-OAuth 2.1 Authorization Code + PKCE is active. MCP clients should discover
-and authenticate against CODING_TOOLS_MCP_SERVER_URL:
+OAuth 2.1 Authorization Code + PKCE is active. Configure your MCP client
+with the following values (copy these now -- they are regenerated each run
+unless you preset the env vars):
 
-CODING_TOOLS_MCP_SERVER_URL: $base
+CODING_TOOLS_MCP_SERVER_URL=$base
+CODING_TOOLS_MCP_OAUTH_CLIENT_ID=$CODING_TOOLS_MCP_OAUTH_CLIENT_ID
+CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=$CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
+CODING_TOOLS_MCP_OAUTH_PASSWORD=$CODING_TOOLS_MCP_OAUTH_PASSWORD
+
 Authorization metadata: $base/.well-known/oauth-authorization-server
 Protected resource:     $base/.well-known/oauth-protected-resource
 MCP endpoint:           $base/mcp

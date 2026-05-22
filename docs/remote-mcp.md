@@ -62,12 +62,9 @@ Header: Authorization: Bearer <token>
 
 ## MCP Clients With OAuth 2.1
 
-For MCP clients that perform OAuth 2.1 Authorization Code + PKCE discovery on the server URL, run the tunnel script with `CODING_TOOLS_MCP_AUTH_MODE=oauth`:
+For MCP clients that perform OAuth 2.1 Authorization Code + PKCE discovery on the server URL, run the tunnel script with `CODING_TOOLS_MCP_AUTH_MODE=oauth`. The only env var you must set yourself is `CODING_TOOLS_MCP_SERVER_URL` (the script cannot know your tunnel's public URL); `CLIENT_ID`, `CLIENT_SECRET`, and `PASSWORD` are generated and printed for you on startup:
 
 ```bash
-export CODING_TOOLS_MCP_OAUTH_CLIENT_ID="$(python3 -c 'import secrets; print(secrets.token_urlsafe(16))')"
-export CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-export CODING_TOOLS_MCP_OAUTH_PASSWORD="<password-shown-on-the-authorize-page>"
 export CODING_TOOLS_MCP_SERVER_URL="https://<stable-tunnel-host>"
 
 CODING_TOOLS_MCP_AUTH_MODE=oauth \
@@ -75,16 +72,19 @@ CODING_TOOLS_MCP_TOOL_PROFILE=read-only \
 scripts/tunnel.sh cloudflared /path/to/repo
 ```
 
-The script adds `--oauth-mode` to the server, validates that the four required env vars are present, and prints the OAuth metadata URLs derived from `CODING_TOOLS_MCP_SERVER_URL`. The same env vars work with `scripts/install.sh --tunnel <provider> --auth-mode oauth`.
+The script adds `--oauth-mode` to the server and prints the OAuth metadata URLs and the generated credentials (copy them before they scroll out of view; they regenerate on every run unless you preset the env vars). The same flow works with `scripts/install.sh --tunnel <provider> --auth-mode oauth`. For local-only OAuth testing without a tunnel, `scripts/install.sh --start --auth-mode oauth` defaults `CODING_TOOLS_MCP_SERVER_URL` to `http://127.0.0.1:<port>`.
 
-Required environment variables:
+Required:
+
+- `CODING_TOOLS_MCP_SERVER_URL` — public base URL (no trailing `/mcp`); used as the `issuer`/`aud` claim in issued tokens and in discovery metadata. **Must match the tunnel's actual external URL.**
+
+Auto-generated if unset (override to keep stable values across restarts):
 
 - `CODING_TOOLS_MCP_OAUTH_CLIENT_ID` — the only client_id the server accepts.
 - `CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET` — paired with the client_id on `/oauth/token` (accepts `client_secret_post` or HTTP Basic).
 - `CODING_TOOLS_MCP_OAUTH_PASSWORD` — the password an operator types on the `/oauth/authorize` HTML form to grant the authorization code.
-- `CODING_TOOLS_MCP_SERVER_URL` — public base URL (no trailing `/mcp`); used as the `issuer`/`aud` claim in issued tokens and in discovery metadata. **Must match the tunnel's actual external URL.**
 
-Optional environment variables:
+Optional:
 
 - `CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` — hex-encoded HS256 signing key. Without it, a random key is generated per process and all tokens are invalidated on restart. Generate one with `python3 -c "import secrets; print(secrets.token_bytes(32).hex())"`.
 - `CODING_TOOLS_MCP_OAUTH_TOKEN_TTL` — access-token lifetime in seconds (default `2592000`, i.e. 30 days).
@@ -130,10 +130,11 @@ CODING_TOOLS_MCP_AUTH_TOKEN=<existing-token>
 CODING_TOOLS_MCP_SERVER_BIN=coding-tools-mcp
 
 # Required when CODING_TOOLS_MCP_AUTH_MODE=oauth:
+CODING_TOOLS_MCP_SERVER_URL=https://<stable-tunnel-host>
+# Auto-generated and printed at startup if unset:
 CODING_TOOLS_MCP_OAUTH_CLIENT_ID=<client-id>
 CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=<client-secret>
 CODING_TOOLS_MCP_OAUTH_PASSWORD=<authorize-page-password>
-CODING_TOOLS_MCP_SERVER_URL=https://<stable-tunnel-host>
 # Optional (oauth):
 CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=<hex-encoded-32-bytes>
 CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=2592000

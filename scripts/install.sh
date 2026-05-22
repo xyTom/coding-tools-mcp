@@ -46,10 +46,10 @@ Server options:
   --profile PROFILE             Tool profile. Defaults: full local, read-only tunnel.
   --auth-mode bearer|noauth|oauth
                                 Defaults: noauth local, bearer tunnel. OAuth
-                                requires CODING_TOOLS_MCP_OAUTH_CLIENT_ID,
-                                CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET,
-                                CODING_TOOLS_MCP_OAUTH_PASSWORD, and
-                                CODING_TOOLS_MCP_SERVER_URL.
+                                tunnel mode requires CODING_TOOLS_MCP_SERVER_URL
+                                (local --start defaults it to loopback).
+                                CLIENT_ID, CLIENT_SECRET, and PASSWORD are
+                                generated and printed if unset.
   --auth-token TOKEN            Bearer token. Generated if needed.
   --server-bin PATH             Use an existing coding-tools-mcp binary.
 
@@ -336,22 +336,28 @@ resolve_runtime_defaults() {
 }
 
 require_oauth_env_install() {
-  local missing=()
-  [[ -n "${CODING_TOOLS_MCP_OAUTH_CLIENT_ID:-}" ]] || missing+=(CODING_TOOLS_MCP_OAUTH_CLIENT_ID)
-  [[ -n "${CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET:-}" ]] || missing+=(CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET)
-  [[ -n "${CODING_TOOLS_MCP_OAUTH_PASSWORD:-}" ]] || missing+=(CODING_TOOLS_MCP_OAUTH_PASSWORD)
-  [[ -n "${CODING_TOOLS_MCP_SERVER_URL:-}" ]] || missing+=(CODING_TOOLS_MCP_SERVER_URL)
-  if (( ${#missing[@]} > 0 )); then
-    {
-      echo "--auth-mode oauth requires the following env vars:"
-      local v
-      for v in "${missing[@]}"; do
-        echo "  - $v"
-      done
-      echo "See docs/remote-mcp.md for details."
-    } >&2
-    exit 2
+  if [[ -z "${CODING_TOOLS_MCP_SERVER_URL:-}" ]]; then
+    if [[ "$ACTION" == "start" ]]; then
+      export CODING_TOOLS_MCP_SERVER_URL="http://127.0.0.1:$PORT"
+    else
+      {
+        echo "--auth-mode oauth requires CODING_TOOLS_MCP_SERVER_URL"
+        echo "(the public base URL the tunnel will terminate at, e.g. https://mcp.example.com)."
+        echo "See docs/remote-mcp.md for details."
+      } >&2
+      exit 2
+    fi
   fi
+  if [[ -z "${CODING_TOOLS_MCP_OAUTH_CLIENT_ID:-}" ]]; then
+    CODING_TOOLS_MCP_OAUTH_CLIENT_ID="$(generate_token)"
+  fi
+  if [[ -z "${CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET:-}" ]]; then
+    CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET="$(generate_token)"
+  fi
+  if [[ -z "${CODING_TOOLS_MCP_OAUTH_PASSWORD:-}" ]]; then
+    CODING_TOOLS_MCP_OAUTH_PASSWORD="$(generate_token)"
+  fi
+  export CODING_TOOLS_MCP_OAUTH_CLIENT_ID CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET CODING_TOOLS_MCP_OAUTH_PASSWORD
 }
 
 server_args() {
@@ -385,6 +391,9 @@ EOF
       local base="${CODING_TOOLS_MCP_SERVER_URL%/}"
       cat <<EOF
 OAuth issuer: $base
+CODING_TOOLS_MCP_OAUTH_CLIENT_ID=$CODING_TOOLS_MCP_OAUTH_CLIENT_ID
+CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=$CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
+CODING_TOOLS_MCP_OAUTH_PASSWORD=$CODING_TOOLS_MCP_OAUTH_PASSWORD
 Authorization metadata: $base/.well-known/oauth-authorization-server
 Protected resource:     $base/.well-known/oauth-protected-resource
 EOF
@@ -416,10 +425,15 @@ EOF
       local base="${CODING_TOOLS_MCP_SERVER_URL%/}"
       cat <<EOF
 
-OAuth 2.1 Authorization Code + PKCE is active. MCP clients should discover
-and authenticate against CODING_TOOLS_MCP_SERVER_URL:
+OAuth 2.1 Authorization Code + PKCE is active. Configure your MCP client
+with the following values (copy these now -- they are regenerated each run
+unless you preset the env vars):
 
-CODING_TOOLS_MCP_SERVER_URL: $base
+CODING_TOOLS_MCP_SERVER_URL=$base
+CODING_TOOLS_MCP_OAUTH_CLIENT_ID=$CODING_TOOLS_MCP_OAUTH_CLIENT_ID
+CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=$CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
+CODING_TOOLS_MCP_OAUTH_PASSWORD=$CODING_TOOLS_MCP_OAUTH_PASSWORD
+
 Authorization metadata: $base/.well-known/oauth-authorization-server
 Protected resource:     $base/.well-known/oauth-protected-resource
 MCP endpoint:           $base/mcp
