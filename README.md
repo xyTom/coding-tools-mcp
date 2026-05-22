@@ -238,5 +238,3 @@ This project is source-available, not open source. See [LICENSE](LICENSE).
 Internal evaluation, development, testing, and security review are permitted;
 redistribution, hosted third-party service use, and production commercial use
 require prior written permission.
-
-## https://linux.do/
