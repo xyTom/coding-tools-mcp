@@ -44,7 +44,12 @@ Server options:
   --workspace PATH              Workspace to expose. Default: current dir.
   --port PORT                   Local HTTP port. Default: 8765.
   --profile PROFILE             Tool profile. Defaults: full local, read-only tunnel.
-  --auth-mode bearer|noauth     Defaults: noauth local, bearer tunnel.
+  --auth-mode bearer|noauth|oauth
+                                Defaults: noauth local, bearer tunnel. OAuth
+                                tunnel mode requires CODING_TOOLS_MCP_SERVER_URL
+                                (local --start defaults it to loopback).
+                                CLIENT_ID, CLIENT_SECRET, and PASSWORD are
+                                generated and printed if unset.
   --auth-token TOKEN            Bearer token. Generated if needed.
   --server-bin PATH             Use an existing coding-tools-mcp binary.
 
@@ -320,12 +325,39 @@ resolve_runtime_defaults() {
       AUTH_MODE="${AUTH_MODE:-bearer}"
       ;;
   esac
-  if [[ "$AUTH_MODE" != "" && "$AUTH_MODE" != "bearer" && "$AUTH_MODE" != "noauth" ]]; then
-    die "--auth-mode must be bearer or noauth"
-  fi
+  case "$AUTH_MODE" in
+    ""|bearer|noauth) ;;
+    oauth) require_oauth_env_install ;;
+    *) die "--auth-mode must be bearer, noauth, or oauth" ;;
+  esac
   if [[ "$AUTH_MODE" == "bearer" && -z "$AUTH_TOKEN" ]]; then
     AUTH_TOKEN="$(generate_token)"
   fi
+}
+
+require_oauth_env_install() {
+  if [[ -z "${CODING_TOOLS_MCP_SERVER_URL:-}" ]]; then
+    if [[ "$ACTION" == "start" ]]; then
+      export CODING_TOOLS_MCP_SERVER_URL="http://127.0.0.1:$PORT"
+    else
+      {
+        echo "--auth-mode oauth requires CODING_TOOLS_MCP_SERVER_URL"
+        echo "(the public base URL the tunnel will terminate at, e.g. https://mcp.example.com)."
+        echo "See docs/remote-mcp.md for details."
+      } >&2
+      exit 2
+    fi
+  fi
+  if [[ -z "${CODING_TOOLS_MCP_OAUTH_CLIENT_ID:-}" ]]; then
+    CODING_TOOLS_MCP_OAUTH_CLIENT_ID="$(generate_token)"
+  fi
+  if [[ -z "${CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET:-}" ]]; then
+    CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET="$(generate_token)"
+  fi
+  if [[ -z "${CODING_TOOLS_MCP_OAUTH_PASSWORD:-}" ]]; then
+    CODING_TOOLS_MCP_OAUTH_PASSWORD="$(generate_token)"
+  fi
+  export CODING_TOOLS_MCP_OAUTH_CLIENT_ID CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET CODING_TOOLS_MCP_OAUTH_PASSWORD
 }
 
 server_args() {
@@ -335,9 +367,10 @@ server_args() {
     --port "$PORT"
     --tool-profile "$PROFILE"
   )
-  if [[ "$AUTH_MODE" == "bearer" ]]; then
-    args+=(--auth-token "$AUTH_TOKEN")
-  fi
+  case "$AUTH_MODE" in
+    bearer) args+=(--auth-token "$AUTH_TOKEN") ;;
+    oauth) args+=(--oauth-mode) ;;
+  esac
   printf "%s\0" "${args[@]}"
 }
 
@@ -348,11 +381,24 @@ Workspace: $WORKSPACE
 Tool profile: $PROFILE
 Auth mode: $AUTH_MODE
 EOF
-  if [[ "$AUTH_MODE" == "bearer" ]]; then
-    cat <<EOF
+  case "$AUTH_MODE" in
+    bearer)
+      cat <<EOF
 Header: Authorization: Bearer $AUTH_TOKEN
 EOF
-  fi
+      ;;
+    oauth)
+      local base="${CODING_TOOLS_MCP_SERVER_URL%/}"
+      cat <<EOF
+OAuth issuer: $base
+CODING_TOOLS_MCP_OAUTH_CLIENT_ID=$CODING_TOOLS_MCP_OAUTH_CLIENT_ID
+CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=$CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
+CODING_TOOLS_MCP_OAUTH_PASSWORD=$CODING_TOOLS_MCP_OAUTH_PASSWORD
+Authorization metadata: $base/.well-known/oauth-authorization-server
+Protected resource:     $base/.well-known/oauth-protected-resource
+EOF
+      ;;
+  esac
 }
 
 print_tunnel_config() {
@@ -366,15 +412,39 @@ Auth mode: $AUTH_MODE
 
 $label will print an HTTPS URL.
 EOF
-  if [[ "$AUTH_MODE" == "bearer" ]]; then
-    cat <<EOF
+  case "$AUTH_MODE" in
+    bearer)
+      cat <<EOF
 
 Generic MCP clients that support custom headers should use:
 URL: https://<$host_placeholder>/mcp
 Header: Authorization: Bearer $AUTH_TOKEN
 EOF
-  else
-    cat <<EOF
+      ;;
+    oauth)
+      local base="${CODING_TOOLS_MCP_SERVER_URL%/}"
+      cat <<EOF
+
+OAuth 2.1 Authorization Code + PKCE is active. Configure your MCP client
+with the following values (copy these now -- they are regenerated each run
+unless you preset the env vars):
+
+CODING_TOOLS_MCP_SERVER_URL=$base
+CODING_TOOLS_MCP_OAUTH_CLIENT_ID=$CODING_TOOLS_MCP_OAUTH_CLIENT_ID
+CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=$CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
+CODING_TOOLS_MCP_OAUTH_PASSWORD=$CODING_TOOLS_MCP_OAUTH_PASSWORD
+
+Authorization metadata: $base/.well-known/oauth-authorization-server
+Protected resource:     $base/.well-known/oauth-protected-resource
+MCP endpoint:           $base/mcp
+
+The tunnel below must terminate at $base. Ephemeral tunnels do not work
+with OAuth -- use a named cloudflared tunnel, an ngrok reserved domain,
+or a persistent devtunnel so the external URL matches across restarts.
+EOF
+      ;;
+    *)
+      cat <<EOF
 
 Remote MCP client URL:
 https://<$host_placeholder>/mcp
@@ -382,7 +452,8 @@ https://<$host_placeholder>/mcp
 No Authorization header is used. Keep this profile read-only unless you
 understand the risk of exposing this tunnel publicly.
 EOF
-  fi
+      ;;
+  esac
 }
 
 install_package() {

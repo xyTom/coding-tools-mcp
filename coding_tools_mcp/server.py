@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+import hashlib
+import html
 import difflib
 import fnmatch
 import http.server
@@ -24,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+import jwt
 
 from . import __version__
 
@@ -149,6 +153,45 @@ ENV_FLAG_OPTIONS = {
 NETWORK_LITERAL_COMMANDS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc"}
 INLINE_SCRIPT_PERMISSION = "inline_script"
 ENV_PREFIX = "CODING_TOOLS_MCP"
+
+OAUTH_CODE_TTL_SECONDS = 300
+OAUTH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30
+OAUTH_MAX_BODY_BYTES = 8_192
+
+
+@dataclass(frozen=True)
+class OAuthConfig:
+    client_id: str
+    client_secret: str
+    password: str
+    server_url: str
+    token_secret: bytes
+    token_ttl: int = OAUTH_TOKEN_TTL_SECONDS
+
+
+def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return secrets.compare_digest(expected, code_challenge)
+
+
+def _create_oauth_token(cfg: OAuthConfig) -> str:
+    now = int(time.time())
+    return jwt.encode(
+        {"iss": cfg.server_url, "aud": cfg.server_url, "iat": now, "exp": now + cfg.token_ttl, "scope": "mcp"},
+        cfg.token_secret,
+        algorithm="HS256",
+    )
+
+
+def _validate_oauth_token(token: str, cfg: OAuthConfig) -> bool:
+    try:
+        jwt.decode(token, cfg.token_secret, algorithms=["HS256"], audience=cfg.server_url, issuer=cfg.server_url)
+        return True
+    except jwt.PyJWTError:
+        return False
+
+
 TOOL_PROFILE_CHOICES = ("full", "read-only", "compat-readonly-all")
 FULL_TOOL_NAMES = (
     "server_info",
@@ -824,6 +867,7 @@ class Runtime:
         dangerously_skip_all_permissions: bool = False,
         tool_profile: str = "full",
         auth_token: str | None = None,
+        oauth_config: OAuthConfig | None = None,
     ) -> None:
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
@@ -837,6 +881,9 @@ class Runtime:
             )
         self.tool_profile = tool_profile
         self.auth_token = auth_token or None
+        self.oauth_config = oauth_config
+        self._pending_codes: dict[str, dict[str, Any]] = {}
+        self._pending_codes_lock = threading.Lock()
         self.default_cwd = self.workspace.root
         self.sessions: dict[str, ExecSession] = {}
         self.sessions_lock = threading.Lock()
@@ -865,7 +912,10 @@ class Runtime:
         return [name for name in names if self.enable_view_image or name != "view_image"]
 
     def auth_enabled(self) -> bool:
-        return self.auth_token is not None
+        return self.auth_token is not None or self.oauth_config is not None
+
+    def oauth_enabled(self) -> bool:
+        return self.oauth_config is not None
 
     def default_cwd_display(self) -> str:
         return normalize_rel_display(self.default_cwd, self.workspace.root)
@@ -3755,6 +3805,23 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     }
 
 
+def _server_card_auth(runtime: Runtime) -> dict[str, Any]:
+    if runtime.oauth_enabled():
+        cfg = runtime.oauth_config
+        assert cfg is not None
+        base = cfg.server_url.rstrip("/")
+        return {
+            "type": "oauth2",
+            "scheme": "Bearer",
+            "header": "Authorization",
+            "authorizationUrl": f"{base}/oauth/authorize",
+            "tokenUrl": f"{base}/oauth/token",
+        }
+    if runtime.auth_token is not None:
+        return {"type": "bearer", "scheme": "Bearer", "header": "Authorization"}
+    return {"type": "none", "scheme": None, "header": None}
+
+
 def server_card_payload(runtime: Runtime) -> dict[str, Any]:
     names = runtime.exposed_tool_names()
     annotations = {name: tool_definition(name, tool_profile=runtime.tool_profile)["annotations"] for name in names}
@@ -3772,11 +3839,7 @@ def server_card_payload(runtime: Runtime) -> dict[str, Any]:
             "endpoint": "/mcp",
             "methods": ["GET", "HEAD", "POST", "OPTIONS"],
         },
-        "auth": {
-            "type": "bearer" if runtime.auth_enabled() else "none",
-            "scheme": "Bearer" if runtime.auth_enabled() else None,
-            "header": "Authorization" if runtime.auth_enabled() else None,
-        },
+        "auth": _server_card_auth(runtime),
         "toolProfile": runtime.tool_profile,
         "tools": {
             "count": len(names),
@@ -3814,7 +3877,15 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         request_path = self.path.split("?", 1)[0]
-        if posixpath.normpath(request_path) not in {"/mcp", "/.well-known/mcp.json", "/.well-known/mcp/server-card.json"}:
+        if posixpath.normpath(request_path) not in {
+            "/mcp",
+            "/.well-known/mcp.json",
+            "/.well-known/mcp/server-card.json",
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/oauth-protected-resource",
+            "/oauth/authorize",
+            "/oauth/token",
+        }:
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
         origin = self.headers.get("Origin")
@@ -3829,6 +3900,15 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def handle_metadata_request(self, *, head_only: bool) -> None:
         request_path = self.path.split("?", 1)[0]
         normalized = posixpath.normpath(request_path)
+        if normalized == "/.well-known/oauth-authorization-server":
+            self.handle_oauth_as_metadata(head_only=head_only)
+            return
+        if normalized == "/.well-known/oauth-protected-resource":
+            self.handle_oauth_resource_metadata(head_only=head_only)
+            return
+        if normalized == "/oauth/authorize" and not head_only:
+            self.handle_oauth_authorize_get()
+            return
         if normalized == "/mcp":
             origin = self.headers.get("Origin")
             if origin and not is_allowed_origin(origin, auth_enabled=self.runtime.auth_enabled()):
@@ -3846,7 +3926,14 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         request_path = self.path.split("?", 1)[0]
-        if posixpath.normpath(request_path) != "/mcp":
+        normalized = posixpath.normpath(request_path)
+        if normalized == "/oauth/authorize":
+            self.handle_oauth_authorize_post()
+            return
+        if normalized == "/oauth/token":
+            self.handle_oauth_token()
+            return
+        if normalized != "/mcp":
             self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32601, "message": "Unknown endpoint"}}, status=404)
             return
         origin = self.headers.get("Origin")
@@ -4049,17 +4136,282 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def is_authorized(self) -> bool:
         if not self.runtime.auth_enabled():
             return True
-        header = self.headers.get("Authorization", "")
-        expected = f"Bearer {self.runtime.auth_token}"
-        return secrets.compare_digest(header.strip(), expected)
+        header = self.headers.get("Authorization", "").strip()
+        if self.runtime.auth_token is not None:
+            if secrets.compare_digest(header, f"Bearer {self.runtime.auth_token}"):
+                return True
+        if self.runtime.oauth_config is not None and header.startswith("Bearer "):
+            token = header[len("Bearer "):]
+            if _validate_oauth_token(token, self.runtime.oauth_config):
+                return True
+        return False
 
     def send_unauthorized(self, *, head_only: bool = False) -> None:
+        if self.runtime.oauth_config is not None:
+            base = self.runtime.oauth_config.server_url.rstrip("/")
+            www_auth = f'Bearer realm="coding-tools-mcp", resource_metadata="{base}/.well-known/oauth-protected-resource"'
+        else:
+            www_auth = 'Bearer realm="coding-tools-mcp"'
         self.send_json(
             {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "Unauthorized"}},
             status=401,
-            extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp"'},
+            extra_headers={"WWW-Authenticate": www_auth},
             head_only=head_only,
         )
+
+    def handle_oauth_as_metadata(self, *, head_only: bool = False) -> None:
+        cfg = self.runtime.oauth_config
+        if cfg is None:
+            self.send_json({"error": "OAuth not configured"}, status=404, head_only=head_only)
+            return
+        base = cfg.server_url.rstrip("/")
+        self.send_json(
+            {
+                "issuer": base,
+                "authorization_endpoint": f"{base}/oauth/authorize",
+                "token_endpoint": f"{base}/oauth/token",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code"],
+                "code_challenge_methods_supported": ["S256"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+            },
+            head_only=head_only,
+        )
+
+    def handle_oauth_resource_metadata(self, *, head_only: bool = False) -> None:
+        cfg = self.runtime.oauth_config
+        if cfg is None:
+            self.send_json({"error": "OAuth not configured"}, status=404, head_only=head_only)
+            return
+        base = cfg.server_url.rstrip("/")
+        self.send_json(
+            {"resource": base, "authorization_servers": [base], "bearer_methods_supported": ["header"]},
+            head_only=head_only,
+        )
+
+    def _send_html(self, body: str, *, status: int = 200) -> None:
+        data = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _oauth_login_page(self, *, client_id: str, redirect_uri: str, code_challenge: str,
+                          code_challenge_method: str, state: str, error: str = "") -> str:
+        def esc(v: str) -> str:
+            return html.escape(v, quote=True)
+        error_block = f'<p style="color:red">{html.escape(error)}</p>' if error else ""
+        return (
+            "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
+            "<title>Authorize MCP Server</title>"
+            "<style>body{font-family:sans-serif;max-width:380px;margin:4rem auto;padding:1rem}"
+            "input{width:100%;padding:.5rem;margin:.4rem 0;box-sizing:border-box}"
+            "button{width:100%;padding:.7rem;background:#0066cc;color:#fff;border:none;cursor:pointer}</style>"
+            "</head><body>"
+            f"<h2>Authorize Coding Tools MCP</h2>"
+            f"<p>Client: <strong>{esc(client_id)}</strong></p>"
+            f"{error_block}"
+            "<form method='POST' action='/oauth/authorize'>"
+            f"<input type='hidden' name='client_id' value='{esc(client_id)}'>"
+            f"<input type='hidden' name='redirect_uri' value='{esc(redirect_uri)}'>"
+            f"<input type='hidden' name='code_challenge' value='{esc(code_challenge)}'>"
+            f"<input type='hidden' name='code_challenge_method' value='{esc(code_challenge_method)}'>"
+            f"<input type='hidden' name='state' value='{esc(state)}'>"
+            "<label>Password<input type='password' name='password' autocomplete='current-password' required></label>"
+            "<button type='submit'>Authorize</button>"
+            "</form></body></html>"
+        )
+
+    def _read_oauth_body(self) -> bytes | None:
+        raw_len = self.headers.get("Content-Length")
+        if raw_len is None:
+            self.send_json({"error": "Content-Length required"}, status=411)
+            return None
+        try:
+            length = int(raw_len)
+        except ValueError:
+            self.send_json({"error": "Invalid Content-Length"}, status=400)
+            return None
+        if not (0 <= length <= OAUTH_MAX_BODY_BYTES):
+            self.send_json({"error": "Request body too large"}, status=413)
+            return None
+        return self.rfile.read(length)
+
+    def handle_oauth_authorize_get(self) -> None:
+        cfg = self.runtime.oauth_config
+        if cfg is None:
+            self.send_json({"error": "OAuth not configured"}, status=404)
+            return
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query, keep_blank_values=True)
+
+        def _p(k: str) -> str:
+            v = params.get(k)
+            return v[0] if v else ""
+
+        client_id = _p("client_id")
+        redirect_uri = _p("redirect_uri")
+        code_challenge = _p("code_challenge")
+        code_challenge_method = _p("code_challenge_method")
+        state = _p("state")
+
+        if _p("response_type") != "code":
+            self._send_html("<h2>Error</h2><p>response_type must be 'code'</p>", status=400)
+            return
+        if not secrets.compare_digest(client_id, cfg.client_id):
+            self._send_html("<h2>Error</h2><p>Unknown client_id</p>", status=400)
+            return
+        if code_challenge_method != "S256" or not code_challenge:
+            self._send_html("<h2>Error</h2><p>code_challenge_method must be S256 and code_challenge is required</p>", status=400)
+            return
+
+        self._send_html(self._oauth_login_page(
+            client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method, state=state,
+        ))
+
+    def handle_oauth_authorize_post(self) -> None:
+        cfg = self.runtime.oauth_config
+        if cfg is None:
+            self.send_json({"error": "OAuth not configured"}, status=404)
+            return
+        body = self._read_oauth_body()
+        if body is None:
+            return
+        params = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+
+        def _p(k: str) -> str:
+            v = params.get(k)
+            return v[0] if v else ""
+
+        client_id = _p("client_id")
+        redirect_uri = _p("redirect_uri")
+        code_challenge = _p("code_challenge")
+        code_challenge_method = _p("code_challenge_method")
+        state = _p("state")
+        password = _p("password")
+
+        if not secrets.compare_digest(client_id, cfg.client_id):
+            self._send_html(self._oauth_login_page(
+                client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method, state=state, error="Invalid client",
+            ), status=400)
+            return
+        if code_challenge_method != "S256" or not code_challenge:
+            self._send_html(self._oauth_login_page(
+                client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method, state=state, error="Invalid PKCE parameters",
+            ), status=400)
+            return
+        if not secrets.compare_digest(password, cfg.password):
+            self._send_html(self._oauth_login_page(
+                client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method, state=state, error="Invalid password",
+            ), status=401)
+            return
+
+        code = secrets.token_urlsafe(32)
+        now = time.time()
+        with self.runtime._pending_codes_lock:
+            expired = [k for k, v in self.runtime._pending_codes.items() if v["expires_at"] < now]
+            for k in expired:
+                del self.runtime._pending_codes[k]
+            self.runtime._pending_codes[code] = {
+                "code_challenge": code_challenge,
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "expires_at": now + OAUTH_CODE_TTL_SECONDS,
+            }
+
+        qs = urllib.parse.urlencode({"code": code, **({"state": state} if state else {})})
+        sep = "&" if "?" in redirect_uri else "?"
+        location = redirect_uri + sep + qs
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def handle_oauth_token(self) -> None:
+        cfg = self.runtime.oauth_config
+        if cfg is None:
+            self.send_json({"error": "unsupported_grant_type"}, status=400)
+            return
+        body = self._read_oauth_body()
+        if body is None:
+            return
+        content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        if content_type != "application/x-www-form-urlencoded":
+            self.send_json({"error": "invalid_request", "error_description": "Content-Type must be application/x-www-form-urlencoded"}, status=400)
+            return
+        params = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+
+        def _p(k: str) -> str:
+            v = params.get(k)
+            return v[0] if v else ""
+
+        grant_type = _p("grant_type")
+        code = _p("code")
+        redirect_uri = _p("redirect_uri")
+        code_verifier = _p("code_verifier")
+        client_id = _p("client_id")
+        client_secret = _p("client_secret")
+
+        # Also accept HTTP Basic auth for client credentials
+        auth_header = self.headers.get("Authorization", "")
+        if auth_header.startswith("Basic ") and (not client_id or not client_secret):
+            try:
+                decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+                basic_id, _, basic_secret = decoded.partition(":")
+                if not client_id:
+                    client_id = urllib.parse.unquote(basic_id)
+                if not client_secret:
+                    client_secret = urllib.parse.unquote(basic_secret)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _err(error: str, description: str) -> None:
+            self.send_json({"error": error, "error_description": description}, status=400)
+
+        if grant_type != "authorization_code":
+            _err("unsupported_grant_type", "Only authorization_code is supported")
+            return
+        if not secrets.compare_digest(client_id, cfg.client_id):
+            _err("invalid_client", "Unknown client_id")
+            return
+        if not secrets.compare_digest(client_secret, cfg.client_secret):
+            _err("invalid_client", "Invalid client_secret")
+            return
+        if not code:
+            _err("invalid_grant", "code is required")
+            return
+        if not code_verifier or not (43 <= len(code_verifier) <= 128) or not re.fullmatch(r"[A-Za-z0-9\-._~]+", code_verifier):
+            _err("invalid_grant", "Invalid code_verifier")
+            return
+
+        with self.runtime._pending_codes_lock:
+            code_data = self.runtime._pending_codes.pop(code, None)
+
+        if code_data is None:
+            _err("invalid_grant", "Unknown or already-used authorization code")
+            return
+        if time.time() > code_data["expires_at"]:
+            _err("invalid_grant", "Authorization code expired")
+            return
+        if not secrets.compare_digest(code_data["client_id"], client_id):
+            _err("invalid_grant", "client_id mismatch")
+            return
+        if not secrets.compare_digest(code_data["redirect_uri"], redirect_uri):
+            _err("invalid_grant", "redirect_uri mismatch")
+            return
+        if not _verify_pkce(code_verifier, code_data["code_challenge"]):
+            _err("invalid_grant", "PKCE verification failed")
+            return
+
+        access_token = _create_oauth_token(cfg)
+        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
 
     def send_cors_headers(self) -> None:
         origin = self.headers.get("Origin")
@@ -4104,9 +4456,53 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
 def run_http(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace or os.environ.get("CODING_TOOLS_MCP_WORKSPACE") or os.getcwd())
     auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or None
-    if not auth_token and not is_loopback_bind_host(str(args.host)):
+
+    oauth_config: OAuthConfig | None = None
+    oauth_mode = getattr(args, "oauth_mode", False) or os.environ.get(f"{ENV_PREFIX}_OAUTH_MODE") == "1"
+    if oauth_mode:
+        client_id = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_ID") or ""
+        client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or ""
+        password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD") or ""
+        server_url = os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or ""
+        if not all([client_id, client_secret, password, server_url]):
+            print(
+                "ERROR: --oauth-mode requires CODING_TOOLS_MCP_OAUTH_CLIENT_ID, "
+                "CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET, CODING_TOOLS_MCP_OAUTH_PASSWORD, "
+                "and CODING_TOOLS_MCP_SERVER_URL.",
+                file=sys.stderr,
+            )
+            return 2
+        raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or ""
+        if raw_secret:
+            try:
+                token_secret = bytes.fromhex(raw_secret)
+            except ValueError:
+                print(
+                    f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_SECRET must be hex-encoded bytes.",
+                    file=sys.stderr,
+                )
+                return 2
+        else:
+            token_secret = secrets.token_bytes(32)
+        try:
+            token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL") or OAUTH_TOKEN_TTL_SECONDS)
+        except ValueError:
+            token_ttl = OAUTH_TOKEN_TTL_SECONDS
+        oauth_config = OAuthConfig(
+            client_id=client_id,
+            client_secret=client_secret,
+            password=password,
+            server_url=server_url.rstrip("/"),
+            token_secret=token_secret,
+            token_ttl=token_ttl,
+        )
+        if auth_token:
+            print("WARNING: --auth-token is ignored when --oauth-mode is active.", file=sys.stderr)
+            auth_token = None
+
+    if not auth_token and not oauth_config and not is_loopback_bind_host(str(args.host)):
         print(
-            "ERROR: non-loopback HTTP binding requires --auth-token or CODING_TOOLS_MCP_AUTH_TOKEN.",
+            "ERROR: non-loopback HTTP binding requires --auth-token, CODING_TOOLS_MCP_AUTH_TOKEN, or --oauth-mode.",
             file=sys.stderr,
         )
         return 2
@@ -4116,6 +4512,7 @@ def run_http(args: argparse.Namespace) -> int:
         dangerously_skip_all_permissions=args.dangerously_skip_all_permissions,
         tool_profile=args.tool_profile,
         auth_token=auth_token,
+        oauth_config=oauth_config,
     )
     server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime)
     if args.dangerously_skip_all_permissions:
@@ -4123,7 +4520,12 @@ def run_http(args: argparse.Namespace) -> int:
             "WARNING: --dangerously-skip-all-permissions is enabled; permission-gated operations will be auto-granted.",
             file=sys.stderr,
         )
-    auth_label = "bearer auth enabled" if runtime.auth_enabled() else "no auth token configured"
+    if oauth_config:
+        auth_label = f"oauth2 enabled (server_url={oauth_config.server_url})"
+    elif runtime.auth_token:
+        auth_label = "bearer auth enabled"
+    else:
+        auth_label = "no auth configured"
     print(f"{SERVER_NAME} listening on http://{args.host}:{args.port}/mcp ({auth_label}, profile={args.tool_profile})", file=sys.stderr)
     try:
         server.serve_forever()
@@ -4232,6 +4634,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--auth-token",
         default=None,
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
+    )
+    parser.add_argument(
+        "--oauth-mode",
+        action="store_true",
+        default=False,
+        help=(
+            "enable OAuth 2.1 Authorization Code + PKCE; "
+            f"requires env vars {ENV_PREFIX}_OAUTH_CLIENT_ID, {ENV_PREFIX}_OAUTH_CLIENT_SECRET, "
+            f"{ENV_PREFIX}_OAUTH_PASSWORD, {ENV_PREFIX}_SERVER_URL"
+        ),
     )
     parser.add_argument(
         "--tool-profile",
