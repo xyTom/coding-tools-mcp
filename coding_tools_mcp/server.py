@@ -4,7 +4,6 @@ import argparse
 import base64
 import ctypes
 import hashlib
-import hmac
 import html
 import difflib
 import fnmatch
@@ -4474,7 +4473,17 @@ def run_http(args: argparse.Namespace) -> int:
             )
             return 2
         raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or ""
-        token_secret = bytes.fromhex(raw_secret) if raw_secret else secrets.token_bytes(32)
+        if raw_secret:
+            try:
+                token_secret = bytes.fromhex(raw_secret)
+            except ValueError:
+                print(
+                    f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_SECRET must be hex-encoded bytes.",
+                    file=sys.stderr,
+                )
+                return 2
+        else:
+            token_secret = secrets.token_bytes(32)
         try:
             token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL") or OAUTH_TOKEN_TTL_SECONDS)
         except ValueError:
@@ -4483,7 +4492,7 @@ def run_http(args: argparse.Namespace) -> int:
             client_id=client_id,
             client_secret=client_secret,
             password=password,
-            server_url=server_url,
+            server_url=server_url.rstrip("/"),
             token_secret=token_secret,
             token_ttl=token_ttl,
         )
