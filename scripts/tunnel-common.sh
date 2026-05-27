@@ -126,24 +126,10 @@ ensure_tunnel_command() {
 }
 
 require_oauth_env() {
-  if [[ -z "${CODING_TOOLS_MCP_SERVER_URL:-}" ]]; then
-    {
-      echo "CODING_TOOLS_MCP_AUTH_MODE=oauth requires CODING_TOOLS_MCP_SERVER_URL"
-      echo "(the public base URL the tunnel will terminate at, e.g. https://mcp.example.com)."
-      echo "See docs/remote-mcp.md for details."
-    } >&2
-    return 1
-  fi
-  if [[ -z "${CODING_TOOLS_MCP_OAUTH_CLIENT_ID:-}" ]]; then
-    CODING_TOOLS_MCP_OAUTH_CLIENT_ID="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-  fi
-  if [[ -z "${CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET:-}" ]]; then
-    CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-  fi
   if [[ -z "${CODING_TOOLS_MCP_OAUTH_PASSWORD:-}" ]]; then
     CODING_TOOLS_MCP_OAUTH_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
   fi
-  export CODING_TOOLS_MCP_OAUTH_CLIENT_ID CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET CODING_TOOLS_MCP_OAUTH_PASSWORD
+  export CODING_TOOLS_MCP_OAUTH_PASSWORD
 }
 
 start_coding_tools_mcp() {
@@ -199,26 +185,22 @@ or rely on an external auth proxy for authenticated production deployments.
 EOF
       ;;
     oauth)
-      local base="${CODING_TOOLS_MCP_SERVER_URL%/}"
+      local base="${CODING_TOOLS_MCP_SERVER_URL:-https://<$host_placeholder>}"
+      base="${base%/}"
       cat <<EOF
 
 OAuth 2.1 Authorization Code + PKCE is active. Configure your MCP client
-with the following values (copy these now -- they are regenerated each run
-unless you preset the env vars):
+with the HTTPS URL printed by $label after it starts. The server derives
+its OAuth issuer from that request URL unless CODING_TOOLS_MCP_SERVER_URL
+is preset.
 
-CODING_TOOLS_MCP_SERVER_URL=$base
-CODING_TOOLS_MCP_OAUTH_CLIENT_ID=$CODING_TOOLS_MCP_OAUTH_CLIENT_ID
-CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=$CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
-CODING_TOOLS_MCP_OAUTH_PASSWORD=$CODING_TOOLS_MCP_OAUTH_PASSWORD
+OAuth password: $CODING_TOOLS_MCP_OAUTH_PASSWORD
+Client ID: any non-empty client_id is accepted unless you preset CODING_TOOLS_MCP_OAUTH_CLIENT_ID
+Client secret: not required unless you preset CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
 
 Authorization metadata: $base/.well-known/oauth-authorization-server
 Protected resource:     $base/.well-known/oauth-protected-resource
 MCP endpoint:           $base/mcp
-
-The tunnel below must terminate at $base. Ephemeral tunnels (random
-subdomain per run) do not work with OAuth -- use a named cloudflared
-tunnel, an ngrok reserved domain, or a persistent devtunnel so the
-external URL matches CODING_TOOLS_MCP_SERVER_URL across restarts.
 EOF
       ;;
     *)

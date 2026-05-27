@@ -161,10 +161,10 @@ OAUTH_MAX_BODY_BYTES = 8_192
 
 @dataclass(frozen=True)
 class OAuthConfig:
-    client_id: str
-    client_secret: str
+    client_id: str | None
+    client_secret: str | None
     password: str
-    server_url: str
+    server_url: str | None
     token_secret: bytes
     token_ttl: int = OAUTH_TOKEN_TTL_SECONDS
 
@@ -175,21 +175,61 @@ def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
     return secrets.compare_digest(expected, code_challenge)
 
 
-def _create_oauth_token(cfg: OAuthConfig) -> str:
+def _create_oauth_token(cfg: OAuthConfig, server_url: str) -> str:
     now = int(time.time())
     return jwt.encode(
-        {"iss": cfg.server_url, "aud": cfg.server_url, "iat": now, "exp": now + cfg.token_ttl, "scope": "mcp"},
+        {"iss": server_url, "aud": server_url, "iat": now, "exp": now + cfg.token_ttl, "scope": "mcp"},
         cfg.token_secret,
         algorithm="HS256",
     )
 
 
-def _validate_oauth_token(token: str, cfg: OAuthConfig) -> bool:
+def _validate_oauth_token(token: str, cfg: OAuthConfig, server_url: str) -> bool:
     try:
-        jwt.decode(token, cfg.token_secret, algorithms=["HS256"], audience=cfg.server_url, issuer=cfg.server_url)
+        jwt.decode(token, cfg.token_secret, algorithms=["HS256"], audience=server_url, issuer=server_url)
         return True
     except jwt.PyJWTError:
         return False
+
+
+def _oauth_client_id_allowed(client_id: str, cfg: OAuthConfig) -> bool:
+    if not client_id:
+        return False
+    if cfg.client_id is None:
+        return True
+    return secrets.compare_digest(client_id, cfg.client_id)
+
+
+def _oauth_token_auth_methods(cfg: OAuthConfig) -> list[str]:
+    if cfg.client_secret is None:
+        return ["none"]
+    return ["client_secret_post", "client_secret_basic"]
+
+
+def _http_base_for_bind_host(host: str, port: int) -> str:
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
+
+
+def _first_header_value(value: str | None) -> str:
+    return (value or "").split(",", 1)[0].strip()
+
+
+def _forwarded_header_param(value: str | None, name: str) -> str:
+    first = _first_header_value(value)
+    for part in first.split(";"):
+        key, sep, raw = part.strip().partition("=")
+        if sep and key.lower() == name:
+            return raw.strip().strip('"')
+    return ""
+
+
+def _safe_external_host(host: str) -> str:
+    host = host.strip()
+    if not host or any(ch in host for ch in "\r\n/\\"):
+        return ""
+    return host
 
 
 TOOL_PROFILE_CHOICES = ("full", "read-only", "compat-readonly-all")
@@ -3805,11 +3845,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     }
 
 
-def _server_card_auth(runtime: Runtime) -> dict[str, Any]:
+def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
     if runtime.oauth_enabled():
         cfg = runtime.oauth_config
         assert cfg is not None
-        base = cfg.server_url.rstrip("/")
+        base = (oauth_base_url or cfg.server_url or "").rstrip("/")
         return {
             "type": "oauth2",
             "scheme": "Bearer",
@@ -3822,7 +3862,7 @@ def _server_card_auth(runtime: Runtime) -> dict[str, Any]:
     return {"type": "none", "scheme": None, "header": None}
 
 
-def server_card_payload(runtime: Runtime) -> dict[str, Any]:
+def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
     names = runtime.exposed_tool_names()
     annotations = {name: tool_definition(name, tool_profile=runtime.tool_profile)["annotations"] for name in names}
     read_only = [name for name in names if annotations[name].get("readOnlyHint") is True]
@@ -3839,7 +3879,7 @@ def server_card_payload(runtime: Runtime) -> dict[str, Any]:
             "endpoint": "/mcp",
             "methods": ["GET", "HEAD", "POST", "OPTIONS"],
         },
-        "auth": _server_card_auth(runtime),
+        "auth": _server_card_auth(runtime, oauth_base_url=oauth_base_url),
         "toolProfile": runtime.tool_profile,
         "tools": {
             "count": len(names),
@@ -3917,10 +3957,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if not self.is_authorized():
                 self.send_unauthorized(head_only=head_only)
                 return
-            self.send_json(server_card_payload(self.runtime), head_only=head_only)
+            self.send_json(server_card_payload(self.runtime, oauth_base_url=self.oauth_base_url()), head_only=head_only)
             return
         if normalized in {"/.well-known/mcp.json", "/.well-known/mcp/server-card.json"}:
-            self.send_json(server_card_payload(self.runtime), head_only=head_only)
+            self.send_json(server_card_payload(self.runtime, oauth_base_url=self.oauth_base_url()), head_only=head_only)
             return
         self.send_json({"error": "Unknown endpoint"}, status=404, head_only=head_only)
 
@@ -4142,13 +4182,33 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return True
         if self.runtime.oauth_config is not None and header.startswith("Bearer "):
             token = header[len("Bearer "):]
-            if _validate_oauth_token(token, self.runtime.oauth_config):
+            if _validate_oauth_token(token, self.runtime.oauth_config, self.oauth_base_url()):
                 return True
         return False
 
+    def oauth_base_url(self) -> str:
+        cfg = self.runtime.oauth_config
+        if cfg is not None and cfg.server_url:
+            return cfg.server_url.rstrip("/")
+        proto = _first_header_value(self.headers.get("X-Forwarded-Proto"))
+        if not proto:
+            proto = _forwarded_header_param(self.headers.get("Forwarded"), "proto")
+        host = _safe_external_host(_first_header_value(self.headers.get("X-Forwarded-Host")))
+        if not host:
+            host = _safe_external_host(_forwarded_header_param(self.headers.get("Forwarded"), "host"))
+        if not host:
+            host = _safe_external_host(self.headers.get("Host", ""))
+        if not host:
+            bind_host, bind_port = self.server.server_address[:2]  # type: ignore[attr-defined]
+            host = _http_base_for_bind_host(str(bind_host), int(bind_port)).removeprefix("http://")
+        if proto not in {"http", "https"}:
+            host_without_port = host.rsplit(":", 1)[0].strip("[]")
+            proto = "http" if is_loopback_bind_host(host_without_port) else "https"
+        return f"{proto}://{host}".rstrip("/")
+
     def send_unauthorized(self, *, head_only: bool = False) -> None:
         if self.runtime.oauth_config is not None:
-            base = self.runtime.oauth_config.server_url.rstrip("/")
+            base = self.oauth_base_url()
             www_auth = f'Bearer realm="coding-tools-mcp", resource_metadata="{base}/.well-known/oauth-protected-resource"'
         else:
             www_auth = 'Bearer realm="coding-tools-mcp"'
@@ -4164,7 +4224,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if cfg is None:
             self.send_json({"error": "OAuth not configured"}, status=404, head_only=head_only)
             return
-        base = cfg.server_url.rstrip("/")
+        base = self.oauth_base_url()
         self.send_json(
             {
                 "issuer": base,
@@ -4173,7 +4233,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "response_types_supported": ["code"],
                 "grant_types_supported": ["authorization_code"],
                 "code_challenge_methods_supported": ["S256"],
-                "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+                "token_endpoint_auth_methods_supported": _oauth_token_auth_methods(cfg),
             },
             head_only=head_only,
         )
@@ -4183,7 +4243,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if cfg is None:
             self.send_json({"error": "OAuth not configured"}, status=404, head_only=head_only)
             return
-        base = cfg.server_url.rstrip("/")
+        base = self.oauth_base_url()
         self.send_json(
             {"resource": base, "authorization_servers": [base], "bearer_methods_supported": ["header"]},
             head_only=head_only,
@@ -4212,6 +4272,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             "</head><body>"
             f"<h2>Authorize Coding Tools MCP</h2>"
             f"<p>Client: <strong>{esc(client_id)}</strong></p>"
+            f"<p>Redirect URI: <code>{esc(redirect_uri)}</code></p>"
             f"{error_block}"
             "<form method='POST' action='/oauth/authorize'>"
             f"<input type='hidden' name='client_id' value='{esc(client_id)}'>"
@@ -4259,7 +4320,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if _p("response_type") != "code":
             self._send_html("<h2>Error</h2><p>response_type must be 'code'</p>", status=400)
             return
-        if not secrets.compare_digest(client_id, cfg.client_id):
+        if not _oauth_client_id_allowed(client_id, cfg):
             self._send_html("<h2>Error</h2><p>Unknown client_id</p>", status=400)
             return
         if code_challenge_method != "S256" or not code_challenge:
@@ -4292,7 +4353,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         state = _p("state")
         password = _p("password")
 
-        if not secrets.compare_digest(client_id, cfg.client_id):
+        if not _oauth_client_id_allowed(client_id, cfg):
             self._send_html(self._oauth_login_page(
                 client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
                 code_challenge_method=code_challenge_method, state=state, error="Invalid client",
@@ -4323,6 +4384,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "redirect_uri": redirect_uri,
                 "state": state,
                 "expires_at": now + OAUTH_CODE_TTL_SECONDS,
+                "server_url": self.oauth_base_url(),
             }
 
         qs = urllib.parse.urlencode({"code": code, **({"state": state} if state else {})})
@@ -4339,12 +4401,17 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if cfg is None:
             self.send_json({"error": "unsupported_grant_type"}, status=400)
             return
+
+        def _err(error: str, description: str) -> None:
+            self.log_message("OAuth token error: %s - %s", error, description)
+            self.send_json({"error": error, "error_description": description}, status=400)
+
         body = self._read_oauth_body()
         if body is None:
             return
         content_type = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
         if content_type != "application/x-www-form-urlencoded":
-            self.send_json({"error": "invalid_request", "error_description": "Content-Type must be application/x-www-form-urlencoded"}, status=400)
+            _err("invalid_request", "Content-Type must be application/x-www-form-urlencoded")
             return
         params = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
 
@@ -4359,7 +4426,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         client_id = _p("client_id")
         client_secret = _p("client_secret")
 
-        # Also accept HTTP Basic auth for client credentials
+        # Also accept HTTP Basic auth for client credentials.
         auth_header = self.headers.get("Authorization", "")
         if auth_header.startswith("Basic ") and (not client_id or not client_secret):
             try:
@@ -4372,16 +4439,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
 
-        def _err(error: str, description: str) -> None:
-            self.send_json({"error": error, "error_description": description}, status=400)
-
         if grant_type != "authorization_code":
             _err("unsupported_grant_type", "Only authorization_code is supported")
             return
-        if not secrets.compare_digest(client_id, cfg.client_id):
+        if not _oauth_client_id_allowed(client_id, cfg):
             _err("invalid_client", "Unknown client_id")
             return
-        if not secrets.compare_digest(client_secret, cfg.client_secret):
+        if cfg.client_secret is not None and not secrets.compare_digest(client_secret, cfg.client_secret):
             _err("invalid_client", "Invalid client_secret")
             return
         if not code:
@@ -4410,7 +4474,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             _err("invalid_grant", "PKCE verification failed")
             return
 
-        access_token = _create_oauth_token(cfg)
+        server_url = str(code_data.get("server_url") or self.oauth_base_url()).rstrip("/")
+        access_token = _create_oauth_token(cfg, server_url)
         self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
 
     def send_cors_headers(self) -> None:
@@ -4460,18 +4525,13 @@ def run_http(args: argparse.Namespace) -> int:
     oauth_config: OAuthConfig | None = None
     oauth_mode = getattr(args, "oauth_mode", False) or os.environ.get(f"{ENV_PREFIX}_OAUTH_MODE") == "1"
     if oauth_mode:
-        client_id = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_ID") or ""
-        client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or ""
-        password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD") or ""
-        server_url = os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or ""
-        if not all([client_id, client_secret, password, server_url]):
-            print(
-                "ERROR: --oauth-mode requires CODING_TOOLS_MCP_OAUTH_CLIENT_ID, "
-                "CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET, CODING_TOOLS_MCP_OAUTH_PASSWORD, "
-                "and CODING_TOOLS_MCP_SERVER_URL.",
-                file=sys.stderr,
-            )
-            return 2
+        client_id = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_ID") or None
+        client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or None
+        env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD")
+        password = env_password or secrets.token_urlsafe(32)
+        server_url = (os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or "").rstrip("/") or None
+        if not env_password:
+            print(f"OAuth authorize password: {password}", file=sys.stderr)
         raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or ""
         if raw_secret:
             try:
@@ -4492,13 +4552,15 @@ def run_http(args: argparse.Namespace) -> int:
             client_id=client_id,
             client_secret=client_secret,
             password=password,
-            server_url=server_url.rstrip("/"),
+            server_url=server_url,
             token_secret=token_secret,
             token_ttl=token_ttl,
         )
         if auth_token:
-            print("WARNING: --auth-token is ignored when --oauth-mode is active.", file=sys.stderr)
-            auth_token = None
+            print(
+                "Auth: dual credentials enabled — both static bearer token and OAuth 2.1 access tokens will be accepted.",
+                file=sys.stderr,
+            )
 
     if not auth_token and not oauth_config and not is_loopback_bind_host(str(args.host)):
         print(
@@ -4520,8 +4582,12 @@ def run_http(args: argparse.Namespace) -> int:
             "WARNING: --dangerously-skip-all-permissions is enabled; permission-gated operations will be auto-granted.",
             file=sys.stderr,
         )
-    if oauth_config:
-        auth_label = f"oauth2 enabled (server_url={oauth_config.server_url})"
+    if oauth_config and runtime.auth_token:
+        url_label = oauth_config.server_url or "dynamic request URL"
+        auth_label = f"oauth2 + bearer enabled (server_url={url_label})"
+    elif oauth_config:
+        url_label = oauth_config.server_url or "dynamic request URL"
+        auth_label = f"oauth2 enabled (server_url={url_label})"
     elif runtime.auth_token:
         auth_label = "bearer auth enabled"
     else:
@@ -4641,8 +4707,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "enable OAuth 2.1 Authorization Code + PKCE; "
-            f"requires env vars {ENV_PREFIX}_OAUTH_CLIENT_ID, {ENV_PREFIX}_OAUTH_CLIENT_SECRET, "
-            f"{ENV_PREFIX}_OAUTH_PASSWORD, {ENV_PREFIX}_SERVER_URL"
+            f"{ENV_PREFIX}_SERVER_URL is optional; when unset OAuth metadata uses the request host; "
+            "authorize password is generated when unset; client_id/client_secret are optional"
         ),
     )
     parser.add_argument(

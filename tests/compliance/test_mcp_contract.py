@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import http.client
 import os
@@ -342,6 +344,148 @@ class MCPContractTests(ComplianceTestCase):
         finally:
             self.stop_process(process)
 
+    def test_oauth_public_client_pkce_flow_succeeds(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=bytes(range(32)).hex(),
+        )
+        process = self.start_oauth_server(port, env)
+        try:
+            metadata = self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+            self.assertEqual(metadata.get("issuer"), base_url)
+            self.assertEqual(metadata.get("token_endpoint_auth_methods_supported"), ["none"])
+
+            forwarded_headers = {"X-Forwarded-Host": "example.trycloudflare.com", "X-Forwarded-Proto": "https"}
+            forwarded_status, _, forwarded_body = self.raw_base_http_request(
+                base_url,
+                "GET",
+                "/.well-known/oauth-authorization-server",
+                headers=forwarded_headers,
+            )
+            self.assertEqual(forwarded_status, 200)
+            forwarded_metadata = json.loads(forwarded_body)
+            self.assertEqual(forwarded_metadata.get("issuer"), "https://example.trycloudflare.com")
+
+            forwarded_verifier = "e" * 43
+            forwarded_code = self.oauth_authorization_code(
+                base_url,
+                "mcp-cli",
+                "test-password",
+                forwarded_verifier,
+                headers=forwarded_headers,
+            )
+            forwarded_token_status, forwarded_token = self.oauth_token_request(
+                base_url,
+                "mcp-cli",
+                forwarded_code,
+                forwarded_verifier,
+                headers=forwarded_headers,
+            )
+            self.assertEqual(forwarded_token_status, 200)
+            forwarded_ok_status, forwarded_ok = self.raw_post_to_auth_server(
+                f"{base_url}/mcp",
+                token=forwarded_token.get("access_token"),
+                headers=forwarded_headers,
+            )
+            self.assertEqual(forwarded_ok_status, 200)
+            self.assertEqual(forwarded_ok.get("result"), {})
+
+            verifier = "a" * 43
+            code = self.oauth_authorization_code(base_url, "mcp-cli", "test-password", verifier)
+            token_status, token_response = self.oauth_token_request(base_url, "mcp-cli", code, verifier)
+            self.assertEqual(token_status, 200)
+            access_token = token_response.get("access_token")
+            self.assertIsInstance(access_token, str)
+
+            ok_status, ok = self.raw_post_to_auth_server(f"{base_url}/mcp", token=access_token)
+            self.assertEqual(ok_status, 200)
+            self.assertEqual(ok.get("result"), {})
+
+            bad_code = self.oauth_authorization_code(base_url, "mcp-cli", "test-password", verifier)
+            bad_status, bad = self.oauth_token_request(base_url, "mcp-cli", bad_code, "b" * 43)
+            self.assertEqual(bad_status, 400)
+            self.assertEqual(bad.get("error"), "invalid_grant")
+        finally:
+            self.stop_process(process)
+
+    def test_oauth_and_static_bearer_dual_credentials_both_accepted(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        static_token = "test-token-dual-auth"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=bytes(range(32)).hex(),
+        )
+        process = self.start_oauth_server(port, env, extra_args=["--auth-token", static_token])
+        try:
+            metadata = self.wait_for_json(f"{base_url}/.well-known/mcp.json")
+            self.assertEqual(metadata.get("auth", {}).get("type"), "oauth2")
+
+            stderr = self.process_stderr_snapshot(process)
+            self.assertIn(
+                "Auth: dual credentials enabled — both static bearer token and OAuth 2.1 access tokens will be accepted.",
+                stderr,
+            )
+            self.assertIn("oauth2 + bearer enabled (server_url=dynamic request URL)", stderr)
+            self.assertNotIn("--auth-token is ignored", stderr)
+
+            static_status, static_response = self.raw_post_to_auth_server(f"{base_url}/mcp", token=static_token)
+            self.assertEqual(static_status, 200)
+            self.assertEqual(static_response.get("result"), {})
+
+            verifier = "c" * 43
+            code = self.oauth_authorization_code(base_url, "claude-desktop", "test-password", verifier)
+            token_status, token_response = self.oauth_token_request(base_url, "claude-desktop", code, verifier)
+            self.assertEqual(token_status, 200)
+            oauth_status, oauth_response = self.raw_post_to_auth_server(
+                f"{base_url}/mcp",
+                token=token_response.get("access_token"),
+            )
+            self.assertEqual(oauth_status, 200)
+            self.assertEqual(oauth_response.get("result"), {})
+
+            wrong_status, wrong = self.raw_post_to_auth_server(f"{base_url}/mcp", token="wrong")
+            self.assertEqual(wrong_status, 401)
+            self.assertEqual(wrong.get("error", {}).get("message"), "Unauthorized")
+        finally:
+            self.stop_process(process)
+
+    def test_oauth_token_endpoint_rejects_mismatched_client_id_when_restricted(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_CLIENT_ID="trusted-client",
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=bytes(range(32)).hex(),
+        )
+        process = self.start_oauth_server(port, env)
+        try:
+            self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
+
+            verifier = "d" * 43
+            challenge = self.pkce_challenge(verifier)
+            query = urllib.parse.urlencode(
+                {
+                    "response_type": "code",
+                    "client_id": "attacker-client",
+                    "redirect_uri": "http://127.0.0.1/callback",
+                    "code_challenge": challenge,
+                    "code_challenge_method": "S256",
+                }
+            )
+            denied_status, _, _ = self.raw_base_http_request(base_url, "GET", f"/oauth/authorize?{query}")
+            self.assertGreaterEqual(denied_status, 400)
+            self.assertLess(denied_status, 500)
+
+            code = self.oauth_authorization_code(base_url, "trusted-client", "test-password", verifier)
+            token_status, token_response = self.oauth_token_request(base_url, "attacker-client", code, verifier)
+            self.assertEqual(token_status, 400)
+            self.assertIn(token_response.get("error"), {"invalid_client", "invalid_grant"})
+        finally:
+            self.stop_process(process)
+
     def test_http_pre_dispatch_errors_include_null_json_rpc_id(self) -> None:
         cases = [
             (
@@ -677,7 +821,13 @@ class MCPContractTests(ComplianceTestCase):
         finally:
             connection.close()
 
-    def raw_post_to_auth_server(self, url: str, *, token: str | None) -> tuple[int, dict[str, Any]]:
+    def raw_post_to_auth_server(
+        self,
+        url: str,
+        *,
+        token: str | None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         parsed = urllib.parse.urlparse(url)
         self.assertIsNotNone(parsed.hostname)
         connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
@@ -690,11 +840,168 @@ class MCPContractTests(ComplianceTestCase):
             connection.putheader("Content-Length", str(len(body)))
             if token is not None:
                 connection.putheader("Authorization", f"Bearer {token}")
+            for name, value in (headers or {}).items():
+                connection.putheader(name, value)
             connection.endheaders()
             connection.send(body)
             response = connection.getresponse()
             response_body = response.read().decode("utf-8")
             return response.status, json.loads(response_body)
+        finally:
+            connection.close()
+
+    def oauth_server_env(self, **overrides: str) -> dict[str, str]:
+        env = self.server_process_env()
+        for name in (
+            "CODING_TOOLS_MCP_OAUTH_CLIENT_ID",
+            "CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET",
+            "CODING_TOOLS_MCP_OAUTH_PASSWORD",
+            "CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET",
+            "CODING_TOOLS_MCP_OAUTH_TOKEN_TTL",
+            "CODING_TOOLS_MCP_SERVER_URL",
+            "CODING_TOOLS_MCP_AUTH_TOKEN",
+            "CODING_TOOLS_MCP_OAUTH_MODE",
+        ):
+            env.pop(name, None)
+        env.update(overrides)
+        return env
+
+    def start_oauth_server(
+        self,
+        port: int,
+        env: dict[str, str],
+        *,
+        extra_args: list[str] | None = None,
+    ) -> subprocess.Popen[str]:
+        cmd = default_server_command(self.workspace.root, port) + ["--oauth-mode"] + (extra_args or [])
+        return subprocess.Popen(
+            cmd,
+            cwd=str(self.workspace.root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            text=True,
+            start_new_session=True,
+        )
+
+    def wait_for_json(self, url: str) -> dict[str, Any]:
+        deadline = time.time() + 10
+        last_error: Exception | None = None
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(url, timeout=1) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except Exception as exc:  # noqa: BLE001 - startup retry records last failure
+                last_error = exc
+                time.sleep(0.1)
+        raise AssertionError(f"server did not return JSON from {url}: {last_error!r}")
+
+    def pkce_challenge(self, verifier: str) -> str:
+        digest = hashlib.sha256(verifier.encode("ascii")).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+    def oauth_authorization_code(
+        self,
+        base_url: str,
+        client_id: str,
+        password: str,
+        verifier: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> str:
+        redirect_uri = "http://127.0.0.1/callback"
+        challenge = self.pkce_challenge(verifier)
+        query = urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "test-state",
+            }
+        )
+        get_status, _, get_body = self.raw_base_http_request(
+            base_url,
+            "GET",
+            f"/oauth/authorize?{query}",
+            headers=headers,
+        )
+        self.assertEqual(get_status, 200, get_body)
+        self.assertIn("Redirect URI", get_body)
+
+        form = urllib.parse.urlencode(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": "test-state",
+                "password": password,
+            }
+        ).encode("utf-8")
+        request_headers = {**(headers or {}), "Content-Type": "application/x-www-form-urlencoded"}
+        status, response_headers, _ = self.raw_base_http_request(
+            base_url,
+            "POST",
+            "/oauth/authorize",
+            body=form,
+            headers=request_headers,
+        )
+        self.assertEqual(status, 302)
+        location = response_headers.get("location", "")
+        code = urllib.parse.parse_qs(urllib.parse.urlparse(location).query).get("code", [""])[0]
+        self.assertTrue(code, f"authorization redirect did not contain a code: {location!r}")
+        return code
+
+    def oauth_token_request(
+        self,
+        base_url: str,
+        client_id: str,
+        code: str,
+        verifier: str,
+        *,
+        client_secret: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        params = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "http://127.0.0.1/callback",
+            "code_verifier": verifier,
+            "client_id": client_id,
+        }
+        if client_secret is not None:
+            params["client_secret"] = client_secret
+        body = urllib.parse.urlencode(params).encode("utf-8")
+        request_headers = {**(headers or {}), "Content-Type": "application/x-www-form-urlencoded"}
+        status, _, response_body = self.raw_base_http_request(
+            base_url,
+            "POST",
+            "/oauth/token",
+            body=body,
+            headers=request_headers,
+        )
+        return status, json.loads(response_body)
+
+    def raw_base_http_request(
+        self,
+        base_url: str,
+        method: str,
+        path: str,
+        *,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, str], str]:
+        parsed = urllib.parse.urlparse(base_url)
+        self.assertIsNotNone(parsed.hostname)
+        connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+        try:
+            connection.request(method, path, body=body, headers=headers or {})
+            response = connection.getresponse()
+            response_body = response.read().decode("utf-8", errors="replace")
+            response_headers = {name.lower(): value for name, value in response.getheaders()}
+            return response.status, response_headers, response_body
         finally:
             connection.close()
 
@@ -717,6 +1024,20 @@ class MCPContractTests(ComplianceTestCase):
         existing_pythonpath = env.get("PYTHONPATH")
         env["PYTHONPATH"] = str(ROOT) if not existing_pythonpath else str(ROOT) + os.pathsep + existing_pythonpath
         return env
+
+    def process_stderr_snapshot(self, process: subprocess.Popen[str]) -> str:
+        if process.stderr is None:
+            return ""
+        chunks: list[str] = []
+        while True:
+            readable, _, _ = select.select([process.stderr], [], [], 0)
+            if not readable:
+                break
+            chunk = os.read(process.stderr.fileno(), 4096).decode("utf-8", errors="replace")
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return "".join(chunks)
 
     def wait_for_ping(self, url: str) -> None:
         deadline = time.time() + 10

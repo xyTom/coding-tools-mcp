@@ -62,29 +62,27 @@ Header: Authorization: Bearer <token>
 
 ## MCP Clients With OAuth 2.1
 
-For MCP clients that perform OAuth 2.1 Authorization Code + PKCE discovery on the server URL, run the tunnel script with `CODING_TOOLS_MCP_AUTH_MODE=oauth`. The only env var you must set yourself is `CODING_TOOLS_MCP_SERVER_URL` (the script cannot know your tunnel's public URL); `CLIENT_ID`, `CLIENT_SECRET`, and `PASSWORD` are generated and printed for you on startup:
+For MCP clients that perform OAuth 2.1 Authorization Code + PKCE discovery on the server URL, run the tunnel script with `CODING_TOOLS_MCP_AUTH_MODE=oauth`. The OAuth authorize password is generated and printed for you on startup; client_id/client_secret are optional:
 
 ```bash
-export CODING_TOOLS_MCP_SERVER_URL="https://<stable-tunnel-host>"
-
 CODING_TOOLS_MCP_AUTH_MODE=oauth \
 CODING_TOOLS_MCP_TOOL_PROFILE=read-only \
 scripts/tunnel.sh cloudflared /path/to/repo
 ```
 
-The script adds `--oauth-mode` to the server and prints the OAuth metadata URLs and the generated credentials (copy them before they scroll out of view; they regenerate on every run unless you preset the env vars). The same flow works with `scripts/install.sh --tunnel <provider> --auth-mode oauth`. For local-only OAuth testing without a tunnel, `scripts/install.sh --start --auth-mode oauth` defaults `CODING_TOOLS_MCP_SERVER_URL` to `http://127.0.0.1:<port>`.
+The script adds `--oauth-mode` to the server and prints the generated password before starting the tunnel. When cloudflared/ngrok/devtunnel prints the HTTPS URL, configure your MCP client with that URL; the server derives its OAuth issuer and metadata URLs from the incoming request host. The same flow works with `scripts/install.sh --tunnel <provider> --auth-mode oauth`.
 
-Required:
+Optional URL pinning:
 
-- `CODING_TOOLS_MCP_SERVER_URL` — public base URL (no trailing `/mcp`); used as the `issuer`/`aud` claim in issued tokens and in discovery metadata. **Must match the tunnel's actual external URL.**
+- `CODING_TOOLS_MCP_SERVER_URL` — optional public base URL (no trailing `/mcp`). When set, it pins the `issuer`/`aud` claim in issued tokens and discovery metadata. When unset, the server derives the URL from `Host`/`X-Forwarded-*` request headers, which is the easiest mode for one-shot tunnels whose URL is only known after startup.
 
-Auto-generated if unset (override to keep stable values across restarts):
+Default public client + PKCE:
 
-- `CODING_TOOLS_MCP_OAUTH_CLIENT_ID` — the only client_id the server accepts.
-- `CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET` — paired with the client_id on `/oauth/token` (accepts `client_secret_post` or HTTP Basic).
-- `CODING_TOOLS_MCP_OAUTH_PASSWORD` — the password an operator types on the `/oauth/authorize` HTML form to grant the authorization code.
+- `CODING_TOOLS_MCP_OAUTH_PASSWORD` — the password an operator types on the `/oauth/authorize` HTML form to grant the authorization code. It is generated and printed when unset.
+- `CODING_TOOLS_MCP_OAUTH_CLIENT_ID` — optional. When unset, any non-empty client_id is accepted. Set it to restrict OAuth to one client_id.
+- `CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET` — optional. When unset, `/oauth/token` uses `token_endpoint_auth_method=none` and relies on PKCE. Once set, clients **must** present this secret on `/oauth/token`, otherwise the request is rejected with `invalid_client`. The endpoint accepts `client_secret_post` and HTTP Basic. PKCE remains mandatory; only `code_challenge_method=S256` is accepted.
 
-Optional:
+Optional token settings:
 
 - `CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` — hex-encoded HS256 signing key. Without it, a random key is generated per process and all tokens are invalidated on restart. Generate one with `python3 -c "import secrets; print(secrets.token_bytes(32).hex())"`.
 - `CODING_TOOLS_MCP_OAUTH_TOKEN_TTL` — access-token lifetime in seconds (default `2592000`, i.e. 30 days).
@@ -97,17 +95,15 @@ Endpoints exposed when `--oauth-mode` is active:
 - `POST /oauth/authorize` — accepts the password, issues a one-time code, and 302s back to `redirect_uri`.
 - `POST /oauth/token` — exchanges `grant_type=authorization_code` + `code_verifier` for a Bearer JWT.
 
-`/mcp` accepts the issued token as `Authorization: Bearer <token>`; unauthenticated requests get HTTP `401` with a `WWW-Authenticate` header pointing at the protected-resource metadata. `--auth-token` is ignored while OAuth is active.
+`/mcp` accepts the issued OAuth token as `Authorization: Bearer <token>`. When `--auth-token` is also set alongside `--oauth-mode`, both credentials are accepted concurrently — useful for clients (e.g. Lovable) that only support static bearer tokens while OAuth-aware clients (e.g. Claude desktop) continue to use the PKCE flow. Unauthenticated requests get HTTP `401` with a `WWW-Authenticate` header pointing at the protected-resource metadata.
 
 ### Stable Tunnel URLs
 
-OAuth metadata and issued JWT claims pin the public URL at server start. Ephemeral tunnels (e.g. `cloudflared tunnel --url`, default ngrok, default devtunnel) generate a fresh random subdomain each run, so the URL the script advertises to clients will not match the tunnel's actual host after any restart. Use one of:
+When `CODING_TOOLS_MCP_SERVER_URL` is unset, OAuth metadata and issued JWT claims follow the request URL. That supports ephemeral tunnels (e.g. `cloudflared tunnel --url`, default ngrok, default devtunnel) because the public URL can be discovered after the server is already running. If you want tokens to remain valid across tunnel restarts, use a stable URL and set `CODING_TOOLS_MCP_SERVER_URL`:
 
 - **cloudflared named tunnel** — `cloudflared tunnel create <name>` + `cloudflared tunnel route dns <name> mcp.example.com`, then set `CODING_TOOLS_MCP_SERVER_URL=https://mcp.example.com`.
-- **ngrok reserved domain** — claim a domain in the ngrok dashboard and either configure it in `~/.config/ngrok/ngrok.yml`, or run `ngrok` yourself (`ngrok http --domain=<reserved> 8765`) and set `CODING_TOOLS_MCP_SERVER_URL=https://<reserved>` before launching the server. The bundled `scripts/tunnel-ngrok.sh` runs `ngrok http http://127.0.0.1:$PORT` without extra flags, so to attach a reserved domain you either point ngrok at it via config or run ngrok separately and start the server with `coding-tools-mcp --oauth-mode` directly.
+- **ngrok reserved domain** — claim a domain in the ngrok dashboard and either configure it in `~/.config/ngrok/ngrok.yml`, or run `ngrok` yourself (`ngrok http --domain=<reserved> 8765`) and set `CODING_TOOLS_MCP_SERVER_URL=https://<reserved>`.
 - **devtunnel persistent tunnel** — `devtunnel create <id>` + `devtunnel port create <id> -p 8765 --protocol http`, then `devtunnel host <id>`.
-
-If you only need ephemeral testing, prefer `bearer` mode over `oauth`.
 
 ## Tunnel Scripts
 
@@ -129,13 +125,12 @@ CODING_TOOLS_MCP_TOOL_PROFILE=read-only
 CODING_TOOLS_MCP_AUTH_TOKEN=<existing-token>
 CODING_TOOLS_MCP_SERVER_BIN=coding-tools-mcp
 
-# Required when CODING_TOOLS_MCP_AUTH_MODE=oauth:
-CODING_TOOLS_MCP_SERVER_URL=https://<stable-tunnel-host>
 # Auto-generated and printed at startup if unset:
-CODING_TOOLS_MCP_OAUTH_CLIENT_ID=<client-id>
-CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=<client-secret>
 CODING_TOOLS_MCP_OAUTH_PASSWORD=<authorize-page-password>
 # Optional (oauth):
+CODING_TOOLS_MCP_SERVER_URL=https://<stable-tunnel-host>
+CODING_TOOLS_MCP_OAUTH_CLIENT_ID=<restrict-to-client-id>
+CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=<require-client-secret>
 CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=<hex-encoded-32-bytes>
 CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=2592000
 ```
