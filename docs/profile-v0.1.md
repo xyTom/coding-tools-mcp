@@ -54,7 +54,7 @@ If a client requests a newer date-based protocol revision, the server negotiates
   "serverInfo": {
     "name": "coding-tools-mcp",
     "title": "Coding Tools MCP",
-    "version": "0.1.6"
+    "version": "0.1.7"
   },
   "instructions": "Use these tools only for local coding operations inside the configured workspace."
 }

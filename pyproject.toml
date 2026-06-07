@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coding-tools-mcp"
-version = "0.1.6"
+version = "0.1.7"
 description = "Workspace-confined coding tools exposed as an MCP server."
 requires-python = ">=3.11"
 dependencies = [

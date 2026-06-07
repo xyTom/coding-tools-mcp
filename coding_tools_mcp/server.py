@@ -25,7 +25,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, cast
 
 import jwt
 
@@ -4310,7 +4310,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not host:
             host = _safe_external_host(self.headers.get("Host", ""))
         if not host:
-            bind_host, bind_port = self.server.server_address[:2]  # type: ignore[attr-defined]
+            server_address = cast(tuple[Any, ...], self.server.server_address)  # type: ignore[attr-defined]
+            bind_host = server_address[0]
+            bind_port = server_address[1]
             host = _http_base_for_bind_host(str(bind_host), int(bind_port)).removeprefix("http://")
         if proto not in {"http", "https"}:
             host_without_port = host.rsplit(":", 1)[0].strip("[]")

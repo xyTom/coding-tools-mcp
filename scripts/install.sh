@@ -58,7 +58,7 @@ Tunnel options:
   --auto-install-tunnel         Install missing tunnel CLI without prompting.
 
 Environment:
-  CODING_TOOLS_MCP_VERSION=0.1.6
+  CODING_TOOLS_MCP_VERSION=0.1.7
   CODING_TOOLS_MCP_INSTALL_METHOD=auto|uv|pip
   CODING_TOOLS_MCP_WORKSPACE=/path/to/repo
   CODING_TOOLS_MCP_TUNNEL_PROVIDER=cloudflared|ngrok|devtunnel

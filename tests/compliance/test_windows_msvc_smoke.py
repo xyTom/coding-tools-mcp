@@ -42,7 +42,12 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
 
                 result = client.call_tool(
                     "exec_command",
-                    {"cmd": "cl.exe /nologo hello.c", "timeout_ms": 30000, "max_output_bytes": 20000},
+                    {
+                        "cmd": "cl.exe /nologo hello.c",
+                        "timeout_ms": 30000,
+                        "yield_time_ms": 30000,
+                        "max_output_bytes": 20000,
+                    },
                 )
                 payload = assert_tool_success(self, result)
                 output = (payload.get("stdout") or "") + (payload.get("stderr") or "")
@@ -60,7 +65,12 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
 
                 compile_result = client.call_tool(
                     "exec_command",
-                    {"cmd": "cl.exe /nologo hello.c", "timeout_ms": 30000, "max_output_bytes": 20000},
+                    {
+                        "cmd": "cl.exe /nologo hello.c",
+                        "timeout_ms": 30000,
+                        "yield_time_ms": 30000,
+                        "max_output_bytes": 20000,
+                    },
                 )
                 compile_payload = assert_tool_success(self, compile_result)
                 compile_output = (compile_payload.get("stdout") or "") + (compile_payload.get("stderr") or "")
@@ -69,7 +79,12 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
 
                 run_result = client.call_tool(
                     "exec_command",
-                    {"cmd": "hello.exe", "timeout_ms": 30000, "max_output_bytes": 20000},
+                    {
+                        "cmd": "hello.exe",
+                        "timeout_ms": 30000,
+                        "yield_time_ms": 30000,
+                        "max_output_bytes": 20000,
+                    },
                 )
                 run_payload = assert_tool_success(self, run_result)
                 self.assertEqual(run_payload.get("exit_code"), 0, run_payload)
