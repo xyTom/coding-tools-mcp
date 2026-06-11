@@ -709,6 +709,64 @@ Maven home: /usr/share/maven
             with self.assertRaises(ToolFailure):
                 runtime.set_default_cwd({"path": "../outside"})
 
+    def test_boundary_regressions_for_aliases_and_command_scanning(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "nested").mkdir()
+            (workspace / "sample.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            runtime = Runtime(workspace, permission_mode="trusted")
+
+            cwd_result = runtime.exec_command(
+                {"cmd": "pwd", "cwd": "nested", "timeout_ms": 5000, "max_output_bytes": 4096}
+            )
+            self.assertEqual(cwd_result.get("exit_code"), 0)
+            self.assertEqual(Path(str(cwd_result.get("stdout", "")).strip()).name, "nested")
+
+            with self.assertRaises(ToolFailure):
+                runtime.exec_command({"cmd": "pwd", "workdir": ".", "cwd": "nested"})
+
+            read = runtime.read_file({"path": "sample.txt", "start_line": 2, "max_lines": 1})
+            self.assertEqual(read.get("content"), "two\n")
+            self.assertEqual(read.get("end_line"), 2)
+
+            tag = "model" + "Version"
+            xml_heredoc = (
+                "cat > pom.xml <<'EOF'\n"
+                "<project>\n"
+                f"  <{tag}>4.0.0</{tag}>\n"
+                "</project>\n"
+                "EOF"
+            )
+            runtime.exec_command({"cmd": xml_heredoc, "timeout_ms": 5000, "max_output_bytes": 4096})
+            self.assertIn(tag, (workspace / "pom.xml").read_text(encoding="utf-8"))
+
+    def test_git_helpers_use_command_environment(self) -> None:
+        if server_module.shutil.which("git") is None:
+            self.skipTest("git is not available")
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            for cmd in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.email", "test@example.invalid"],
+                ["git", "config", "user.name", "Runtime Test"],
+                ["git", "add", "-A"],
+                ["git", "commit", "-q", "-m", "initial commit"],
+            ):
+                completed = subprocess.run(cmd, cwd=workspace, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if completed.returncode != 0:
+                    self.skipTest(f"git fixture setup failed: {completed.stderr.strip()}")
+
+            runtime = Runtime(
+                workspace,
+                shell_env_policy=server_module.ShellEnvPolicy(set={"GIT_CONFIG_GLOBAL": os.devnull}),
+            )
+            status = runtime.git_status({"max_entries": 5})
+            self.assertTrue(status.get("is_repo"))
+            log = runtime.git_log({"max_count": 1})
+            self.assertTrue(log.get("is_repo"))
+            self.assertEqual(log.get("commits", [])[0].get("subject"), "initial commit")
+
 
 def file_path(name: str):
     return Path(name)

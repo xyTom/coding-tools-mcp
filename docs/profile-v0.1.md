@@ -342,6 +342,11 @@ Input schema:
       "minimum": 1,
       "description": "1-based inclusive ending line. Omit to read to max_bytes."
     },
+    "max_lines": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Alias for setting end_line relative to start_line."
+    },
     "max_bytes": {
       "type": "integer",
       "minimum": 1,
@@ -729,6 +734,10 @@ Input schema:
       "default": ".",
       "description": "Workspace-relative working directory."
     },
+    "cwd": {
+      "type": "string",
+      "description": "Alias for workdir. If both are present, they must match."
+    },
     "timeout_ms": {
       "type": "integer",
       "minimum": 1,
@@ -947,7 +956,8 @@ Input schema:
   "properties": {
     "path": { "type": "string", "default": "." },
     "include_untracked": { "type": "boolean", "default": true },
-    "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 }
+    "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 },
+    "short": { "type": "boolean", "default": false }
   },
   "additionalProperties": false
 }

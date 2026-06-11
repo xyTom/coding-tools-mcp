@@ -131,7 +131,7 @@ PERMISSION_MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
 PERMISSION_MODE_CHOICES = tuple(PERMISSION_MODE_CAPABILITIES)
 # Documented kill_session status enum (docs/profile-v0.1.md); guarded by test_schema_drift.
 KILL_SESSION_STATUSES = ("terminated", "killed", "exited", "terminating", "not_found")
-POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM"}
+POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM", "GIT_CONFIG_GLOBAL"}
 WINDOWS_CORE_ENV_NAMES = {"PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR"}
 NETWORK_RE = re.compile(
     r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
@@ -233,6 +233,11 @@ TOOLCHAIN_READ_ROOTS = (
     "/etc/localtime",
     "/etc/npmrc",
     "/usr/local/sdkman/candidates",
+)
+OS_METADATA_READ_FILES = (
+    "/etc/debian_version",
+    "/etc/os-release",
+    "/etc/lsb-release",
 )
 GIT_READ_ROOTS = (
     "/etc/gitconfig",
@@ -1808,6 +1813,13 @@ class Runtime:
         max_bytes = int(args.get("max_bytes", 131072))
         start_line = int(args.get("start_line", 1))
         end_line = args.get("end_line")
+        max_lines = args.get("max_lines")
+        if end_line is not None and max_lines is not None:
+            calculated_end_line = start_line + int(max_lines) - 1
+            if int(end_line) != calculated_end_line:
+                raise ToolFailure("INVALID_ARGUMENT", "end_line and max_lines select different ranges.", category="validation")
+        if end_line is None and max_lines is not None:
+            end_line = start_line + int(max_lines) - 1
         encoding = args.get("encoding", "utf-8")
         if encoding != "utf-8":
             raise ToolFailure("UNSUPPORTED_ENCODING", "Only utf-8 is supported.", category="validation")
@@ -2348,7 +2360,10 @@ class Runtime:
         cmd = str(args.get("cmd", ""))
         if not cmd:
             raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
-        workdir = self.resolve_existing(str(args.get("workdir", ".")))
+        workdir_arg = args.get("workdir", args.get("cwd", "."))
+        if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
+            raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
+        workdir = self.resolve_existing(str(workdir_arg))
         if not workdir.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
         self._check_command_policy(cmd, args)
@@ -2625,6 +2640,46 @@ class Runtime:
                 env[key_text] = value_text
         return env
 
+    def _git_env(self) -> dict[str, str]:
+        return self._command_env({})
+
+    def _run_git_text(self, cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            env=self._git_env(),
+        )
+
+    def _run_git_bytes(self, cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            cmd,
+            text=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            env=self._git_env(),
+        )
+
+    def _git_status_not_repo(self, completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+        warnings = []
+        stderr = completed.stderr.strip()
+        if stderr:
+            warnings.append(f"git rev-parse failed: {stderr}")
+        return {"is_repo": False, "clean": True, "entries": [], "truncated": False, "warnings": warnings}
+
+    def _is_git_repo(self, path: Path) -> bool:
+        completed = self._run_git_text(
+            [require_git(), "-C", str(path), "rev-parse", "--is-inside-work-tree"]
+        )
+        return completed.returncode == 0 and completed.stdout.strip() == "true"
+
+    def _git_rev_parse(self, path: Path, rev: str) -> str:
+        completed = self._run_git_text([require_git(), "-C", str(path), "rev-parse", rev])
+        return completed.stdout.strip() if completed.returncode == 0 else ""
+
     def _base_command_env(self) -> dict[str, str]:
         if self.shell_env_policy.inherit == "none":
             return {}
@@ -2752,18 +2807,13 @@ class Runtime:
         max_entries = int(args.get("max_entries", 1000))
         include_untracked = bool(args.get("include_untracked", True))
         git = require_git()
-        root_check = subprocess.run(
-            [git, "-C", str(resolved.path), "rev-parse", "--show-toplevel"],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        root_check = self._run_git_text([git, "-C", str(resolved.path), "rev-parse", "--show-toplevel"])
         if root_check.returncode != 0:
-            return {"is_repo": False, "clean": True, "entries": [], "truncated": False}
+            return self._git_status_not_repo(root_check)
         status_cmd = [git, "-C", str(resolved.path), "status", "--porcelain=v1", "-b"]
         if not include_untracked:
             status_cmd.append("--untracked-files=no")
-        completed = subprocess.run(status_cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        completed = self._run_git_text(status_cmd, timeout=10)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git status failed", category="runtime")
         lines = completed.stdout.splitlines()
@@ -2795,7 +2845,7 @@ class Runtime:
         return {
             "is_repo": True,
             "branch": branch,
-            "head": git_rev_parse(resolved.path, "HEAD"),
+            "head": self._git_rev_parse(resolved.path, "HEAD"),
             "upstream": upstream,
             "ahead": ahead,
             "behind": behind,
@@ -2816,7 +2866,7 @@ class Runtime:
         if isinstance(args.get("paths"), list):
             path_filters.extend(str(item) for item in args["paths"])
         path_filters = [self.git_path_filter(path) for path in path_filters]
-        if not is_git_repo(self.workspace.root):
+        if not self._is_git_repo(self.workspace.root):
             return self._fallback_diff(path_filters, max_bytes)
         chunks: list[bytes] = []
         if unstaged:
@@ -2848,7 +2898,7 @@ class Runtime:
         if path_filters:
             cmd.append("--")
             cmd.extend(path_filters)
-        completed = subprocess.run(cmd, text=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        completed = self._run_git_bytes(cmd, timeout=10)
         if completed.returncode not in {0, 1}:
             raise ToolFailure("GIT_ERROR", completed.stderr.decode("utf-8", errors="replace"), category="runtime")
         return completed.stdout
@@ -2896,7 +2946,7 @@ class Runtime:
     def git_log(self, args: dict[str, Any]) -> dict[str, Any]:
         git = require_git()
         resolved = self.resolve_existing(str(args.get("path", ".")))
-        if not is_git_repo(resolved.path):
+        if not self._is_git_repo(resolved.path):
             return {"is_repo": False, "commits": [], "truncated": False, "warnings": []}
         ref = validate_git_ref(str(args.get("ref", "HEAD")))
         max_count = int(args.get("max_count", 20))
@@ -2915,7 +2965,7 @@ class Runtime:
         ]
         if path_filter != ".":
             cmd.extend(["--", path_filter])
-        completed = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        completed = self._run_git_text(cmd, timeout=10)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git log failed", category="runtime")
         commits: list[dict[str, Any]] = []
@@ -2945,7 +2995,7 @@ class Runtime:
 
     def git_show(self, args: dict[str, Any]) -> dict[str, Any]:
         git = require_git()
-        if not is_git_repo(self.workspace.root):
+        if not self._is_git_repo(self.workspace.root):
             return {"is_repo": False, "content": "", "files": [], "truncated": False, "warnings": []}
         rev = validate_git_ref(str(args.get("rev", "HEAD")))
         context = int(args.get("context_lines", 3))
@@ -2972,7 +3022,7 @@ class Runtime:
         if normalized_filters:
             cmd.append("--")
             cmd.extend(normalized_filters)
-        completed = subprocess.run(cmd, text=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        completed = self._run_git_bytes(cmd, timeout=10)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.decode("utf-8", errors="replace").strip() or "git show failed", category="runtime")
         truncation = truncate_text_head(completed.stdout.decode("utf-8", errors="replace"), max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes)
@@ -2994,7 +3044,7 @@ class Runtime:
         resolved = self.resolve_existing(str(args.get("path", "")))
         if resolved.path.is_dir():
             raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
-        if not is_git_repo(self.workspace.root):
+        if not self._is_git_repo(self.workspace.root):
             return {"is_repo": False, "path": resolved.display, "lines": [], "truncated": False, "warnings": []}
         ref_arg = args.get("rev")
         ref = validate_git_ref(str(ref_arg)) if isinstance(ref_arg, str) and ref_arg else None
@@ -3022,7 +3072,7 @@ class Runtime:
         if ref:
             cmd.append(ref)
         cmd.extend(["--", resolved.display])
-        completed = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        completed = self._run_git_text(cmd, timeout=10)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git blame failed", category="runtime")
         lines = parse_git_blame_porcelain(completed.stdout)
@@ -3351,8 +3401,8 @@ def explicit_command_path_candidates(tokens: list[str]) -> list[str]:
             index += 2
             continue
         if token in HEREDOC_TOKENS:
-            index += 2
-            continue
+            candidates.extend(command_argument_path_candidates(current_command, current_args))
+            return list(dict.fromkeys(candidates))
         if current_command is None:
             if not is_env_assignment_token(token):
                 current_command = token
@@ -3882,6 +3932,29 @@ def add_landlock_path(ruleset_fd: int, path: Path, allowed_access: int, *, requi
             ) from exc
         return
     try:
+        try:
+            mode = path.stat().st_mode
+        except OSError:
+            mode = 0
+        if mode and not stat.S_ISDIR(mode):
+            parent_access = allowed_access & LANDLOCK_ACCESS_FS_READ_DIR
+            if parent_access:
+                try:
+                    parent_fd = os.open(path.parent, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+                except OSError:
+                    parent_fd = -1
+                if parent_fd >= 0:
+                    try:
+                        parent_attr = LandlockPathBeneathAttr(parent_access, parent_fd)
+                        libc_syscall(
+                            SYS_LANDLOCK_ADD_RULE,
+                            ruleset_fd,
+                            LANDLOCK_RULE_PATH_BENEATH,
+                            ctypes.byref(parent_attr),
+                            0,
+                        )
+                    finally:
+                        os.close(parent_fd)
         path_attr = LandlockPathBeneathAttr(allowed_access & landlock_path_allowed_access(path), fd)
         rc = libc_syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
         if rc < 0 and required:
@@ -3950,6 +4023,7 @@ def _resolved_system_path_root_prefixes() -> tuple[Path, ...]:
 
 def guard_allow_roots() -> list[str]:
     roots = set(TOOLCHAIN_READ_ROOTS)
+    roots.update(OS_METADATA_READ_FILES)
     roots.update(GIT_READ_ROOTS)
     roots.update(DNS_RESOLVER_READ_ROOTS)
     roots.update(
@@ -4400,6 +4474,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "path": {**string, "minLength": 1},
                 "start_line": {**integer, "minimum": 1, "default": 1},
                 "end_line": {**integer, "minimum": 1},
+                "max_lines": {**integer, "minimum": 1},
                 "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 131072},
                 "encoding": {**string, "enum": ["utf-8"], "default": "utf-8"},
             },
@@ -4448,6 +4523,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "cmd": {**string, "minLength": 1},
                 "workdir": {**string, "default": "."},
+                "cwd": {**string},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 30000},
                 "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 1000},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
@@ -4480,6 +4556,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "path": {**string, "default": "."},
                 "include_untracked": {**boolean, "default": True},
                 "max_entries": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
+                "short": {**boolean, "default": False},
             }
         ),
         "git_diff": object_schema(
