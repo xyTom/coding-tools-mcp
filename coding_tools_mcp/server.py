@@ -1639,9 +1639,9 @@ class Runtime:
             "permission_mode": self.permission_mode,
             "network_allowed": self.allow_network,
             "runtime_dir": str(self.runtime_dir),
-            "home": normalize_rel_display(self.command_home_dir(), self.workspace.root),
-            "tmpdir": normalize_rel_display(self.command_tmp_dir(), self.workspace.root),
-            "cache_dir": normalize_rel_display(self.cache_dir, self.workspace.root),
+            "home": str(self.command_home_dir()),
+            "tmpdir": str(self.command_tmp_dir()),
+            "cache_dir": str(self.cache_dir),
         }
 
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
