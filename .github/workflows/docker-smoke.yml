@@ -56,8 +56,9 @@ jobs:
         env:
           CODING_TOOLS_MCP_AUTH_TOKEN: ${{ env.MCP_TOKEN }}
         run: |
-          python scripts/mcp_smoke.py "http://127.0.0.1:$MCP_PORT/mcp" \
+          python scripts/mcp_smoke.py \
             --expect-permission-mode trusted \
+            "http://127.0.0.1:$MCP_PORT/mcp" \
             "java -version" \
             "javac -version" \
             "mvn -version" \
