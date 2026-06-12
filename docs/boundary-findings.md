@@ -41,10 +41,15 @@ pip's vendored distro code attempted to read `/etc/debian_version` for its
 User-Agent.
 
 Status: partially investigated. A narrow file-root Landlock change was attempted
-for low-sensitivity OS metadata commonly read by language package managers, but
-current Landlock path traversal behavior still denied pip's distro metadata read.
-This remains a follow-up item because broadening system read roots requires a
-deliberate security review.
+for low-sensitivity OS metadata commonly read by language package managers
+(`/etc/os-release`, `/etc/debian_version`, `/etc/lsb-release` as read-only file
+roots), but pip's distro metadata read was still denied by Landlock path
+traversal behavior. An additional experiment that granted `READ_DIR` on each
+file root's parent directory was reverted: Landlock `path_beneath` rules apply
+to the whole subtree, so it would have allowed listing directory names across
+`/etc` without fixing pip. Broadening system read roots beyond the three
+metadata files remains a follow-up item that requires a deliberate security
+review.
 
 ### 3. Common argument aliases are rejected by strict schemas
 
@@ -57,8 +62,10 @@ Examples hit during dogfooding:
 - `read_file` accepts `start_line`/`end_line`, not `max_lines`.
 - `git_status` accepts `path`/`include_untracked`/`max_entries`, not `short`.
 
-Fix: support safe aliases while keeping canonical fields. Reject conflicting
-`workdir`/`cwd` values.
+Fix: support safe aliases (`cwd`, `max_lines`) while keeping canonical fields,
+rejecting conflicting values. `git_status` intentionally does not accept
+`short`: its output is already structured entries, so the flag would have no
+effect and silently accepting it would mislead clients.
 
 ### 4. Heredoc XML can be misclassified as an escaping path
 
@@ -66,9 +73,11 @@ Shell tokenization of a heredoc containing XML such as `<modelVersion>` can
 produce tokens like `/modelVersion`, which the path scanner treats as an absolute
 path escape.
 
-Fix: when a heredoc token is encountered in command path scanning, inspect the
-redirection target and command arguments seen so far, then stop scanning the rest
-of the command as path arguments because those tokens are stdin payload.
+Fix: strip heredoc body lines from the command before path scanning, since the
+body is stdin data rather than shell code. Everything that remains live shell
+code stays visible to the scanner: redirection targets on the heredoc operator's
+own line (e.g. `cat <<EOF > /path`), and commands after the closing delimiter or
+chained after a `<<<` here-string.
 
 ## Remaining known limitations
 

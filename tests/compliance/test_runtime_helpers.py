@@ -740,11 +740,34 @@ Maven home: /usr/share/maven
             runtime.exec_command({"cmd": xml_heredoc, "timeout_ms": 5000, "max_output_bytes": 4096})
             self.assertIn(tag, (workspace / "pom.xml").read_text(encoding="utf-8"))
 
+    def test_heredoc_payload_stripping_keeps_live_shell_code_scanned(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
+
+            # Redirection target on the heredoc operator's own line is live code.
+            with self.assertRaises(ToolFailure) as ctx:
+                runtime.exec_command({"cmd": "cat <<EOF > /etc/cron.d/evil\nbody\nEOF"})
+            self.assertEqual(ctx.exception.details.get("path"), "/etc/cron.d/evil")
+
+            # Commands after the closing delimiter are live code.
+            with self.assertRaises(ToolFailure) as ctx:
+                runtime.exec_command(
+                    {"cmd": "cat <<'EOF'\nbody\nEOF\ncp /etc/shadow stolen.txt"}
+                )
+            self.assertEqual(ctx.exception.details.get("path"), "/etc/shadow")
+
+            # A here-string consumes only one word; chained commands stay live.
+            with self.assertRaises(ToolFailure) as ctx:
+                runtime.exec_command({"cmd": "grep x <<< hi && cat /etc/passwd"})
+            self.assertEqual(ctx.exception.details.get("path"), "/etc/passwd")
+
     def test_git_helpers_use_command_environment(self) -> None:
         if server_module.shutil.which("git") is None:
             self.skipTest("git is not available")
         with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
+            root = Path(tmp)
+            workspace = root / "repo"
+            workspace.mkdir()
             (workspace / "tracked.txt").write_text("tracked\n", encoding="utf-8")
             for cmd in (
                 ["git", "init", "-q"],
@@ -757,9 +780,41 @@ Maven home: /usr/share/maven
                 if completed.returncode != 0:
                     self.skipTest(f"git fixture setup failed: {completed.stderr.strip()}")
 
+            # GIT_TEST_ASSUME_DIFFERENT_OWNER makes git treat the repo as owned
+            # by another user, reproducing the dubious-ownership failure that
+            # motivated routing helper subprocesses through the command env.
+            probe = subprocess.run(
+                ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+                env={**os.environ, "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": os.devnull},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if probe.returncode == 0:
+                self.skipTest("git does not honor GIT_TEST_ASSUME_DIFFERENT_OWNER")
+
+            without_safe = root / "gitconfig-empty"
+            without_safe.write_text("", encoding="utf-8")
             runtime = Runtime(
                 workspace,
-                shell_env_policy=server_module.ShellEnvPolicy(set={"GIT_CONFIG_GLOBAL": os.devnull}),
+                shell_env_policy=server_module.ShellEnvPolicy(
+                    set={"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": str(without_safe)}
+                ),
+            )
+            status = runtime.git_status({"max_entries": 5})
+            self.assertFalse(status.get("is_repo"))
+            self.assertTrue(
+                any("dubious ownership" in warning for warning in status.get("warnings", [])),
+                status.get("warnings"),
+            )
+
+            with_safe = root / "gitconfig-safe"
+            with_safe.write_text(f"[safe]\n\tdirectory = {workspace.as_posix()}\n", encoding="utf-8")
+            runtime = Runtime(
+                workspace,
+                shell_env_policy=server_module.ShellEnvPolicy(
+                    set={"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": str(with_safe)}
+                ),
             )
             status = runtime.git_status({"max_entries": 5})
             self.assertTrue(status.get("is_repo"))

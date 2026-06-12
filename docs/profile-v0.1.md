@@ -956,8 +956,7 @@ Input schema:
   "properties": {
     "path": { "type": "string", "default": "." },
     "include_untracked": { "type": "boolean", "default": true },
-    "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 },
-    "short": { "type": "boolean", "default": false }
+    "max_entries": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 1000 }
   },
   "additionalProperties": false
 }

@@ -131,7 +131,10 @@ PERMISSION_MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
 PERMISSION_MODE_CHOICES = tuple(PERMISSION_MODE_CAPABILITIES)
 # Documented kill_session status enum (docs/profile-v0.1.md); guarded by test_schema_drift.
 KILL_SESSION_STATUSES = ("terminated", "killed", "exited", "terminating", "not_found")
-POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM", "GIT_CONFIG_GLOBAL"}
+POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM"}
+# Not POSIX core, but inherited under inherit="core" so git helper subprocesses and
+# exec_command share the host's global git config (e.g. safe.directory entries).
+GIT_ENV_NAMES = {"GIT_CONFIG_GLOBAL"}
 WINDOWS_CORE_ENV_NAMES = {"PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR"}
 NETWORK_RE = re.compile(
     r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
@@ -375,7 +378,7 @@ def is_core_command_env_name(name: str) -> bool:
     upper = name.upper()
     if os.name == "nt":
         return upper in WINDOWS_CORE_ENV_NAMES
-    return upper in POSIX_CORE_ENV_NAMES or upper.startswith("LC_")
+    return upper in POSIX_CORE_ENV_NAMES or upper in GIT_ENV_NAMES or upper.startswith("LC_")
 
 
 def split_env_patterns(value: str | None) -> tuple[str, ...]:
@@ -2523,10 +2526,11 @@ class Runtime:
             payload["diagnostics"] = diagnostics
 
     def _check_command_paths(self, cmd: str) -> None:
+        scannable = strip_heredoc_payloads(cmd)
         try:
-            tokens = shlex_split(cmd)
+            tokens = shlex_split(scannable)
         except ValueError:
-            tokens = cmd.split()
+            tokens = scannable.split()
         for executable in command_executables(tokens):
             self._reject_setuid_executable(executable)
         for candidate in explicit_command_path_candidates(tokens):
@@ -3357,6 +3361,130 @@ def shlex_split(command: str) -> list[str]:
     return list(lexer)
 
 
+def parse_heredoc_delimiter(command: str, start: int) -> tuple[int, str, bool]:
+    index = start
+    length = len(command)
+    strip_tabs = False
+    if index < length and command[index] == "-":
+        strip_tabs = True
+        index += 1
+    while index < length and command[index] in " \t":
+        index += 1
+    delimiter: list[str] = []
+    while index < length:
+        char = command[index]
+        if char in "'\"":
+            quote = char
+            index += 1
+            while index < length and command[index] != quote:
+                delimiter.append(command[index])
+                index += 1
+            if index < length:
+                index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            delimiter.append(command[index + 1])
+            index += 2
+            continue
+        if char.isspace() or char in ";&|<>()":
+            break
+        delimiter.append(char)
+        index += 1
+    return index, "".join(delimiter), strip_tabs
+
+
+def strip_heredoc_payloads(command: str) -> str:
+    """Drop heredoc body lines so command scanning sees only live shell code.
+
+    Heredoc bodies are stdin data, not code: scanning XML payloads produces fake
+    escape candidates such as ``/modelVersion`` from ``</modelVersion>``. Bash
+    starts the body on the line after the operator, so everything else stays
+    visible to the scanner: redirections on the operator's own line
+    (``cat <<EOF > /etc/cron.d/evil``) and commands after the closing delimiter.
+    ``<<`` inside quotes or inside ``((...))`` arithmetic never opens a heredoc,
+    which keeps fake heredocs from hiding live commands; an unterminated heredoc
+    swallows the remaining lines exactly as bash treats them (as body).
+    """
+    live: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    index = 0
+    length = len(command)
+    in_single = False
+    in_double = False
+    arith_parens = 0
+    while index < length:
+        char = command[index]
+        if in_single:
+            live.append(char)
+            in_single = char != "'"
+            index += 1
+            continue
+        if in_double:
+            if char == "\\" and index + 1 < length:
+                live.append(command[index : index + 2])
+                index += 2
+                continue
+            live.append(char)
+            in_double = char != '"'
+            index += 1
+            continue
+        if char == "\\" and index + 1 < length:
+            live.append(command[index : index + 2])
+            index += 2
+            continue
+        if char == "'":
+            in_single = True
+            live.append(char)
+            index += 1
+            continue
+        if char == '"':
+            in_double = True
+            live.append(char)
+            index += 1
+            continue
+        if arith_parens:
+            if char == "(":
+                arith_parens += 1
+            elif char == ")":
+                arith_parens -= 1
+            live.append(char)
+            index += 1
+            continue
+        if char == "(" and command[index : index + 2] == "((":
+            arith_parens = 2
+            live.append("((")
+            index += 2
+            continue
+        if char == "<" and command[index : index + 3] == "<<<":
+            live.append("<<<")
+            index += 3
+            continue
+        if char == "<" and command[index : index + 2] == "<<":
+            operator_end, delimiter, strip_tabs = parse_heredoc_delimiter(command, index + 2)
+            live.append(command[index:operator_end])
+            index = operator_end
+            if delimiter:
+                pending.append((delimiter, strip_tabs))
+            continue
+        if char == "\n":
+            live.append(char)
+            index += 1
+            for delimiter, strip_tabs in pending:
+                while index < length:
+                    line_end = command.find("\n", index)
+                    if line_end < 0:
+                        line_end = length
+                    line = command[index:line_end].rstrip("\r")
+                    index = line_end + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                        break
+            pending = []
+            continue
+        live.append(char)
+        index += 1
+    return "".join(live)
+
+
 def command_executables(tokens: list[str]) -> list[str]:
     executables: list[str] = []
     expect_command = True
@@ -3401,8 +3529,8 @@ def explicit_command_path_candidates(tokens: list[str]) -> list[str]:
             index += 2
             continue
         if token in HEREDOC_TOKENS:
-            candidates.extend(command_argument_path_candidates(current_command, current_args))
-            return list(dict.fromkeys(candidates))
+            index += 2
+            continue
         if current_command is None:
             if not is_env_assignment_token(token):
                 current_command = token
@@ -3716,27 +3844,6 @@ def parse_branch_line(line: str) -> tuple[str, str, int, int]:
     return branch.strip(), upstream.strip(), ahead, behind
 
 
-def git_rev_parse(path: Path, rev: str) -> str:
-    git = shutil.which("git")
-    if not git:
-        return ""
-    completed = subprocess.run([git, "-C", str(path), "rev-parse", rev], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    return completed.stdout.strip() if completed.returncode == 0 else ""
-
-
-def is_git_repo(path: Path) -> bool:
-    git = shutil.which("git")
-    if not git:
-        return False
-    completed = subprocess.run(
-        [git, "-C", str(path), "rev-parse", "--is-inside-work-tree"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    return completed.returncode == 0 and completed.stdout.strip() == "true"
-
-
 def require_git() -> str:
     git = shutil.which("git")
     if not git:
@@ -3932,29 +4039,6 @@ def add_landlock_path(ruleset_fd: int, path: Path, allowed_access: int, *, requi
             ) from exc
         return
     try:
-        try:
-            mode = path.stat().st_mode
-        except OSError:
-            mode = 0
-        if mode and not stat.S_ISDIR(mode):
-            parent_access = allowed_access & LANDLOCK_ACCESS_FS_READ_DIR
-            if parent_access:
-                try:
-                    parent_fd = os.open(path.parent, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
-                except OSError:
-                    parent_fd = -1
-                if parent_fd >= 0:
-                    try:
-                        parent_attr = LandlockPathBeneathAttr(parent_access, parent_fd)
-                        libc_syscall(
-                            SYS_LANDLOCK_ADD_RULE,
-                            ruleset_fd,
-                            LANDLOCK_RULE_PATH_BENEATH,
-                            ctypes.byref(parent_attr),
-                            0,
-                        )
-                    finally:
-                        os.close(parent_fd)
         path_attr = LandlockPathBeneathAttr(allowed_access & landlock_path_allowed_access(path), fd)
         rc = libc_syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(path_attr), 0)
         if rc < 0 and required:
@@ -4556,7 +4640,6 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "path": {**string, "default": "."},
                 "include_untracked": {**boolean, "default": True},
                 "max_entries": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
-                "short": {**boolean, "default": False},
             }
         ),
         "git_diff": object_schema(
