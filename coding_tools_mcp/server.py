@@ -3405,6 +3405,8 @@ def strip_heredoc_payloads(command: str) -> str:
     which keeps fake heredocs from hiding live commands; an unterminated heredoc
     swallows the remaining lines exactly as bash treats them (as body).
     """
+    if "<<" not in command:
+        return command
     live: list[str] = []
     pending: list[tuple[str, bool]] = []
     index = 0

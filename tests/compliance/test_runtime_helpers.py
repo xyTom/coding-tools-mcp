@@ -27,6 +27,7 @@ from coding_tools_mcp.server import (
     truncate_text_head,
     truncate_text_tail,
 )
+from tests.compliance.fixtures import git_fixture_preflight_error, init_git
 
 
 @contextmanager
@@ -762,23 +763,15 @@ Maven home: /usr/share/maven
             self.assertEqual(ctx.exception.details.get("path"), "/etc/passwd")
 
     def test_git_helpers_use_command_environment(self) -> None:
-        if server_module.shutil.which("git") is None:
-            self.skipTest("git is not available")
+        preflight_error = git_fixture_preflight_error()
+        if preflight_error is not None:
+            self.skipTest(preflight_error)
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             workspace = root / "repo"
             workspace.mkdir()
             (workspace / "tracked.txt").write_text("tracked\n", encoding="utf-8")
-            for cmd in (
-                ["git", "init", "-q"],
-                ["git", "config", "user.email", "test@example.invalid"],
-                ["git", "config", "user.name", "Runtime Test"],
-                ["git", "add", "-A"],
-                ["git", "commit", "-q", "-m", "initial commit"],
-            ):
-                completed = subprocess.run(cmd, cwd=workspace, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                if completed.returncode != 0:
-                    self.skipTest(f"git fixture setup failed: {completed.stderr.strip()}")
+            init_git(workspace)
 
             # GIT_TEST_ASSUME_DIFFERENT_OWNER makes git treat the repo as owned
             # by another user, reproducing the dubious-ownership failure that
@@ -793,15 +786,17 @@ Maven home: /usr/share/maven
             if probe.returncode == 0:
                 self.skipTest("git does not honor GIT_TEST_ASSUME_DIFFERENT_OWNER")
 
+            def runtime_with_git_config(config: Path) -> Runtime:
+                return Runtime(
+                    workspace,
+                    shell_env_policy=ShellEnvPolicy(
+                        set={"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": str(config)}
+                    ),
+                )
+
             without_safe = root / "gitconfig-empty"
             without_safe.write_text("", encoding="utf-8")
-            runtime = Runtime(
-                workspace,
-                shell_env_policy=server_module.ShellEnvPolicy(
-                    set={"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": str(without_safe)}
-                ),
-            )
-            status = runtime.git_status({"max_entries": 5})
+            status = runtime_with_git_config(without_safe).git_status({"max_entries": 5})
             self.assertFalse(status.get("is_repo"))
             self.assertTrue(
                 any("dubious ownership" in warning for warning in status.get("warnings", [])),
@@ -810,17 +805,12 @@ Maven home: /usr/share/maven
 
             with_safe = root / "gitconfig-safe"
             with_safe.write_text(f"[safe]\n\tdirectory = {workspace.as_posix()}\n", encoding="utf-8")
-            runtime = Runtime(
-                workspace,
-                shell_env_policy=server_module.ShellEnvPolicy(
-                    set={"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": str(with_safe)}
-                ),
-            )
+            runtime = runtime_with_git_config(with_safe)
             status = runtime.git_status({"max_entries": 5})
             self.assertTrue(status.get("is_repo"))
             log = runtime.git_log({"max_count": 1})
             self.assertTrue(log.get("is_repo"))
-            self.assertEqual(log.get("commits", [])[0].get("subject"), "initial commit")
+            self.assertEqual(log.get("commits", [])[0].get("subject"), "baseline fixture")
 
 
 def file_path(name: str):
