@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="legacy-title" content="MCP Management Console">
+  <title>MCP 管理台</title>
+  <link rel="stylesheet" href="./admin.css">
+</head>
+<body>
+  <div id="adminApp" class="app-shell">
+    <header class="topbar">
+      <div class="brand"><button id="navToggle" class="secondary icon-btn" title="展开或收起导航">☰</button><div class="brand-mark">M</div><div><h1>MCP 管理台</h1><small>本地工具、会话与聊天持久化</small></div></div>
+      <div class="top-actions"><span id="authState" class="status-pill warn">连接中</span><button id="showOutput" class="secondary">输出</button><button id="refresh" class="secondary">刷新</button></div>
+    </header>
+    <aside id="sidebar" class="sidebar">
+      <div class="side-head"><span>工作区</span><button id="navClose" class="ghost side-close">关闭</button></div>
+      <nav class="nav-list" aria-label="管理台导航">
+        <button data-nav="overview"><span class="nav-icon">⌂</span><span class="nav-label">总览</span></button>
+        <button data-nav="manage"><span class="nav-icon">▣</span><span class="nav-label">MCP 管理</span></button>
+        <button data-nav="add"><span class="nav-icon">＋</span><span class="nav-label">添加 MCP</span></button>
+        <button data-nav="persistence"><span class="nav-icon">◫</span><span class="nav-label">聊天持久化</span></button>
+        <button data-nav="sessions"><span class="nav-icon">≡</span><span class="nav-label">目录与会话</span></button>
+        <button data-nav="usage"><span class="nav-icon">↯</span><span class="nav-label">实时使用</span></button>
+        <button data-nav="settings"><span class="nav-icon">⚙</span><span class="nav-label">认证与设置</span></button>
+        <button data-nav="json"><span class="nav-icon">{}</span><span class="nav-label">高级 JSON</span></button>
+      </nav>
+    </aside>
+    <div id="navBackdrop" class="sidebar-backdrop"></div>
+    <main class="main">
+      <section id="overview" class="view active" data-view="overview">
+        <div class="section-head"><div><h2>总览</h2><p>登录、状态和最近持久化情况集中在首页。</p></div><span id="endpointInfo" class="muted"></span></div>
+        <div id="authGate" class="auth-panel">
+          <div><h2>连接认证</h2><p id="homeAuthHint" class="muted">输入管理 token 或使用 OAuth 登录。</p><label for="token">管理 token</label><input id="token" type="password" autocomplete="off"><div class="toolbar"><button id="saveToken">使用 token</button><button id="clearToken" class="danger">清除 token</button><button id="oauthLogin" class="blue">OAuth 登录</button></div></div>
+          <div><h3>当前结果</h3><pre id="resultSummary" class="json-block">等待连接。</pre></div>
+        </div>
+        <div class="metrics">
+          <div class="metric"><strong id="metricServers">0</strong><span>MCP 配置</span></div>
+          <div class="metric"><strong id="metricTools">0</strong><span>可用工具</span></div>
+          <div class="metric"><strong id="metricSessions">0</strong><span>MCP 会话</span></div>
+          <div class="metric"><strong id="metricCalls">0</strong><span>最近调用</span></div>
+          <div class="metric"><strong id="metricChats">0</strong><span>聊天备份</span></div>
+          <div class="metric"><strong id="metricContext">0</strong><span>恢复上下文</span></div>
+        </div>
+        <div class="split"><details class="surface" open><summary>配置路径</summary><div class="surface-body"><pre id="pathInfo" class="json-block">{}</pre></div></details><details class="surface" open><summary>服务入口</summary><div class="surface-body"><pre id="serverInfo" class="json-block">{}</pre></div></details></div>
+      </section>
+
+      <section id="manage" class="view" data-view="manage">
+        <div class="section-head"><div><h2>MCP 管理</h2><p>查看、启停、重启和移除上游 MCP。</p></div><button id="reloadUpstream" class="secondary">重新加载上游</button></div>
+        <div class="table-wrap"><table><thead><tr><th>别名</th><th>传输</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody id="servers"></tbody></table></div>
+      </section>
+
+      <section id="add" class="view" data-view="add">
+        <div class="section-head"><div><h2>添加 MCP</h2><p>用向导生成 JSON，先预览再保存。</p></div></div>
+        <div class="split wide">
+          <details class="surface" open><summary>配置向导</summary><div class="surface-body"><div class="row"><select id="templateSelect"><option value="filesystem">文件系统 MCP</option><option value="browser">浏览器 MCP</option><option value="github">GitHub MCP</option><option value="local">通用本地命令</option><option value="http">通用 HTTP MCP</option></select><button id="applyTemplate" class="secondary">套用模板</button><button id="refreshTemplates" class="secondary">刷新模板</button></div><div class="form-grid"><div><label for="wizardAlias">名称</label><input id="wizardAlias"></div><div><label for="wizardTransport">传输方式</label><select id="wizardTransport"><option value="stdio">本地命令 stdio</option><option value="http">HTTP URL</option></select></div><div class="full" data-stdio><label for="wizardCommand">命令</label><input id="wizardCommand"></div><div class="full" data-http><label for="wizardUrl">URL</label><input id="wizardUrl"></div><div class="full" data-stdio><label for="wizardArgs">参数</label><textarea id="wizardArgs"></textarea></div><div class="full" data-stdio><label for="wizardEnv">环境变量</label><textarea id="wizardEnv"></textarea></div><div class="full" data-http><label for="wizardHeaders">Headers</label><textarea id="wizardHeaders"></textarea></div><div><label for="wizardInclude">include_tools</label><textarea id="wizardInclude"></textarea></div><div><label for="wizardExclude">exclude_tools</label><textarea id="wizardExclude"></textarea></div><div><label for="wizardTimeout">timeout_ms</label><input id="wizardTimeout" inputmode="numeric"></div><label class="checkline"><input id="wizardEnabled" type="checkbox" checked>启用</label></div><div class="toolbar"><button id="syncJson" class="secondary">同步到 JSON</button><button id="syncWizard" class="secondary">从 JSON 读取</button></div></div></details>
+          <details class="surface" open><summary>配置 JSON</summary><div class="surface-body"><label for="serverConfig">配置 JSON</label><textarea id="serverConfig"></textarea><div class="toolbar"><button id="formatJson" class="secondary">格式化</button><button id="planServer" class="secondary">预览变更</button><button id="installServer">保存并重载</button></div></div></details>
+        </div>
+      </section>
+
+      <section id="persistence" class="view" data-view="persistence">
+        <div class="section-head"><div><h2>聊天持久化</h2><p>聊天记录备份用于审计与回放，恢复上下文用于下一轮 agent 读回。</p></div><div class="toolbar"><span id="chatSessionBadge" class="pill">0 个</span><span id="chatContextBadge" class="pill">0 条</span></div></div>
+        <details class="surface" open><summary>聊天记录</summary><div class="surface-body"><div class="toolbar"><input id="chatMergeTarget" placeholder="目标会话 ID"><button id="mergeChatConversations" class="secondary">合并选中</button><button id="exportAllChatTranscripts" class="secondary">导出全部聊天</button><button id="exportAllChatContexts" class="secondary">导出全部上下文</button><button id="clearChatRecords" class="danger">一键清空</button></div><div class="table-wrap"><table><thead><tr><th>会话</th><th>聊天备份</th><th>恢复上下文</th><th>开始</th><th>最近</th><th>来源</th><th>合并目标</th><th>操作</th></tr></thead><tbody id="chatConversations"></tbody></table></div></div></details>
+        <div class="chat-reader"><div class="chat-reader-head"><div><h3>聊天正文</h3><div class="muted">当前：<code id="chatSelectedConversation">未选择</code></div></div><div id="chatTrackTabs" class="tabs"><button data-chat-track="backup">聊天备份 <span id="backupCount">0 条</span></button><button data-chat-track="context">恢复上下文 <span id="contextCount">0 条</span></button></div></div><div id="chatMessages" class="chat-pane active" data-chat-pane="backup"><div class="muted">选择一个聊天会话后，这里会显示可编辑的完整消息文本。</div></div><div id="chatContextEntries" class="chat-pane" data-chat-pane="context"><div class="muted">选择一个聊天会话后，这里会显示恢复上下文条目。</div></div></div>
+      </section>
+
+      <section id="sessionView" class="view" data-view="sessions">
+        <div class="section-head"><div><h2>目录与会话</h2><p>目录、HTTP 会话和运行命令会话。</p></div><button id="exportAllTranscripts" class="secondary">导出 MCP 记录</button></div>
+        <div class="session-summary"><div class="summary-item"><span class="mini-label">当前工作区</span><code id="sessionWorkspace"></code></div><div class="summary-item"><span class="mini-label">全局默认目录</span><code id="sessionDefaultCwd">.</code></div><div class="summary-item"><span class="mini-label">MCP HTTP 会话</span><strong id="sessionHttpCount">0</strong></div><div class="summary-item"><span class="mini-label">运行命令会话</span><strong id="sessionExecCount">0</strong></div><div class="summary-item"><span class="mini-label">聊天会话</span><strong id="sessionChatCount">0</strong><div class="muted">上下文 <span id="sessionChatContextCount">0</span> 条</div></div></div>
+        <details class="surface" open><summary>全局默认目录</summary><div class="surface-body"><label for="defaultCwd">新会话默认值</label><div class="toolbar"><input id="defaultCwd"><button id="setDefaultCwd">设置目录</button></div></div></details>
+        <details class="surface" open><summary>MCP HTTP 会话 <span id="httpSessionBadge" class="pill">0 个</span></summary><div class="surface-body"><div class="table-wrap"><table><thead><tr><th>会话</th><th>活动</th><th>会话默认目录</th><th>工作区</th><th>来源</th><th>操作</th></tr></thead><tbody id="httpSessions"></tbody></table></div></div></details>
+        <details class="surface" open><summary>运行命令会话 <span id="execSessionBadge" class="pill">0 个</span></summary><div class="surface-body"><div class="table-wrap"><table><thead><tr><th>会话</th><th>状态</th><th>命令执行目录</th><th>命令</th><th>操作</th></tr></thead><tbody id="execSessions"></tbody></table></div></div></details>
+      </section>
+
+      <section id="usage" class="view" data-view="usage">
+        <div class="section-head"><div><h2>实时使用</h2><p>最近 /mcp 访问和工具调用。</p></div></div>
+        <details class="surface" open><summary>/mcp 最近访问</summary><div class="surface-body"><div class="table-wrap compact-table"><table><thead><tr><th>时间</th><th>会话</th><th>HTTP</th><th>RPC</th><th>状态</th><th>目录</th></tr></thead><tbody id="mcpRequests"></tbody></table></div></div></details>
+        <details class="surface" open><summary>工具调用</summary><div class="surface-body"><div class="table-wrap compact-table"><table><thead><tr><th>时间</th><th>工具</th><th>结果</th><th>耗时</th><th>错误</th></tr></thead><tbody id="calls"></tbody></table></div></div></details>
+      </section>
+
+      <section id="settings" class="view" data-view="settings">
+        <div class="section-head"><div><h2>认证与设置</h2><p>密钥、运行时 token 和启动参数。</p></div></div>
+        <div class="split"><details class="surface" open><summary>密钥与运行时认证</summary><div class="surface-body"><label for="secretName">密钥名</label><input id="secretName" placeholder="github_token"><label for="secretValue">密钥值</label><input id="secretValue" type="password" autocomplete="off"><div class="toolbar"><button id="secretSet">保存密钥</button><button id="secretDelete" class="danger">删除密钥</button></div><h3>运行时热更新</h3><label for="runtimeAuthToken">MCP bearer token</label><input id="runtimeAuthToken" type="password"><label for="runtimeAdminToken">Admin bearer token</label><input id="runtimeAdminToken" type="password"><label for="runtimeOAuthPassword">OAuth 授权密码</label><input id="runtimeOAuthPassword" type="password"><button id="saveRuntimeAuth">立即更新</button></div></details><details class="surface" open><summary>启动设置</summary><div class="surface-body"><label for="settingsWorkspace">Workspace</label><input id="settingsWorkspace"><div class="two-col"><div><label for="settingsHost">Host</label><input id="settingsHost"></div><div><label for="settingsPort">Port</label><input id="settingsPort" inputmode="numeric"></div></div><label for="settingsOAuthServerUrl">OAuth server URL</label><input id="settingsOAuthServerUrl" placeholder="https://mcp.example.com"><label for="settingsOAuthTokenSecret">OAuth token secret</label><input id="settingsOAuthTokenSecret" type="password" autocomplete="off"><button id="generateOAuthTokenSecret" class="secondary">生成 token secret</button><label for="settingsPermission">权限模式</label><select id="settingsPermission"><option>safe</option><option>trusted</option><option>dangerous</option></select><label for="settingsShellEnv">Shell 环境继承</label><select id="settingsShellEnv"><option>core</option><option>all</option><option>none</option></select><button id="saveStartupSettings">保存启动设置</button></div></details></div>
+      </section>
+
+      <section id="json" class="view" data-view="json">
+        <div class="section-head"><div><h2>高级 JSON</h2><p>直接调用管理工具，适合调试和少见操作。</p></div></div>
+        <div class="split"><details class="surface" open><summary>工具调用</summary><div class="surface-body"><label for="advancedPayload">工具调用</label><textarea id="advancedPayload"></textarea><button id="advancedRun">执行</button></div></details><details class="surface" open><summary>输出镜像</summary><div class="surface-body"><pre id="outputMirror" class="json-block">见右下角输出面板。</pre></div></details></div>
+      </section>
+    </main>
+    <aside id="outputPanel" class="output-panel hidden"><div class="output-head"><strong>输出</strong><button id="closeOutput" class="secondary">关闭</button></div><pre id="output">准备就绪。</pre></aside>
+  </div>
+  <script type="module" src="./admin.js"></script>
+</body>
+</html>

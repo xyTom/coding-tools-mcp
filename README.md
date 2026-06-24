@@ -11,6 +11,7 @@ It is not a prompt wrapper. It does not expose external agent accounts, memory, 
 
 ## Documentation Map
 
+- [中文版 README](README.zh-CN.md)
 - [Quickstart](docs/quickstart.md)
 - [MCP client configuration](docs/mcp-client-config.md)
 - [Remote MCP](docs/remote-mcp.md)
@@ -92,6 +93,24 @@ HTTP endpoint:
 ```text
 http://127.0.0.1:8765/mcp
 ```
+
+The HTTP server also serves the built-in Web Admin Console on the same port by default:
+
+```text
+http://127.0.0.1:8765/admin
+```
+
+For a personal OAuth-protected admin console:
+
+```bash
+uvx coding-tools-mcp --host 0.0.0.0 --port 8765 --workspace /path/to/repo --oauth-mode
+```
+
+That single process exposes `/mcp`, `/admin`, and `/oauth/authorize`. Use `--no-admin-ui` or `CODING_TOOLS_MCP_ADMIN_UI=0` to disable `/admin`. The legacy `--admin-ui --admin-port 8766` mode is still available, but same-port `/admin` is the default HTTP experience.
+
+Admin-managed MCP servers are stored in `mcp-servers.json`. Path priority is `--upstream-config`, then `CODING_TOOLS_MCP_UPSTREAM_CONFIG`, then `--config-dir`, then `CODING_TOOLS_MCP_CONFIG_DIR`, then `<workspace>/.coding-tools-mcp/mcp-servers.json`. Startup settings such as host, port, workspace, OAuth issuer, permission mode, and shell environment policy are saved in `server-settings.json` next to that config and require a restart to take effect. Runtime changes such as admin token, auth token, default cwd, session termination, secret changes, and MCP reloads apply immediately.
+
+Token values can be edited for personal use from the admin console. If you persist tokens in `server-settings.json`, treat that file as sensitive plaintext. MCP server secrets should use `CODING_TOOLS_MCP_SECRETS_KEY` and `secret_ref`. Skills installation is intentionally not part of this admin console.
 
 Install the optional image extra when you want `view_image` auto-resize support:
 

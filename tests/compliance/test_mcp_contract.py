@@ -413,6 +413,48 @@ class MCPContractTests(ComplianceTestCase):
         finally:
             self.stop_process(process)
 
+    def test_oauth_admin_scope_is_required_for_admin_api(self) -> None:
+        port = free_port()
+        base_url = f"http://127.0.0.1:{port}"
+        env = self.oauth_server_env(
+            CODING_TOOLS_MCP_OAUTH_PASSWORD="test-password",
+            CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=bytes(range(32)).hex(),
+        )
+        process = self.start_oauth_server(port, env)
+        try:
+            admin_page_status, _, admin_page = self.raw_base_http_request(base_url, "GET", "/admin")
+            self.assertEqual(admin_page_status, 200)
+            self.assertIn("MCP 管理台", admin_page)
+
+            mcp_verifier = "m" * 43
+            mcp_code = self.oauth_authorization_code(base_url, "mcp-cli", "test-password", mcp_verifier, scope="mcp")
+            mcp_token_status, mcp_token = self.oauth_token_request(base_url, "mcp-cli", mcp_code, mcp_verifier)
+            self.assertEqual(mcp_token_status, 200)
+            self.assertEqual(mcp_token.get("scope"), "mcp")
+            denied_status, _, _ = self.raw_base_http_request(
+                base_url,
+                "GET",
+                "/api/admin/status",
+                headers={"Authorization": f"Bearer {mcp_token.get('access_token')}"},
+            )
+            self.assertEqual(denied_status, 401)
+
+            admin_verifier = "n" * 43
+            admin_code = self.oauth_authorization_code(base_url, "admin-console", "test-password", admin_verifier, scope="admin")
+            admin_token_status, admin_token = self.oauth_token_request(base_url, "admin-console", admin_code, admin_verifier)
+            self.assertEqual(admin_token_status, 200)
+            self.assertEqual(admin_token.get("scope"), "admin")
+            ok_status, _, ok_body = self.raw_base_http_request(
+                base_url,
+                "GET",
+                "/api/admin/status",
+                headers={"Authorization": f"Bearer {admin_token.get('access_token')}"},
+            )
+            self.assertEqual(ok_status, 200)
+            self.assertTrue(json.loads(ok_body).get("ok"))
+        finally:
+            self.stop_process(process)
+
     def test_oauth_and_static_bearer_dual_credentials_both_accepted(self) -> None:
         port = free_port()
         base_url = f"http://127.0.0.1:{port}"
@@ -900,6 +942,7 @@ class MCPContractTests(ComplianceTestCase):
         password: str,
         verifier: str,
         *,
+        scope: str = "mcp",
         headers: dict[str, str] | None = None,
     ) -> str:
         redirect_uri = "http://127.0.0.1/callback"
@@ -911,6 +954,7 @@ class MCPContractTests(ComplianceTestCase):
                 "redirect_uri": redirect_uri,
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
+                "scope": scope,
                 "state": "test-state",
             }
         )
@@ -929,6 +973,7 @@ class MCPContractTests(ComplianceTestCase):
                 "redirect_uri": redirect_uri,
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
+                "scope": scope,
                 "state": "test-state",
                 "password": password,
             }

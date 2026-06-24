@@ -692,7 +692,7 @@ Maven home: /usr/share/maven
             cwd = runtime.set_default_cwd({"path": "src"})
             self.assertEqual(cwd.get("default_cwd"), "src")
             read = runtime.read_file({"path": "hello.txt"})
-            self.assertEqual(read.get("content"), "hello\n")
+            self.assertEqual(str(read.get("content", "")).replace("\r\n", "\n"), "hello\n")
 
             log = runtime.git_log({"max_count": 5})
             self.assertTrue(log.get("is_repo"))
@@ -708,6 +708,90 @@ Maven home: /usr/share/maven
 
             with self.assertRaises(ToolFailure):
                 runtime.set_default_cwd({"path": "../outside"})
+
+    def test_default_cwd_is_isolated_per_tool_session(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "agent_a").mkdir()
+            (workspace / "agent_b").mkdir()
+            (workspace / "agent_a" / "note.txt").write_text("alpha\n", encoding="utf-8")
+            (workspace / "agent_b" / "note.txt").write_text("bravo\n", encoding="utf-8")
+            runtime = Runtime(workspace)
+
+            first_session = runtime.ensure_http_session(None)
+            second_session = runtime.ensure_http_session(None)
+            self.assertNotEqual(first_session, second_session)
+
+            first_cwd = runtime.call_tool("set_default_cwd", {"path": "agent_a"}, session_id=first_session)["structuredContent"]
+            second_cwd = runtime.call_tool("set_default_cwd", {"path": "agent_b"}, session_id=second_session)["structuredContent"]
+
+            self.assertEqual(first_cwd.get("default_cwd"), "agent_a")
+            self.assertEqual(first_cwd.get("session_id"), first_session)
+            self.assertEqual(second_cwd.get("default_cwd"), "agent_b")
+            self.assertEqual(second_cwd.get("session_id"), second_session)
+
+            first_read = runtime.call_tool("read_file", {"path": "note.txt"}, session_id=first_session)["structuredContent"]
+            second_read = runtime.call_tool("read_file", {"path": "note.txt"}, session_id=second_session)["structuredContent"]
+
+            self.assertEqual(str(first_read.get("content", "")).replace("\r\n", "\n"), "alpha\n")
+            self.assertEqual(str(second_read.get("content", "")).replace("\r\n", "\n"), "bravo\n")
+            self.assertEqual(runtime.get_default_cwd({}).get("default_cwd"), ".")
+
+    def test_absolute_paths_inside_workspace_do_not_override_session_cwds(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "agent_a").mkdir()
+            (workspace / "agent_b").mkdir()
+            (workspace / "agent_a" / "note.txt").write_text("alpha\n", encoding="utf-8")
+            (workspace / "agent_b" / "note.txt").write_text("bravo\n", encoding="utf-8")
+            runtime = Runtime(workspace)
+
+            first_session = runtime.ensure_http_session(None)
+            second_session = runtime.ensure_http_session(None)
+            runtime.call_tool("set_default_cwd", {"path": "agent_a"}, session_id=first_session)
+            runtime.call_tool("set_default_cwd", {"path": "agent_b"}, session_id=second_session)
+
+            absolute_b_note = str((workspace / "agent_b" / "note.txt").resolve())
+            absolute_read = runtime.call_tool(
+                "read_file",
+                {"path": absolute_b_note},
+                session_id=first_session,
+            )["structuredContent"]
+            first_relative_read = runtime.call_tool(
+                "read_file",
+                {"path": "note.txt"},
+                session_id=first_session,
+            )["structuredContent"]
+            first_cwd = runtime.call_tool("get_default_cwd", {}, session_id=first_session)["structuredContent"]
+            second_cwd = runtime.call_tool("get_default_cwd", {}, session_id=second_session)["structuredContent"]
+            absolute_write = runtime.workspace.resolve_for_write_at(
+                workspace / "agent_b",
+                str((workspace / "agent_a" / "created.txt").resolve()),
+            )
+
+            self.assertEqual(str(absolute_read.get("content", "")).replace("\r\n", "\n"), "bravo\n")
+            self.assertEqual(str(first_relative_read.get("content", "")).replace("\r\n", "\n"), "alpha\n")
+            self.assertEqual(first_cwd.get("default_cwd"), "agent_a")
+            self.assertEqual(second_cwd.get("default_cwd"), "agent_b")
+            self.assertEqual(absolute_write.display, "agent_a/created.txt")
+
+    def test_absolute_paths_outside_workspace_are_rejected(self) -> None:
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as outside_tmp:
+            workspace = Path(tmp)
+            outside = Path(outside_tmp) / "outside.txt"
+            outside.write_text("outside\n", encoding="utf-8")
+            runtime = Runtime(workspace)
+
+            with self.assertRaises(ToolFailure) as read_failure:
+                runtime.read_file({"path": str(outside.resolve())})
+            with self.assertRaises(ToolFailure) as missing_read_failure:
+                runtime.read_file({"path": str(Path(outside_tmp) / "missing.txt")})
+            with self.assertRaises(ToolFailure) as write_failure:
+                runtime.workspace.resolve_for_write_at(workspace, str(Path(outside_tmp) / "created.txt"))
+
+            self.assertEqual(read_failure.exception.code, "PATH_OUTSIDE_WORKSPACE")
+            self.assertEqual(missing_read_failure.exception.code, "PATH_OUTSIDE_WORKSPACE")
+            self.assertEqual(write_failure.exception.code, "PATH_OUTSIDE_WORKSPACE")
 
 
 def file_path(name: str):

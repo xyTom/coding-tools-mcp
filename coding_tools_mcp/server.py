@@ -25,7 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
@@ -33,6 +33,10 @@ from typing import Any, cast
 import jwt
 
 from . import __version__
+from .admin import ADMIN_TOOL_NAMES, McpAdminManager, McpManagementError
+from .transcript import TranscriptStore
+from .upstream import UpstreamManager
+from .webui import admin_console_html
 
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -144,6 +148,8 @@ DESTRUCTIVE_RE = re.compile(
 )
 MAX_HTTP_REQUEST_BYTES = 1_048_576
 MAX_JSON_RPC_BATCH_ITEMS = 50
+HTTP_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.~:-]{1,128}$")
+RECENT_MCP_REQUEST_LIMIT = 100
 SESSION_BUFFER_BYTES = 1_048_576
 SHELL_CONTROL_TOKENS = {"|", "||", "&", "&&", ";", "(", ")"}
 REDIRECTION_TOKENS = {">", ">>", "<", "<>", ">&", "<&", "&>", "&>>"}
@@ -209,6 +215,23 @@ NETWORK_LITERAL_COMMANDS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "c
 INLINE_SCRIPT_PERMISSION = "inline_script"
 ENV_PREFIX = "CODING_TOOLS_MCP"
 RUNTIME_ROOT_DIR_NAME = "coding-tools-mcp"
+DEFAULT_CONFIG_DIR_NAME = ".coding-tools-mcp"
+UPSTREAM_CONFIG_FILENAME = "mcp-servers.json"
+SERVER_SETTINGS_FILENAME = "server-settings.json"
+TRANSCRIPT_DB_FILENAME = "transcripts.sqlite3"
+RECENT_TOOL_TRACE_LIMIT = 100
+STARTUP_SETTING_KEYS = {
+    "host",
+    "port",
+    "workspace",
+    "auth_token",
+    "admin_token",
+    "oauth_password",
+    "oauth_server_url",
+    "oauth_token_secret",
+    "permission_mode",
+    "shell_env_inherit",
+}
 SPECIAL_DEVICE_PATHS = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
 DNS_RESOLVER_READ_ROOTS = (
     "/etc/resolv.conf",
@@ -287,6 +310,7 @@ class OAuthConfig:
     server_url: str | None
     token_secret: bytes
     token_ttl: int = OAUTH_TOKEN_TTL_SECONDS
+    admin_scope: str = "admin"
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
@@ -295,21 +319,30 @@ def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
     return secrets.compare_digest(expected, code_challenge)
 
 
-def _create_oauth_token(cfg: OAuthConfig, server_url: str) -> str:
+def _create_oauth_token(cfg: OAuthConfig, server_url: str, *, scope: str = "mcp") -> str:
     now = int(time.time())
     return jwt.encode(
-        {"iss": server_url, "aud": server_url, "iat": now, "exp": now + cfg.token_ttl, "scope": "mcp"},
+        {"iss": server_url, "aud": server_url, "iat": now, "exp": now + cfg.token_ttl, "scope": scope},
         cfg.token_secret,
         algorithm="HS256",
     )
 
 
-def _validate_oauth_token(token: str, cfg: OAuthConfig, server_url: str) -> bool:
+def _decode_oauth_token(token: str, cfg: OAuthConfig, server_url: str) -> dict[str, Any] | None:
     try:
-        jwt.decode(token, cfg.token_secret, algorithms=["HS256"], audience=server_url, issuer=server_url)
-        return True
+        decoded = jwt.decode(token, cfg.token_secret, algorithms=["HS256"], audience=server_url, issuer=server_url)
     except jwt.PyJWTError:
-        return False
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _validate_oauth_token(token: str, cfg: OAuthConfig, server_url: str) -> bool:
+    return _decode_oauth_token(token, cfg, server_url) is not None
+
+
+def _oauth_scope_allowed(scope: str, cfg: OAuthConfig) -> bool:
+    requested = {part for part in scope.split() if part}
+    return requested.issubset({"mcp", cfg.admin_scope})
 
 
 def _oauth_client_id_allowed(client_id: str, cfg: OAuthConfig) -> bool:
@@ -395,12 +428,134 @@ def truthy_env(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def falsy_env(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"0", "false", "no", "off"}
+
+
 def env_int(name: str, fallback: int) -> int:
     raw = (os.environ.get(name) or "").strip()
     try:
         return int(raw) if raw else fallback
     except ValueError:
         return fallback
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _settings_text(settings: dict[str, Any], key: str) -> str | None:
+    value = settings.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def read_server_settings(path: Path) -> dict[str, Any]:
+    try:
+        if not path.exists():
+            return {}
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def write_server_settings(path: Path, settings: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _resolve_oauth_token_secret(startup_settings: dict[str, Any], settings_path: Path | None) -> bytes:
+    raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or _settings_text(
+        startup_settings, "oauth_token_secret"
+    ) or ""
+    if raw_secret:
+        try:
+            return bytes.fromhex(raw_secret)
+        except ValueError as exc:
+            raise ValueError(
+                f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET or oauth_token_secret setting must be hex-encoded bytes."
+            ) from exc
+    token_secret = secrets.token_bytes(32)
+    if settings_path is None:
+        return token_secret
+    updated_settings = dict(startup_settings)
+    updated_settings["oauth_token_secret"] = token_secret.hex()
+    try:
+        write_server_settings(settings_path, updated_settings)
+    except OSError as exc:
+        print(
+            f"WARNING: generated OAuth token secret could not be saved to {settings_path}: {exc}",
+            file=sys.stderr,
+        )
+    else:
+        startup_settings.clear()
+        startup_settings.update(updated_settings)
+        print(
+            f"Generated and saved OAuth token secret to {settings_path}; OAuth tokens can survive restarts.",
+            file=sys.stderr,
+        )
+    return token_secret
+
+
+def effective_workspace_path(args: argparse.Namespace, settings: dict[str, Any] | None = None) -> Path:
+    settings = settings or {}
+    raw = (
+        getattr(args, "workspace", None)
+        or os.environ.get(f"{ENV_PREFIX}_WORKSPACE")
+        or _settings_text(settings, "workspace")
+        or os.getcwd()
+    )
+    return Path(str(raw)).expanduser()
+
+
+def effective_host(args: argparse.Namespace, settings: dict[str, Any] | None = None) -> str:
+    settings = settings or {}
+    return str(
+        getattr(args, "host", None)
+        or os.environ.get(f"{ENV_PREFIX}_HOST")
+        or _settings_text(settings, "host")
+        or "127.0.0.1"
+    )
+
+
+def effective_port(args: argparse.Namespace, settings: dict[str, Any] | None = None) -> int:
+    settings = settings or {}
+    arg_port = _coerce_optional_int(getattr(args, "port", None))
+    if arg_port is not None:
+        return arg_port
+    env_port = _coerce_optional_int(os.environ.get(f"{ENV_PREFIX}_PORT"))
+    if env_port is not None:
+        return env_port
+    setting_port = _coerce_optional_int(settings.get("port"))
+    return setting_port if setting_port is not None else 8000
+
+
+def resolve_config_paths(args: argparse.Namespace, workspace: Path) -> tuple[Path, Path, Path]:
+    upstream_config = getattr(args, "upstream_config", None) or os.environ.get(f"{ENV_PREFIX}_UPSTREAM_CONFIG") or None
+    raw_config_dir = getattr(args, "config_dir", None) or os.environ.get(f"{ENV_PREFIX}_CONFIG_DIR") or None
+    if raw_config_dir:
+        config_dir = Path(str(raw_config_dir)).expanduser()
+    elif upstream_config:
+        config_dir = Path(str(upstream_config)).expanduser().parent
+    else:
+        config_dir = workspace / DEFAULT_CONFIG_DIR_NAME
+    upstream_path = Path(str(upstream_config)).expanduser() if upstream_config else config_dir / UPSTREAM_CONFIG_FILENAME
+    return config_dir, upstream_path, config_dir / SERVER_SETTINGS_FILENAME
+
+
+def apply_startup_settings(args: argparse.Namespace, settings: dict[str, Any]) -> None:
+    if getattr(args, "permission_mode", None) is None and _settings_text(settings, "permission_mode"):
+        args.permission_mode = _settings_text(settings, "permission_mode")
+    if getattr(args, "shell_env_inherit", None) is None and _settings_text(settings, "shell_env_inherit"):
+        args.shell_env_inherit = _settings_text(settings, "shell_env_inherit")
 
 
 def configured_runtime_root() -> Path | None:
@@ -642,10 +797,239 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotent=True,
         in_read_only_profile=True,
     ),
+    "record_chat_transcript": ToolSpec(
+        title="Record chat transcript",
+        description="Append user, assistant, system, or tool chat messages to a host-side persistent transcript for later Markdown export.",
+        read_only=False,
+        destructive=False,
+        open_world=False,
+    ),
+    "record_chat_message": ToolSpec(
+        title="Record chat message",
+        description="Append one flat user, assistant, system, or tool chat message to a host-side persistent transcript.",
+        read_only=False,
+        destructive=False,
+        open_world=False,
+    ),
+    "recall_chat_context": ToolSpec(
+        title="Recall chat context",
+        description="Return recently persisted messages and Markdown context for one chat conversation.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+        idempotent=True,
+        in_read_only_profile=True,
+    ),
 }
 
 FULL_TOOL_NAMES = tuple(TOOL_REGISTRY)
 READ_ONLY_TOOL_NAMES = tuple(name for name, spec in TOOL_REGISTRY.items() if spec.in_read_only_profile)
+
+ADMIN_TOOL_REGISTRY: dict[str, ToolSpec] = {
+    "mcp_catalog_list": ToolSpec(
+        title="MCP catalog list",
+        description="List managed upstream MCP server configurations and runtime status.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_template_list": ToolSpec(
+        title="MCP template list",
+        description="List built-in upstream MCP server installation templates.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_template_render": ToolSpec(
+        title="MCP template render",
+        description="Render a built-in upstream MCP template and return its dry-run install plan.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_server_plan": ToolSpec(
+        title="MCP server plan",
+        description="Validate an upstream MCP server configuration and return a dry-run install or update plan.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_server_install": ToolSpec(
+        title="MCP server install",
+        description="Install an upstream MCP server from structured configuration; writes only when apply is true.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_server_update": ToolSpec(
+        title="MCP server update",
+        description="Update an installed upstream MCP server configuration; writes only when apply is true.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_server_enable": ToolSpec(
+        title="MCP server enable",
+        description="Enable an installed upstream MCP server; writes only when apply is true.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_server_disable": ToolSpec(
+        title="MCP server disable",
+        description="Disable an installed upstream MCP server; writes only when apply is true.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_server_remove": ToolSpec(
+        title="MCP server remove",
+        description="Remove an installed upstream MCP server configuration; writes only when apply is true.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_server_reload": ToolSpec(
+        title="MCP server reload",
+        description="Reload upstream MCP servers from the managed configuration.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_server_health": ToolSpec(
+        title="MCP server health",
+        description="Return runtime health for one or all managed upstream MCP servers.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_server_start": ToolSpec(
+        title="MCP server start",
+        description="Start or restart one configured upstream MCP server without editing config.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_server_stop": ToolSpec(
+        title="MCP server stop",
+        description="Stop one running upstream MCP server without editing config.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_server_logs": ToolSpec(
+        title="MCP server logs",
+        description="Return recent stderr logs captured from managed upstream MCP servers.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_secret_set": ToolSpec(
+        title="MCP secret set",
+        description="Store a secret in the encrypted local MCP secret vault.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_secret_list": ToolSpec(
+        title="MCP secret list",
+        description="List secret names in the local MCP secret vault without revealing values.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_secret_delete": ToolSpec(
+        title="MCP secret delete",
+        description="Delete a secret from the encrypted local MCP secret vault.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_transcript_sessions": ToolSpec(
+        title="MCP transcript sessions",
+        description="List persisted MCP HTTP sessions recorded on the host.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_transcript_export": ToolSpec(
+        title="MCP transcript export",
+        description="Export persisted MCP session activity to readable Markdown.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_conversations": ToolSpec(
+        title="MCP chat conversations",
+        description="List persisted chat conversations submitted by MCP clients or agents.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_messages": ToolSpec(
+        title="MCP chat messages",
+        description="List persisted messages for one chat conversation.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_context": ToolSpec(
+        title="MCP chat context",
+        description="List persisted restore-context entries for one chat conversation.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_export": ToolSpec(
+        title="MCP chat export",
+        description="Export persisted chat conversation text to readable Markdown.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_context_export": ToolSpec(
+        title="MCP chat context export",
+        description="Export persisted restore-context entries to readable Markdown.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_update_message": ToolSpec(
+        title="MCP chat update message",
+        description="Edit one persisted chat message.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_chat_delete_message": ToolSpec(
+        title="MCP chat delete message",
+        description="Delete one persisted chat message.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_chat_delete_conversation": ToolSpec(
+        title="MCP chat delete conversation",
+        description="Delete all messages in one persisted chat conversation.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_chat_clear": ToolSpec(
+        title="MCP chat clear",
+        description="Delete all persisted chat conversations and messages.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_chat_merge": ToolSpec(
+        title="MCP chat merge",
+        description="Merge multiple persisted chat conversations into one conversation id.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+}
 
 LANDLOCK_CREATE_RULESET_VERSION = 1
 LANDLOCK_RULE_PATH_BENEATH = 1
@@ -1191,25 +1575,35 @@ class Workspace:
         if str(self.root) in unsafe_roots:
             raise ToolFailure("INVALID_ARGUMENT", "Unsafe workspace root rejected.", category="security")
 
-    def _reject_unsafe_text(self, raw_path: str) -> PurePosixPath:
+    def _validate_path_text(self, raw_path: str) -> str:
         if not isinstance(raw_path, str) or not raw_path:
             raise ToolFailure("INVALID_ARGUMENT", "Path must be a non-empty string.", category="validation")
         if "\x00" in raw_path:
             raise ToolFailure("INVALID_ARGUMENT", "Path contains a NUL byte.", category="validation")
-        if raw_path.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", raw_path):
-            raise ToolFailure("ABSOLUTE_PATH_DENIED", "Absolute paths are denied.", category="security")
-        pure = PurePosixPath(raw_path)
+        return raw_path
+
+    def _relative_candidate(self, base: Path, raw_path: str) -> Path:
+        pure = PurePosixPath(raw_path.replace("\\", "/"))
         if any(part == ".." for part in pure.parts):
             raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Path escapes the configured workspace.", category="security")
-        return pure
+        return base.joinpath(*pure.parts)
+
+    def _candidate_path(self, base: Path, raw_path: str) -> Path:
+        raw_path = self._validate_path_text(raw_path)
+        native = Path(raw_path).expanduser()
+        if native.is_absolute():
+            if any(part == ".." for part in native.parts) or not is_relative_to(native, self.root):
+                raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Path escapes the configured workspace.", category="security")
+            return native
+        if raw_path.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", raw_path):
+            raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Path escapes the configured workspace.", category="security")
+        return self._relative_candidate(self._validate_base(base), raw_path)
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
         return self.resolve_existing_at(self.root, raw_path)
 
     def resolve_existing_at(self, base: Path, raw_path: str = ".") -> ResolvedPath:
-        pure = self._reject_unsafe_text(raw_path or ".")
-        base = self._validate_base(base)
-        candidate = base.joinpath(*pure.parts)
+        candidate = self._candidate_path(base, raw_path or ".")
         try:
             resolved = candidate.resolve(strict=True)
         except FileNotFoundError as exc:
@@ -1223,11 +1617,9 @@ class Workspace:
         return self.resolve_for_write_at(self.root, raw_path)
 
     def resolve_for_write_at(self, base: Path, raw_path: str) -> ResolvedPath:
-        pure = self._reject_unsafe_text(raw_path)
-        if pure.name in {"", ".", ".."}:
+        candidate = self._candidate_path(base, raw_path)
+        if candidate.name in {"", ".", ".."}:
             raise ToolFailure("INVALID_ARGUMENT", "Invalid write target.", category="validation")
-        base = self._validate_base(base)
-        candidate = base.joinpath(*pure.parts)
         if candidate.exists() or candidate.is_symlink():
             resolved = candidate.resolve(strict=True)
             if not is_relative_to(resolved, self.root):
@@ -1262,8 +1654,7 @@ class Workspace:
         return resolved
 
     def reject_write_symlink(self, raw_path: str) -> None:
-        pure = self._reject_unsafe_text(raw_path)
-        candidate = self.root.joinpath(*pure.parts)
+        candidate = self._candidate_path(self.root, raw_path)
         if candidate.is_symlink():
             raise ToolFailure("SYMLINK_ESCAPE", "Writing through symlinks is denied.", category="security")
 
@@ -1329,6 +1720,8 @@ def trim_buffer(
 class ExecSession:
     session_id: str
     process: subprocess.Popen[bytes]
+    command: str = ""
+    workdir: str = ""
     timeout_at: float | None = None
     warnings: list[str] = field(default_factory=list)
     stdout: bytearray = field(default_factory=bytearray)
@@ -1475,7 +1868,17 @@ class Runtime:
         allow_network: bool = False,
         tool_profile: str = "full",
         auth_token: str | None = None,
+        admin_token: str | None = None,
         oauth_config: OAuthConfig | None = None,
+        upstream_manager: UpstreamManager | None = None,
+        admin_manager: McpAdminManager | None = None,
+        config_dir: Path | None = None,
+        upstream_config_path: Path | None = None,
+        settings_path: Path | None = None,
+        startup_settings: dict[str, Any] | None = None,
+        server_host: str | None = None,
+        server_port: int | None = None,
+        admin_ui_enabled: bool = False,
     ) -> None:
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
@@ -1509,16 +1912,39 @@ class Runtime:
             )
         self.tool_profile = tool_profile
         self.auth_token = auth_token or None
+        self.admin_token = admin_token or None
         self.oauth_config = oauth_config
+        self.upstream_manager = upstream_manager or UpstreamManager.empty(PROTOCOL_VERSION)
+        self.admin_manager = admin_manager
+        self.config_dir = config_dir
+        self.upstream_config_path = upstream_config_path
+        self.settings_path = settings_path
+        self.startup_settings = dict(startup_settings or {})
+        transcript_dir = self.config_dir or (self.workspace.root / DEFAULT_CONFIG_DIR_NAME)
+        self.transcript_store = TranscriptStore(transcript_dir / TRANSCRIPT_DB_FILENAME)
+        self.server_host = server_host
+        self.server_port = server_port
+        self.admin_ui_enabled = admin_ui_enabled
         self.server_instance_id = secrets.token_urlsafe(12)
         self._set_runtime_dir(runtime_dir_for_workspace(self.workspace.root, self.server_instance_id))
         self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(self.workspace.root, self.server_instance_id)
         self._pending_codes: dict[str, dict[str, Any]] = {}
         self._pending_codes_lock = threading.Lock()
         self.default_cwd = self.workspace.root
+        self.session_default_cwds: dict[str, Path] = {}
+        self.session_default_cwds_lock = threading.Lock()
+        self._tool_context = threading.local()
         self.sessions: dict[str, ExecSession] = {}
         self.sessions_lock = threading.Lock()
+        self.recent_tool_traces: list[dict[str, Any]] = []
+        self.recent_tool_traces_lock = threading.Lock()
         self.http_session_id = secrets.token_urlsafe(24)
+        self.http_session_ids = {self.http_session_id}
+        self.http_session_ids_lock = threading.Lock()
+        self.http_sessions: dict[str, dict[str, Any]] = {}
+        self.http_sessions_lock = threading.Lock()
+        self.recent_mcp_requests: list[dict[str, Any]] = []
+        self.recent_mcp_requests_lock = threading.Lock()
         self.patch_baselines: dict[str, str | None] = {}
         self.initialized = False
         self.logging_level = "warning"
@@ -1606,27 +2032,141 @@ class Runtime:
             "instructions": "Use these tools only for local coding operations inside the configured workspace.",
         }
 
-    def list_tools(self) -> dict[str, Any]:
-        return {"tools": [tool_definition(name, tool_profile=self.tool_profile) for name in self.exposed_tool_names()]}
+    def list_tools(self, *, include_admin: bool = False) -> dict[str, Any]:
+        local_tools = [tool_definition(name, tool_profile=self.tool_profile) for name in self.local_exposed_tool_names()]
+        upstream_tools = self.upstream_manager.tool_definitions(tool_profile=self.tool_profile)
+        admin_tools = [admin_tool_definition(name, tool_profile=self.tool_profile) for name in self.admin_tool_names()]
+        return {"tools": [*local_tools, *upstream_tools, *(admin_tools if include_admin else [])]}
 
-    def exposed_tool_names(self) -> list[str]:
+    def exposed_tool_names(self, *, include_admin: bool = False) -> list[str]:
+        return [
+            *self.local_exposed_tool_names(),
+            *self.upstream_manager.tool_names(tool_profile=self.tool_profile),
+            *(self.admin_tool_names() if include_admin else []),
+        ]
+
+    def local_exposed_tool_names(self) -> list[str]:
         names = READ_ONLY_TOOL_NAMES if self.tool_profile == "read-only" else FULL_TOOL_NAMES
         return [name for name in names if self.enable_view_image or name != "view_image"]
+
+    def admin_tool_names(self) -> list[str]:
+        if self.admin_manager is None:
+            return []
+        return [name for name in ADMIN_TOOL_NAMES if name in ADMIN_TOOL_REGISTRY]
 
     def auth_enabled(self) -> bool:
         return self.auth_token is not None or self.oauth_config is not None
 
+    def admin_auth_enabled(self) -> bool:
+        return self.admin_token is not None or self.oauth_config is not None
+
     def oauth_enabled(self) -> bool:
         return self.oauth_config is not None
 
+    def create_http_session(self) -> str:
+        with self.http_session_ids_lock:
+            session_id = secrets.token_urlsafe(24)
+            while session_id in self.http_session_ids:
+                session_id = secrets.token_urlsafe(24)
+            self.http_session_ids.add(session_id)
+            return session_id
+
+    def has_http_session(self, session_id: str) -> bool:
+        with self.http_session_ids_lock:
+            return session_id in self.http_session_ids
+
+    def ensure_http_session(self, session_id: str | None) -> str:
+        if session_id and self.has_http_session(session_id):
+            return session_id
+        return self.create_http_session()
+
+    def http_session_default_cwd(self, session_id: str) -> tuple[Path, str]:
+        with self.session_default_cwds_lock:
+            path = self.session_default_cwds.get(session_id, self.default_cwd)
+        return path, normalize_rel_display(path, self.workspace.root)
+
+    def record_mcp_http_access(
+        self,
+        *,
+        session_id: str,
+        method: str,
+        path: str,
+        rpc_method: str | None,
+        status: int,
+        remote_addr: str | None,
+        user_agent: str | None,
+        protocol_version: str | None,
+    ) -> None:
+        if not HTTP_SESSION_ID_RE.fullmatch(session_id):
+            session_id = self.http_session_id
+        now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        cwd, cwd_display = self.http_session_default_cwd(session_id)
+        with self.http_session_ids_lock:
+            self.http_session_ids.add(session_id)
+        request_event = {
+            "event": "mcp_http_request",
+            "timestamp": now,
+            "session_id": session_id,
+            "method": method,
+            "path": path,
+            "rpc_method": rpc_method,
+            "status": status,
+            "remote_addr": remote_addr,
+            "user_agent": user_agent,
+            "protocol_version": protocol_version,
+            "workspace": str(self.workspace.root),
+            "default_cwd": str(cwd),
+            "default_cwd_display": cwd_display,
+        }
+        with self.http_sessions_lock:
+            current = self.http_sessions.get(session_id)
+            if current is None:
+                current = {
+                    "session_id": session_id,
+                    "first_seen": now,
+                    "request_count": 0,
+                }
+                self.http_sessions[session_id] = current
+            current["last_seen"] = now
+            current["request_count"] = int(current.get("request_count", 0)) + 1
+            current["last_method"] = method
+            current["last_path"] = path
+            current["last_rpc_method"] = rpc_method
+            current["last_status"] = status
+            current["remote_addr"] = remote_addr
+            current["user_agent"] = user_agent
+            current["protocol_version"] = protocol_version
+            current["default_cwd"] = str(cwd)
+            current["default_cwd_display"] = cwd_display
+            current["workspace"] = str(self.workspace.root)
+        with self.recent_mcp_requests_lock:
+            self.recent_mcp_requests.append(request_event)
+            if len(self.recent_mcp_requests) > RECENT_MCP_REQUEST_LIMIT:
+                del self.recent_mcp_requests[: len(self.recent_mcp_requests) - RECENT_MCP_REQUEST_LIMIT]
+        try:
+            self.transcript_store.record_http_request(request_event)
+        except Exception as exc:  # noqa: BLE001 - transcript persistence must not break MCP traffic
+            self.report_transcript_error(exc)
+
+    def current_tool_session_id(self) -> str | None:
+        session_id = getattr(self._tool_context, "session_id", None)
+        return session_id if isinstance(session_id, str) and session_id else None
+
+    def effective_default_cwd(self) -> Path:
+        session_id = self.current_tool_session_id()
+        if session_id:
+            with self.session_default_cwds_lock:
+                return self.session_default_cwds.get(session_id, self.default_cwd)
+        return self.default_cwd
+
     def default_cwd_display(self) -> str:
-        return normalize_rel_display(self.default_cwd, self.workspace.root)
+        return normalize_rel_display(self.effective_default_cwd(), self.workspace.root)
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
-        return self.workspace.resolve_existing_at(self.default_cwd, raw_path)
+        return self.workspace.resolve_existing_at(self.effective_default_cwd(), raw_path)
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
-        return self.workspace.resolve_for_write_at(self.default_cwd, raw_path)
+        return self.workspace.resolve_for_write_at(self.effective_default_cwd(), raw_path)
 
     def git_path_filter(self, raw_path: str) -> str:
         if raw_path == ".":
@@ -1658,6 +2198,9 @@ class Runtime:
             "protocol_version": PROTOCOL_VERSION,
             **self._exec_environment_summary(),
             "default_cwd": self.default_cwd_display(),
+            "package_root": str(Path(__file__).resolve().parents[1]),
+            "config_dir": str(self.config_dir or (self.workspace.root / DEFAULT_CONFIG_DIR_NAME)),
+            "transcript_db": str(self.transcript_store.db_path),
             "tool_profile": self.tool_profile,
             "auth_enabled": self.auth_enabled(),
             "dangerously_skip_all_permissions": self.dangerously_skip_all_permissions,
@@ -1674,7 +2217,209 @@ class Runtime:
             "endpoint_path": "/mcp",
             "tools": tools,
             "tool_count": len(tools),
+            "upstream": self.upstream_manager.status_payload(),
         }
+
+    def config_paths_payload(self) -> dict[str, Any]:
+        return {
+            "config_dir": str(self.config_dir) if self.config_dir else None,
+            "upstream_config": str(self.upstream_config_path) if self.upstream_config_path else None,
+            "settings": str(self.settings_path) if self.settings_path else None,
+        }
+
+    def active_exec_sessions_payload(self) -> list[dict[str, Any]]:
+        sessions: list[dict[str, Any]] = []
+        with self.sessions_lock:
+            snapshot = list(self.sessions.values())
+        for session in snapshot:
+            session.refresh_status()
+            with session.lock:
+                status = "running" if session.process.poll() is None else "exited"
+                if session.timed_out:
+                    status = "timeout"
+                elif session.terminating and session.process.poll() is None:
+                    status = "terminating"
+                sessions.append(
+                    {
+                        "session_id": session.session_id,
+                        "status": status,
+                        "command": session.command,
+                        "workdir": session.workdir,
+                        "started_at": datetime.fromtimestamp(session.started_at, timezone.utc)
+                        .isoformat(timespec="seconds")
+                        .replace("+00:00", "Z"),
+                        "exit_code": session.exit_code,
+                        "signal": session.signal_name,
+                        "stdout_total_bytes": session.stdout_total_bytes,
+                        "stderr_total_bytes": session.stderr_total_bytes,
+                        "stdout_dropped_bytes": session.stdout_dropped_bytes,
+                        "stderr_dropped_bytes": session.stderr_dropped_bytes,
+                    }
+                )
+        return sessions
+
+    def recent_tool_calls_payload(self) -> list[dict[str, Any]]:
+        with self.recent_tool_traces_lock:
+            return list(self.recent_tool_traces)
+
+    def http_sessions_payload(self) -> list[dict[str, Any]]:
+        with self.http_sessions_lock:
+            sessions = [dict(session) for session in self.http_sessions.values()]
+        sessions.sort(key=lambda item: str(item.get("last_seen") or ""), reverse=True)
+        return sessions
+
+    def recent_mcp_requests_payload(self) -> list[dict[str, Any]]:
+        with self.recent_mcp_requests_lock:
+            return list(self.recent_mcp_requests)
+
+    def report_transcript_error(self, exc: Exception) -> None:
+        if os.environ.get(f"{ENV_PREFIX}_TRACE") == "1":
+            print(f"transcript persistence failed: {exc}", file=sys.stderr, flush=True)
+
+    def restart_command(self) -> str:
+        parts = [
+            "uvx",
+            SERVER_NAME,
+            "--host",
+            str(self.server_host or "127.0.0.1"),
+            "--port",
+            str(self.server_port or 8000),
+            "--workspace",
+            str(self.workspace.root),
+        ]
+        if self.config_dir is not None:
+            parts.extend(["--config-dir", str(self.config_dir)])
+        if self.oauth_config is not None:
+            parts.append("--oauth-mode")
+        return " ".join(shlex.quote(part) for part in parts)
+
+    def admin_status_payload(self, *, base_url: str | None = None) -> dict[str, Any]:
+        upstream_status = self.upstream_manager.status_payload()
+        admin_status = self.admin_manager.status_payload() if self.admin_manager is not None else {"enabled": False}
+        try:
+            catalog = self.admin_manager.catalog_list(upstream_status) if self.admin_manager is not None else {"servers": [], "server_count": 0}
+        except Exception as exc:  # noqa: BLE001
+            catalog = {"ok": False, "error": str(exc), "servers": [], "server_count": 0}
+        try:
+            templates = self.admin_manager.template_list() if self.admin_manager is not None else {"templates": [], "template_count": 0}
+        except Exception as exc:  # noqa: BLE001
+            templates = {"ok": False, "error": str(exc), "templates": [], "template_count": 0}
+        try:
+            transcripts = self.transcript_store.status()
+            chat_conversations = self.transcript_store.list_chat_conversations(limit=100)
+        except Exception as exc:  # noqa: BLE001
+            transcripts = {"ok": False, "error": str(exc)}
+            chat_conversations = {"ok": False, "error": str(exc), "conversations": [], "conversation_count": 0}
+        http_sessions = self.http_sessions_payload()
+        with self.session_default_cwds_lock:
+            session_cwds = {session: str(path) for session, path in self.session_default_cwds.items()}
+        startup_settings = dict(self.startup_settings)
+        for secret_key in ("auth_token", "admin_token", "oauth_password", "oauth_token_secret"):
+            if _settings_text(startup_settings, secret_key):
+                startup_settings[f"{secret_key}_configured"] = True
+                startup_settings.pop(secret_key, None)
+        local_names = self.local_exposed_tool_names()
+        upstream_names = self.upstream_manager.tool_names(tool_profile=self.tool_profile)
+        admin_names = self.admin_tool_names()
+        return {
+            "ok": True,
+            "server_info": self.server_info_payload(),
+            "server": {
+                "host": self.server_host,
+                "port": self.server_port,
+                "base_url": base_url,
+                "mcp_endpoint": "/mcp",
+                "admin_endpoint": "/admin",
+                "oauth_authorize_endpoint": "/oauth/authorize",
+            },
+            "config_paths": self.config_paths_payload(),
+            "startup_settings": startup_settings,
+            "admin": admin_status,
+            "upstream": upstream_status,
+            "catalog": catalog,
+            "templates": templates,
+            "transcripts": transcripts,
+            "chat_conversations": chat_conversations,
+            "tool_counts": {
+                "local": len(local_names),
+                "upstream": len(upstream_names),
+                "admin": len(admin_names),
+                "total": len(local_names) + len(upstream_names) + len(admin_names),
+            },
+            "auth": {
+                "auth_enabled": self.auth_enabled(),
+                "admin_auth_enabled": self.admin_auth_enabled(),
+                "oauth_enabled": self.oauth_enabled(),
+                "auth_token_configured": self.auth_token is not None,
+                "admin_token_configured": self.admin_token is not None,
+                "oauth_admin_scope": self.oauth_config.admin_scope if self.oauth_config else None,
+            },
+            "runtime": {
+                "workspace": str(self.workspace.root),
+                "default_cwd": str(self.default_cwd),
+                "default_cwd_display": self.default_cwd_display(),
+                "runtime_dir": str(self.runtime_dir),
+                "home": str(self.home_dir),
+                "tmpdir": str(self.tmp_dir),
+                "cache_dir": str(self.cache_dir),
+                "http_session_count": len(http_sessions),
+                "session_default_cwds": session_cwds,
+                "permission_mode": self.permission_mode,
+                "shell_env_inherit": self.shell_env_policy.inherit,
+            },
+            "http_sessions": http_sessions,
+            "exec_sessions": self.active_exec_sessions_payload(),
+            "recent_mcp_requests": self.recent_mcp_requests_payload(),
+            "recent_tool_calls": self.recent_tool_calls_payload(),
+        }
+
+    def save_startup_settings(self, updates: dict[str, Any]) -> dict[str, Any]:
+        if self.settings_path is None:
+            return {"ok": False, "error": "Settings path is not configured."}
+        current = dict(self.startup_settings)
+        for key, value in updates.items():
+            if key not in STARTUP_SETTING_KEYS:
+                continue
+            if value is None or value == "":
+                current.pop(key, None)
+            else:
+                current[key] = value
+        write_server_settings(self.settings_path, current)
+        self.startup_settings = current
+        return {"ok": True, "requires_restart": True, "restart_command": self.restart_command(), "settings": current}
+
+    def apply_runtime_update(self, request: dict[str, Any]) -> dict[str, Any]:
+        changes: dict[str, Any] = {}
+        if "auth_token" in request:
+            self.auth_token = str(request.get("auth_token") or "") or None
+            changes["auth_token"] = self.auth_token is not None
+        if "admin_token" in request:
+            self.admin_token = str(request.get("admin_token") or "") or None
+            changes["admin_token"] = self.admin_token is not None
+        if "oauth_password" in request and self.oauth_config is not None:
+            password = str(request.get("oauth_password") or "") or secrets.token_urlsafe(32)
+            self.oauth_config = replace(self.oauth_config, password=password)
+            changes["oauth_password"] = True
+        if "default_cwd" in request:
+            resolved = self.workspace.resolve_existing(str(request.get("default_cwd") or "."))
+            if not resolved.path.is_dir():
+                raise ToolFailure("NOT_A_DIRECTORY", "Default cwd must be a directory.", category="validation")
+            self.default_cwd = resolved.path
+            changes["default_cwd"] = resolved.display
+        if request.get("terminate_session"):
+            changes["terminate_session"] = self.kill_session(
+                {
+                    "session_id": request.get("terminate_session"),
+                    "signal": request.get("signal", "TERM"),
+                    "wait_ms": request.get("wait_ms", 5000),
+                    "max_output_bytes": request.get("max_output_bytes", 65536),
+                }
+            )
+        if request.get("reload_upstream") and self.admin_manager is not None:
+            self.upstream_manager.close()
+            self.upstream_manager = self.admin_manager.reload_upstreams()
+            changes["reload_upstream"] = self.upstream_manager.status_payload()
+        return {"ok": True, "changes": changes}
 
     def set_logging_level(self, params: dict[str, Any]) -> dict[str, Any]:
         level = params.get("level")
@@ -1687,11 +2432,43 @@ class Runtime:
         self.logging_level = level
         return {}
 
-    def call_tool(self, name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+    def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None,
+        *,
+        admin: bool = False,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        had_previous = hasattr(self._tool_context, "session_id")
+        previous_session_id = getattr(self._tool_context, "session_id", None)
+        if session_id is not None:
+            self._tool_context.session_id = session_id
+        try:
+            return self._call_tool(name, arguments, admin=admin)
+        finally:
+            if had_previous:
+                self._tool_context.session_id = previous_session_id
+            elif hasattr(self._tool_context, "session_id"):
+                delattr(self._tool_context, "session_id")
+
+    def _call_tool(self, name: str, arguments: dict[str, Any] | None, *, admin: bool = False) -> dict[str, Any]:
         started_at = time.time()
         args = arguments or {}
-        handler = self._tool_handlers.get(name) if name in self.exposed_tool_names() else None
+        if name in ADMIN_TOOL_REGISTRY:
+            if not admin or name not in self.admin_tool_names():
+                raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
+            validate_admin_arguments(name, args)
+            payload = self.call_admin_tool(name, args)
+            payload.setdefault("ok", True)
+            self.emit_tool_trace(name, args, payload, started_at)
+            return tool_result(payload, is_error=payload.get("ok") is False)
+        handler = self._tool_handlers.get(name) if name in self.local_exposed_tool_names() else None
         if handler is None:
+            if self.upstream_manager.has_tool(name, tool_profile=self.tool_profile):
+                result = self.upstream_manager.call_tool(name, args)
+                self.emit_tool_trace(name, args, result.get("structuredContent", result), started_at)
+                return result
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         validate_arguments(name, args)
         try:
@@ -1748,6 +2525,113 @@ class Runtime:
             self.emit_tool_trace(name, args, payload, started_at)
             return tool_result(payload, is_error=True)
 
+    def call_admin_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if self.admin_manager is None:
+            return admin_error_payload("ADMIN_DISABLED", "Admin management is not configured.")
+        try:
+            if name == "mcp_catalog_list":
+                return self.admin_manager.catalog_list(self.upstream_manager.status_payload())
+            if name == "mcp_template_list":
+                return self.admin_manager.template_list()
+            if name == "mcp_template_render":
+                variables = args.get("variables") if isinstance(args.get("variables"), dict) else None
+                overrides = args.get("overrides") if isinstance(args.get("overrides"), dict) else None
+                return self.admin_manager.render_template(str(args.get("template", "")), variables=variables, overrides=overrides)
+            if name == "mcp_server_plan":
+                return self.admin_manager.plan_server(admin_config_arg(args))
+            if name == "mcp_server_install":
+                return self.admin_manager.install_server(admin_config_arg(args), apply_changes=bool(args.get("apply", False)))
+            if name == "mcp_server_update":
+                return self.admin_manager.update_server(
+                    str(args.get("alias", "")),
+                    admin_config_arg(args),
+                    apply_changes=bool(args.get("apply", False)),
+                )
+            if name == "mcp_server_enable":
+                return self.admin_manager.set_server_enabled(str(args.get("alias", "")), True, apply_changes=bool(args.get("apply", False)))
+            if name == "mcp_server_disable":
+                return self.admin_manager.set_server_enabled(str(args.get("alias", "")), False, apply_changes=bool(args.get("apply", False)))
+            if name == "mcp_server_remove":
+                return self.admin_manager.remove_server(str(args.get("alias", "")), apply_changes=bool(args.get("apply", False)))
+            if name == "mcp_server_reload":
+                self.upstream_manager.close()
+                self.upstream_manager = self.admin_manager.reload_upstreams()
+                return {"ok": True, "upstream": self.upstream_manager.status_payload()}
+            if name == "mcp_server_health":
+                alias = args.get("alias")
+                return self.upstream_manager.health_payload(str(alias) if isinstance(alias, str) and alias else None)
+            if name == "mcp_server_start":
+                return self.upstream_manager.start_server(str(args.get("alias", "")))
+            if name == "mcp_server_stop":
+                return self.upstream_manager.stop_server(str(args.get("alias", "")))
+            if name == "mcp_server_logs":
+                alias = args.get("alias")
+                return self.upstream_manager.logs_payload(
+                    str(alias) if isinstance(alias, str) and alias else None,
+                    max_lines=int(args.get("max_lines", 200)),
+                )
+            if name == "mcp_secret_set":
+                return self.admin_manager.secret_set(str(args.get("name", "")), str(args.get("value", "")))
+            if name == "mcp_secret_list":
+                return self.admin_manager.secret_list()
+            if name == "mcp_secret_delete":
+                return self.admin_manager.secret_delete(str(args.get("name", "")))
+            if name == "mcp_transcript_sessions":
+                return self.transcript_store.list_sessions(limit=int(args.get("limit", 100)))
+            if name == "mcp_transcript_export":
+                session_id = args.get("session_id")
+                return self.transcript_store.export_markdown(
+                    session_id=str(session_id) if isinstance(session_id, str) and session_id else None,
+                    max_events=int(args.get("max_events", 1000)),
+                    write_file=bool(args.get("write_file", True)),
+                )
+            if name == "mcp_chat_conversations":
+                return self.transcript_store.list_chat_conversations(limit=int(args.get("limit", 100)))
+            if name == "mcp_chat_messages":
+                return self.transcript_store.list_chat_messages(
+                    conversation_id=str(args.get("conversation_id", "")),
+                    limit=int(args.get("limit", 500)),
+                )
+            if name == "mcp_chat_context":
+                return self.transcript_store.list_context_entries(
+                    conversation_id=str(args.get("conversation_id", "")),
+                    limit=int(args.get("limit", 200)),
+                )
+            if name == "mcp_chat_export":
+                conversation_id = args.get("conversation_id")
+                return self.transcript_store.export_chat_markdown(
+                    conversation_id=str(conversation_id) if isinstance(conversation_id, str) and conversation_id else None,
+                    max_messages=int(args.get("max_messages", 5000)),
+                    write_file=bool(args.get("write_file", True)),
+                )
+            if name == "mcp_chat_context_export":
+                conversation_id = args.get("conversation_id")
+                return self.transcript_store.export_context_markdown(
+                    conversation_id=str(conversation_id) if isinstance(conversation_id, str) and conversation_id else None,
+                    max_entries=int(args.get("max_entries", 5000)),
+                    write_file=bool(args.get("write_file", True)),
+                )
+            if name == "mcp_chat_update_message":
+                return self.transcript_store.update_chat_message(
+                    row_id=int(args.get("id", 0)),
+                    updates={key: value for key, value in args.items() if key in {"role", "timestamp", "content", "source", "metadata"}},
+                )
+            if name == "mcp_chat_delete_message":
+                return self.transcript_store.delete_chat_message(row_id=int(args.get("id", 0)))
+            if name == "mcp_chat_delete_conversation":
+                return self.transcript_store.delete_chat_conversation(conversation_id=str(args.get("conversation_id", "")))
+            if name == "mcp_chat_clear":
+                return self.transcript_store.clear_chat_messages()
+            if name == "mcp_chat_merge":
+                source_ids = args.get("source_conversation_ids")
+                return self.transcript_store.merge_chat_conversations(
+                    target_conversation_id=str(args.get("target_conversation_id", "")),
+                    source_conversation_ids=[str(item) for item in source_ids] if isinstance(source_ids, list) else [],
+                )
+        except (McpManagementError, ValueError) as exc:
+            return admin_error_payload("ADMIN_OPERATION_FAILED", str(exc))
+        return admin_error_payload("ADMIN_UNKNOWN_TOOL", f"Unknown admin tool: {name}")
+
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
 
@@ -1767,26 +2651,158 @@ class Runtime:
             "warnings": warnings,
         }
 
-    def get_default_cwd(self, args: dict[str, Any]) -> dict[str, Any]:
+    def record_chat_transcript(self, args: dict[str, Any]) -> dict[str, Any]:
+        messages = args.get("messages")
+        if not isinstance(messages, list):
+            raise ToolFailure("INVALID_ARGUMENT", "messages must be an array.", category="validation")
+        source = args.get("source")
+        return self.transcript_store.record_chat_messages(
+            conversation_id=str(args.get("conversation_id") or "default"),
+            messages=messages,
+            source=str(source) if isinstance(source, str) and source else None,
+            conversation_title=str(args.get("conversation_title")) if isinstance(args.get("conversation_title"), str) else None,
+            conversation_uid=str(args.get("conversation_uid")) if isinstance(args.get("conversation_uid"), str) else None,
+        )
+
+    def record_chat_message(self, args: dict[str, Any]) -> dict[str, Any]:
+        source = args.get("source")
+        message: dict[str, Any] = {
+            "role": str(args.get("role") or "message"),
+            "content": str(args.get("content") or ""),
+        }
+        for field in ("message_id", "timestamp", "source"):
+            value = args.get(field)
+            if isinstance(value, str) and value:
+                message[field] = value
+        metadata_json = args.get("metadata_json")
+        if isinstance(metadata_json, str) and metadata_json.strip():
+            try:
+                metadata = json.loads(metadata_json)
+            except json.JSONDecodeError as exc:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "metadata_json must be valid JSON.",
+                    category="validation",
+                    details={"error": str(exc)},
+                ) from exc
+            if not isinstance(metadata, dict):
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "metadata_json must decode to an object.",
+                    category="validation",
+                )
+            message["metadata"] = metadata
+        return self.transcript_store.record_chat_messages(
+            conversation_id=str(args.get("conversation_id") or "default"),
+            messages=[message],
+            source=str(source) if isinstance(source, str) and source else None,
+            conversation_title=str(args.get("conversation_title")) if isinstance(args.get("conversation_title"), str) else None,
+            conversation_uid=str(args.get("conversation_uid")) if isinstance(args.get("conversation_uid"), str) else None,
+        )
+
+    def recall_chat_context(self, args: dict[str, Any]) -> dict[str, Any]:
+        conversation_id = str(args.get("conversation_id") or "")
+        try:
+            max_messages = int(args.get("max_messages", 200))
+        except (TypeError, ValueError) as exc:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "max_messages must be an integer.",
+                category="validation",
+                details={"value": args.get("max_messages")},
+            ) from exc
+        max_messages = max(1, min(max_messages, 20000))
+        try:
+            max_context_entries = int(args.get("max_context_entries", max_messages))
+        except (TypeError, ValueError) as exc:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "max_context_entries must be an integer.",
+                category="validation",
+                details={"value": args.get("max_context_entries")},
+            ) from exc
+        max_context_entries = max(1, min(max_context_entries, 5000))
+        try:
+            messages_payload = self.transcript_store.list_chat_messages(
+                conversation_id=conversation_id,
+                limit=max_messages,
+            )
+            context_payload = self.transcript_store.list_context_entries(
+                conversation_id=conversation_id,
+                limit=max_context_entries,
+            )
+            context_export = self.transcript_store.export_context_markdown(
+                conversation_id=conversation_id,
+                max_entries=max_context_entries,
+                write_file=False,
+            )
+            if messages_payload.get("message_count", 0):
+                chat_export = self.transcript_store.export_chat_markdown(
+                    conversation_id=conversation_id,
+                    max_messages=max_messages,
+                    write_file=False,
+                )
+            else:
+                chat_export = {"conversations": context_export.get("conversations", []), "markdown": ""}
+        except ValueError as exc:
+            raise ToolFailure(
+                "NOT_FOUND",
+                str(exc),
+                category="not_found",
+            ) from exc
+        context_markdown = str(context_export.get("markdown") or "")
+        chat_markdown = str(chat_export.get("markdown") or "")
+        context_text = context_markdown if context_payload.get("entry_count", 0) else chat_markdown
         return {
+            "ok": True,
+            "conversation_id": messages_payload.get("conversation_id"),
+            "message_count": messages_payload.get("message_count", 0),
+            "context_entry_count": context_payload.get("entry_count", 0),
+            "max_messages": max_messages,
+            "max_context_entries": max_context_entries,
+            "messages": messages_payload.get("messages", []),
+            "context_entries": context_payload.get("entries", []),
+            "conversations": context_export.get("conversations") or chat_export.get("conversations", []),
+            "markdown": context_text,
+            "context_text": context_text,
+            "context_markdown": context_markdown,
+            "chat_markdown": chat_markdown,
+        }
+
+    def get_default_cwd(self, args: dict[str, Any]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "workspace": str(self.workspace.root),
             "default_cwd": self.default_cwd_display(),
         }
+        session_id = self.current_tool_session_id()
+        if session_id:
+            payload["session_id"] = session_id
+        return payload
 
     def set_default_cwd(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.workspace.resolve_existing(str(args.get("path", ".")))
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Default cwd must be a directory.", category="validation")
-        self.default_cwd = resolved.path
-        return {
+        session_id = self.current_tool_session_id()
+        if session_id:
+            with self.session_default_cwds_lock:
+                self.session_default_cwds[session_id] = resolved.path
+        else:
+            self.default_cwd = resolved.path
+        payload: dict[str, Any] = {
             "workspace": str(self.workspace.root),
             "default_cwd": resolved.display,
         }
+        if session_id:
+            payload["session_id"] = session_id
+        return payload
 
     def emit_tool_trace(self, name: str, args: dict[str, Any], payload: dict[str, Any], started_at: float) -> None:
-        if os.environ.get(f"{ENV_PREFIX}_TRACE") != "1":
-            return
         error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+        session_id = self.current_tool_session_id()
+        if session_id is None and isinstance(payload.get("session_id"), str):
+            session_id = str(payload.get("session_id"))
+        cwd = self.effective_default_cwd()
         event = {
             "event": "tool_call",
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
@@ -1795,11 +2811,24 @@ class Runtime:
             "status": payload.get("status"),
             "error_code": error.get("code") if isinstance(error, dict) else None,
             "duration_ms": int((time.time() - started_at) * 1000),
-            "session_id": payload.get("session_id"),
+            "session_id": session_id,
+            "workspace": str(self.workspace.root),
+            "default_cwd": str(cwd),
+            "default_cwd_display": normalize_rel_display(cwd, self.workspace.root),
             "truncated": payload.get("truncated"),
             "args": redact_for_trace(args),
         }
-        print(json.dumps(event, sort_keys=True, separators=(",", ":")), file=sys.stderr, flush=True)
+        transcript_event = {**event, "result": redact_for_transcript(payload)}
+        with self.recent_tool_traces_lock:
+            self.recent_tool_traces.append(event)
+            if len(self.recent_tool_traces) > RECENT_TOOL_TRACE_LIMIT:
+                del self.recent_tool_traces[: len(self.recent_tool_traces) - RECENT_TOOL_TRACE_LIMIT]
+        try:
+            self.transcript_store.record_tool_call(transcript_event)
+        except Exception as exc:  # noqa: BLE001 - transcript persistence must not break tool calls
+            self.report_transcript_error(exc)
+        if os.environ.get(f"{ENV_PREFIX}_TRACE") == "1":
+            print(json.dumps(event, sort_keys=True, separators=(",", ":")), file=sys.stderr, flush=True)
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", "")))
@@ -2398,6 +3427,8 @@ class Runtime:
                     pass
         session = self._make_session(
             process,
+            command=cmd,
+            workdir=str(workdir.path),
             timeout_at=deadline,
             warnings=[landlock_warning] if landlock_warning else None,
         )
@@ -2640,12 +3671,16 @@ class Runtime:
         self,
         process: subprocess.Popen[bytes],
         *,
+        command: str = "",
+        workdir: str = "",
         timeout_at: float | None = None,
         warnings: list[str] | None = None,
     ) -> ExecSession:
         return ExecSession(
             session_id=secrets.token_urlsafe(18),
             process=process,
+            command=command,
+            workdir=workdir,
             timeout_at=timeout_at,
             warnings=warnings or [],
         )
@@ -3751,6 +4786,40 @@ def redact_for_trace(value: Any) -> Any:
     return value
 
 
+def redact_for_transcript(value: Any, *, max_string: int = 4000) -> Any:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 100:
+                result["..."] = "[TRUNCATED]"
+                break
+            key_text = str(key)
+            if SENSITIVE_ENV_RE.search(key_text):
+                result[key_text] = "[REDACTED]"
+            elif key_text in {"base64", "markdown"}:
+                result[key_text] = "[OMITTED]"
+            else:
+                result[key_text] = redact_for_transcript(item, max_string=max_string)
+        return result
+    if isinstance(value, list):
+        items = [redact_for_transcript(item, max_string=max_string) for item in value[:100]]
+        if len(value) > 100:
+            items.append("[TRUNCATED]")
+        return items
+    if isinstance(value, tuple):
+        items = [redact_for_transcript(item, max_string=max_string) for item in value[:100]]
+        if len(value) > 100:
+            items.append("[TRUNCATED]")
+        return items
+    if isinstance(value, str):
+        if SENSITIVE_VALUE_RE.search(value):
+            return "[REDACTED]"
+        if len(value) > max_string:
+            return value[:max_string] + "...[truncated]"
+        return value
+    return value
+
+
 class LandlockRulesetAttr(ctypes.Structure):
     _fields_ = [("handled_access_fs", ctypes.c_uint64)]
 
@@ -4282,6 +5351,14 @@ def validate_arguments(tool_name: str, args: dict[str, Any]) -> None:
         raise JsonRpcError(-32602, exc.message, {"reason": "invalid_arguments", "code": exc.code}) from exc
 
 
+def validate_admin_arguments(tool_name: str, args: dict[str, Any]) -> None:
+    schema = admin_input_schemas()[tool_name]
+    try:
+        validate_schema_value(args, schema, path="arguments")
+    except ToolFailure as exc:
+        raise JsonRpcError(-32602, exc.message, {"reason": "invalid_arguments", "code": exc.code}) from exc
+
+
 def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> None:
     expected_type = schema.get("type")
     if expected_type is not None and not schema_type_matches(value, expected_type):
@@ -4381,14 +5458,186 @@ def tool_annotations(name: str) -> dict[str, Any]:
     }
 
 
+def admin_tool_definition(name: str, *, tool_profile: str = "full") -> dict[str, Any]:
+    schemas = admin_input_schemas()
+    annotations = admin_tool_annotations(name)
+    if tool_profile == "compat-readonly-all":
+        annotations = {**annotations, "readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
+    return {
+        "name": name,
+        "title": annotations["title"],
+        "description": ADMIN_TOOL_REGISTRY[name].description,
+        "inputSchema": schemas[name],
+        "outputSchema": tool_output_schema(),
+        "annotations": annotations,
+    }
+
+
+def admin_tool_annotations(name: str) -> dict[str, Any]:
+    spec = ADMIN_TOOL_REGISTRY[name]
+    return {
+        "title": spec.title,
+        "readOnlyHint": spec.read_only,
+        "destructiveHint": spec.destructive,
+        "idempotentHint": spec.idempotent,
+        "openWorldHint": spec.open_world,
+    }
+
+
+def admin_input_schemas() -> dict[str, dict[str, Any]]:
+    string = {"type": "string"}
+    boolean = {"type": "boolean"}
+    integer = {"type": "integer"}
+    config = {"type": "object", "additionalProperties": True}
+    string_array = {"type": "array", "items": {"type": "string"}}
+    return {
+        "mcp_catalog_list": object_schema(),
+        "mcp_template_list": object_schema(),
+        "mcp_template_render": object_schema(
+            {"template": {**string, "minLength": 1}, "variables": config, "overrides": config},
+            required=["template"],
+        ),
+        "mcp_server_plan": object_schema({"config": config}, required=["config"]),
+        "mcp_server_install": object_schema({"config": config, "apply": {**boolean, "default": False}}, required=["config"]),
+        "mcp_server_update": object_schema(
+            {"alias": {**string, "minLength": 1}, "config": config, "apply": {**boolean, "default": False}},
+            required=["alias", "config"],
+        ),
+        "mcp_server_enable": object_schema({"alias": {**string, "minLength": 1}, "apply": {**boolean, "default": False}}, required=["alias"]),
+        "mcp_server_disable": object_schema({"alias": {**string, "minLength": 1}, "apply": {**boolean, "default": False}}, required=["alias"]),
+        "mcp_server_remove": object_schema({"alias": {**string, "minLength": 1}, "apply": {**boolean, "default": False}}, required=["alias"]),
+        "mcp_server_reload": object_schema(),
+        "mcp_server_health": object_schema({"alias": string}),
+        "mcp_server_start": object_schema({"alias": {**string, "minLength": 1}}, required=["alias"]),
+        "mcp_server_stop": object_schema({"alias": {**string, "minLength": 1}}, required=["alias"]),
+        "mcp_server_logs": object_schema({"alias": string, "max_lines": {**integer, "minimum": 1, "maximum": 500, "default": 200}}),
+        "mcp_secret_set": object_schema({"name": {**string, "minLength": 1}, "value": string}, required=["name", "value"]),
+        "mcp_secret_list": object_schema(),
+        "mcp_secret_delete": object_schema({"name": {**string, "minLength": 1}}, required=["name"]),
+        "mcp_transcript_sessions": object_schema({"limit": {**integer, "minimum": 1, "maximum": 500, "default": 100}}),
+        "mcp_transcript_export": object_schema(
+            {
+                "session_id": string,
+                "max_events": {**integer, "minimum": 1, "maximum": 5000, "default": 1000},
+                "write_file": {**boolean, "default": True},
+            }
+        ),
+        "mcp_chat_conversations": object_schema({"limit": {**integer, "minimum": 1, "maximum": 500, "default": 100}}),
+        "mcp_chat_messages": object_schema(
+            {"conversation_id": {**string, "minLength": 1}, "limit": {**integer, "minimum": 1, "maximum": 5000, "default": 500}},
+            required=["conversation_id"],
+        ),
+        "mcp_chat_context": object_schema(
+            {"conversation_id": {**string, "minLength": 1}, "limit": {**integer, "minimum": 1, "maximum": 5000, "default": 200}},
+            required=["conversation_id"],
+        ),
+        "mcp_chat_export": object_schema(
+            {
+                "conversation_id": string,
+                "max_messages": {**integer, "minimum": 1, "maximum": 20000, "default": 5000},
+                "write_file": {**boolean, "default": True},
+            }
+        ),
+        "mcp_chat_context_export": object_schema(
+            {
+                "conversation_id": string,
+                "max_entries": {**integer, "minimum": 1, "maximum": 20000, "default": 5000},
+                "write_file": {**boolean, "default": True},
+            }
+        ),
+        "mcp_chat_update_message": object_schema(
+            {
+                "id": {**integer, "minimum": 1},
+                "role": string,
+                "timestamp": string,
+                "content": string,
+                "source": string,
+                "metadata": config,
+            },
+            required=["id"],
+        ),
+        "mcp_chat_delete_message": object_schema({"id": {**integer, "minimum": 1}}, required=["id"]),
+        "mcp_chat_delete_conversation": object_schema({"conversation_id": {**string, "minLength": 1}}, required=["conversation_id"]),
+        "mcp_chat_clear": object_schema(),
+        "mcp_chat_merge": object_schema(
+            {
+                "target_conversation_id": {**string, "minLength": 1},
+                "source_conversation_ids": string_array,
+            },
+            required=["target_conversation_id", "source_conversation_ids"],
+        ),
+    }
+
+
+def admin_config_arg(args: dict[str, Any]) -> dict[str, Any]:
+    config = args.get("config")
+    if not isinstance(config, dict):
+        raise ValueError("config must be an object.")
+    return config
+
+
+def admin_error_payload(code: str, message: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": {"code": code, "message": message, "category": "admin", "retryable": False, "details": {}},
+    }
+
+
 def input_schemas() -> dict[str, dict[str, Any]]:
     string = {"type": "string"}
     integer = {"type": "integer"}
     boolean = {"type": "boolean"}
     string_array = {"type": "array", "items": {"type": "string"}}
+    metadata = {"type": "object", "additionalProperties": True}
+    chat_message = {
+        "type": "object",
+        "properties": {
+            "id": string,
+            "message_id": string,
+            "role": {**string, "minLength": 1},
+            "timestamp": string,
+            "content": string,
+            "source": string,
+            "metadata": metadata,
+        },
+        "required": ["role", "content"],
+        "additionalProperties": True,
+    }
     return {
         "server_info": object_schema(),
         "check_exec_environment": object_schema(),
+        "record_chat_transcript": object_schema(
+            {
+                "conversation_id": {**string, "minLength": 1},
+                "conversation_title": string,
+                "conversation_uid": string,
+                "messages": {"type": "array", "items": chat_message},
+                "source": string,
+            },
+            ["conversation_id", "messages"],
+        ),
+        "record_chat_message": object_schema(
+            {
+                "conversation_id": {**string, "minLength": 1},
+                "conversation_title": string,
+                "conversation_uid": string,
+                "message_id": string,
+                "role": {**string, "minLength": 1},
+                "timestamp": string,
+                "content": string,
+                "source": string,
+                "metadata_json": string,
+            },
+            ["conversation_id", "role", "content"],
+        ),
+        "recall_chat_context": object_schema(
+            {
+                "conversation_id": {**string, "minLength": 1},
+                "max_messages": {**integer, "minimum": 1, "maximum": 20000, "default": 200},
+                "max_context_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 200},
+            },
+            ["conversation_id"],
+        ),
         "get_default_cwd": object_schema(),
         "set_default_cwd": object_schema(
             {
@@ -4575,8 +5824,13 @@ def _server_card_auth(runtime: Runtime, *, oauth_base_url: str | None = None) ->
 
 
 def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) -> dict[str, Any]:
-    names = runtime.exposed_tool_names()
-    annotations = {name: tool_definition(name, tool_profile=runtime.tool_profile)["annotations"] for name in names}
+    tool_definitions = runtime.list_tools()["tools"]
+    names = [str(tool.get("name")) for tool in tool_definitions if isinstance(tool, dict) and tool.get("name")]
+    annotations = {
+        str(tool.get("name")): tool.get("annotations", {})
+        for tool in tool_definitions
+        if isinstance(tool, dict) and tool.get("name")
+    }
     read_only = [name for name in names if annotations[name].get("readOnlyHint") is True]
     mutating = [name for name in names if annotations[name].get("readOnlyHint") is not True]
     payload = {
@@ -4621,7 +5875,85 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         print(format % args, file=sys.stderr)
 
+    def incoming_http_session_id(self) -> str | None:
+        session_id = self.headers.get("Mcp-Session-Id")
+        if not isinstance(session_id, str):
+            return None
+        session_id = session_id.strip()
+        return session_id if HTTP_SESSION_ID_RE.fullmatch(session_id) else None
+
+    def response_http_session_id(self) -> str:
+        session_id = getattr(self, "_response_http_session_id", None)
+        return session_id if isinstance(session_id, str) and session_id else self.runtime.http_session_id
+
+    def request_tool_session_id(self) -> str | None:
+        override = self.headers.get("X-Coding-Tools-Session")
+        if isinstance(override, str):
+            override = override.strip()
+            if HTTP_SESSION_ID_RE.fullmatch(override):
+                return override
+        return self.incoming_http_session_id()
+
+    def client_remote_addr(self) -> str | None:
+        if isinstance(self.client_address, tuple) and self.client_address:
+            return str(self.client_address[0])
+        return None
+
+    def rpc_method_label(self, request: Any) -> str | None:
+        if isinstance(request, dict):
+            method = request.get("method")
+            return str(method) if isinstance(method, str) else None
+        if isinstance(request, list):
+            methods = [str(item.get("method")) for item in request if isinstance(item, dict) and isinstance(item.get("method"), str)]
+            if not methods:
+                return "batch"
+            label = ",".join(methods[:3])
+            if len(methods) > 3:
+                label += ",..."
+            return f"batch:{label}"
+        return None
+
+    def record_current_mcp_access(self, *, rpc_method: str | None, status: int) -> None:
+        session_id = self.request_tool_session_id() or self.response_http_session_id()
+        if self.headers.get("X-Coding-Tools-Session") is None and not self.runtime.has_http_session(session_id):
+            session_id = self.response_http_session_id()
+        self.runtime.record_mcp_http_access(
+            session_id=session_id,
+            method=self.command,
+            path=posixpath.normpath(self.path.split("?", 1)[0]),
+            rpc_method=rpc_method,
+            status=status,
+            remote_addr=self.client_remote_addr(),
+            user_agent=self.headers.get("User-Agent"),
+            protocol_version=self.headers.get("MCP-Protocol-Version"),
+        )
+
     def do_GET(self) -> None:
+        request_path = self.path.split("?", 1)[0]
+        normalized = posixpath.normpath(request_path)
+        if normalized == "/admin":
+            if not self.runtime.admin_ui_enabled:
+                self.send_json({"error": "Admin console disabled"}, status=404)
+                return
+            self._send_html(admin_console_html())
+            return
+        if normalized == "/admin/health":
+            self.send_json(
+                {
+                    "ok": True,
+                    "admin_ui_enabled": self.runtime.admin_ui_enabled,
+                    "auth_required": self.runtime.auth_enabled(),
+                    "admin_auth_required": self.runtime.admin_auth_enabled(),
+                    "oauth_enabled": self.runtime.oauth_enabled(),
+                }
+            )
+            return
+        if normalized == "/api/admin/status":
+            if not self.is_admin_request():
+                self.send_admin_unauthorized()
+                return
+            self.send_json(self.runtime.admin_status_payload(base_url=self.oauth_base_url()))
+            return
         self.handle_metadata_request(head_only=False)
 
     def do_HEAD(self) -> None:
@@ -4631,6 +5963,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         request_path = self.path.split("?", 1)[0]
         if posixpath.normpath(request_path) not in {
             "/mcp",
+            "/admin",
+            "/admin/health",
+            "/api/admin/status",
+            "/api/admin/tool",
+            "/api/admin/settings",
+            "/api/admin/runtime",
+            "/api/tool",
             "/.well-known/mcp.json",
             "/.well-known/mcp/server-card.json",
             "/.well-known/oauth-authorization-server",
@@ -4669,6 +6008,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if not self.is_authorized():
                 self.send_unauthorized(head_only=head_only)
                 return
+            incoming_session_id = self.incoming_http_session_id()
+            if incoming_session_id and self.runtime.has_http_session(incoming_session_id):
+                self._response_http_session_id = incoming_session_id
+            self.record_current_mcp_access(rpc_method="server-card", status=200)
             self.send_json(server_card_payload(self.runtime, oauth_base_url=self.oauth_base_url()), head_only=head_only)
             return
         if normalized in {"/.well-known/mcp.json", "/.well-known/mcp/server-card.json"}:
@@ -4679,6 +6022,15 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         request_path = self.path.split("?", 1)[0]
         normalized = posixpath.normpath(request_path)
+        if normalized in {"/api/admin/tool", "/api/tool"}:
+            self.handle_admin_tool()
+            return
+        if normalized == "/api/admin/settings":
+            self.handle_admin_settings()
+            return
+        if normalized == "/api/admin/runtime":
+            self.handle_admin_runtime()
+            return
         if normalized == "/oauth/authorize":
             self.handle_oauth_authorize_post()
             return
@@ -4720,8 +6072,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 status=400,
             )
             return
-        session_id = self.headers.get("Mcp-Session-Id")
-        if session_id and session_id != self.runtime.http_session_id:
+        session_id = self.incoming_http_session_id()
+        self._response_http_session_id = session_id or self.runtime.http_session_id
+        if session_id and not self.runtime.has_http_session(session_id):
             self.send_json(
                 {
                     "jsonrpc": "2.0",
@@ -4788,6 +6141,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, status=400)
             return
+        rpc_method = self.rpc_method_label(request)
         if isinstance(request, list):
             if not request:
                 self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}, status=400)
@@ -4815,11 +6169,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 if response is not None:
                     responses.append(response)
             if not responses:
+                self.record_current_mcp_access(rpc_method=rpc_method, status=202)
                 self.send_response(202)
-                self.send_header("Mcp-Session-Id", self.runtime.http_session_id)
+                self.send_header("Mcp-Session-Id", self.response_http_session_id())
                 self.send_cors_headers()
                 self.end_headers()
                 return
+            self.record_current_mcp_access(rpc_method=rpc_method, status=200)
             self.send_json(responses)
             return
         if not isinstance(request, dict):
@@ -4827,11 +6183,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         response = self.handle_rpc(request)
         if response is None:
+            self.record_current_mcp_access(rpc_method=rpc_method, status=202)
             self.send_response(202)
-            self.send_header("Mcp-Session-Id", self.runtime.http_session_id)
+            self.send_header("Mcp-Session-Id", self.response_http_session_id())
             self.send_cors_headers()
             self.end_headers()
             return
+        self.record_current_mcp_access(rpc_method=rpc_method, status=200)
         self.send_json(response)
 
     def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
@@ -4846,6 +6204,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 validate_initialize_params(params)
                 result = self.runtime.initialize()
                 self.runtime.initialized = True
+                self._response_http_session_id = self.runtime.ensure_http_session(self.incoming_http_session_id())
             elif method == "notifications/initialized":
                 return None
             elif method == "notifications/cancelled":
@@ -4858,14 +6217,19 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             elif method == "logging/setLevel":
                 result = self.runtime.set_logging_level(params)
             elif method == "tools/list":
-                result = self.runtime.list_tools()
+                result = self.runtime.list_tools(include_admin=self.is_admin_request())
             elif method == "tools/call":
                 if not isinstance(params.get("name"), str):
                     raise JsonRpcError(-32602, "tools/call requires a tool name")
                 arguments = params.get("arguments") or {}
                 if not isinstance(arguments, dict):
                     raise JsonRpcError(-32602, "tools/call arguments must be an object")
-                result = self.runtime.call_tool(params["name"], arguments)
+                result = self.runtime.call_tool(
+                    params["name"],
+                    arguments,
+                    admin=self.is_admin_request(),
+                    session_id=self.request_tool_session_id(),
+                )
             else:
                 raise JsonRpcError(-32601, f"Unknown method: {method}")
             if request_id is None:
@@ -4889,6 +6253,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not self.runtime.auth_enabled():
             return True
         header = self.headers.get("Authorization", "").strip()
+        if self.runtime.admin_token is not None:
+            if secrets.compare_digest(header, f"Bearer {self.runtime.admin_token}"):
+                return True
         if self.runtime.auth_token is not None:
             if secrets.compare_digest(header, f"Bearer {self.runtime.auth_token}"):
                 return True
@@ -4897,6 +6264,99 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if _validate_oauth_token(token, self.runtime.oauth_config, self.oauth_base_url()):
                 return True
         return False
+
+    def is_admin_request(self) -> bool:
+        if not self.runtime.admin_auth_enabled() and not self.runtime.auth_enabled():
+            return True
+        header = self.headers.get("Authorization", "").strip()
+        if self.runtime.admin_token is not None:
+            if secrets.compare_digest(header, f"Bearer {self.runtime.admin_token}"):
+                return True
+        if self.runtime.oauth_config is not None and header.startswith("Bearer "):
+            token = header[len("Bearer "):]
+            claims = _decode_oauth_token(token, self.runtime.oauth_config, self.oauth_base_url())
+            scope = claims.get("scope", "") if claims else ""
+            if isinstance(scope, str) and self.runtime.oauth_config.admin_scope in scope.split():
+                return True
+        return False
+
+    def send_admin_unauthorized(self) -> None:
+        if self.runtime.oauth_config is not None:
+            base = self.oauth_base_url()
+            www_auth = f'Bearer realm="coding-tools-mcp-admin", resource_metadata="{base}/.well-known/oauth-protected-resource"'
+        else:
+            www_auth = 'Bearer realm="coding-tools-mcp-admin"'
+        self.send_json({"ok": False, "error": "Admin authorization required"}, status=401, extra_headers={"WWW-Authenticate": www_auth})
+
+    def _read_admin_json_body(self) -> dict[str, Any] | None:
+        if self.headers.get_content_type().lower() != "application/json":
+            self.send_json({"ok": False, "error": "Content-Type must be application/json"}, status=415)
+            return None
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self.send_json({"ok": False, "error": "Content-Length is required"}, status=411)
+            return None
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self.send_json({"ok": False, "error": "Content-Length must be a non-negative integer"}, status=400)
+            return None
+        if not (0 <= length <= MAX_HTTP_REQUEST_BYTES):
+            self.close_connection = True
+            self.send_json({"ok": False, "error": "Request body exceeds maximum size"}, status=413)
+            return None
+        try:
+            request = json.loads(self.rfile.read(length).decode("utf-8"))
+        except json.JSONDecodeError:
+            self.send_json({"ok": False, "error": "Invalid JSON"}, status=400)
+            return None
+        if not isinstance(request, dict):
+            self.send_json({"ok": False, "error": "Request body must be a JSON object"}, status=400)
+            return None
+        return request
+
+    def handle_admin_tool(self) -> None:
+        if not self.is_admin_request():
+            self.send_admin_unauthorized()
+            return
+        request = self._read_admin_json_body()
+        if request is None:
+            return
+        if not isinstance(request.get("name"), str):
+            self.send_json({"ok": False, "error": "name is required"}, status=400)
+            return
+        arguments = request.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            self.send_json({"ok": False, "error": "arguments must be an object"}, status=400)
+            return
+        try:
+            result = self.runtime.call_tool(request["name"], arguments, admin=True, session_id=self.request_tool_session_id())
+        except JsonRpcError as exc:
+            self.send_json({"ok": False, "error": exc.message, "data": exc.data}, status=400)
+            return
+        self.send_json(result)
+
+    def handle_admin_settings(self) -> None:
+        if not self.is_admin_request():
+            self.send_admin_unauthorized()
+            return
+        request = self._read_admin_json_body()
+        if request is None:
+            return
+        updates = request.get("settings") if isinstance(request.get("settings"), dict) else request
+        self.send_json(self.runtime.save_startup_settings(cast(dict[str, Any], updates)))
+
+    def handle_admin_runtime(self) -> None:
+        if not self.is_admin_request():
+            self.send_admin_unauthorized()
+            return
+        request = self._read_admin_json_body()
+        if request is None:
+            return
+        try:
+            self.send_json(self.runtime.apply_runtime_update(request))
+        except ToolFailure as exc:
+            self.send_json({"ok": False, "error": exc.message, "code": exc.code, "details": exc.details}, status=400)
 
     def oauth_base_url(self) -> str:
         cfg = self.runtime.oauth_config
@@ -4946,6 +6406,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "token_endpoint": f"{base}/oauth/token",
                 "response_types_supported": ["code"],
                 "grant_types_supported": ["authorization_code"],
+                "scopes_supported": ["mcp", cfg.admin_scope],
                 "code_challenge_methods_supported": ["S256"],
                 "token_endpoint_auth_methods_supported": _oauth_token_auth_methods(cfg),
             },
@@ -4959,7 +6420,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         base = self.oauth_base_url()
         self.send_json(
-            {"resource": base, "authorization_servers": [base], "bearer_methods_supported": ["header"]},
+            {"resource": base, "authorization_servers": [base], "bearer_methods_supported": ["header"], "scopes_supported": ["mcp", cfg.admin_scope]},
             head_only=head_only,
         )
 
@@ -4973,7 +6434,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _oauth_login_page(self, *, client_id: str, redirect_uri: str, code_challenge: str,
-                          code_challenge_method: str, state: str, error: str = "") -> str:
+                          code_challenge_method: str, state: str, scope: str, error: str = "") -> str:
         def esc(v: str) -> str:
             return html.escape(v, quote=True)
         error_block = f'<p style="color:red">{html.escape(error)}</p>' if error else ""
@@ -4994,6 +6455,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             f"<input type='hidden' name='code_challenge' value='{esc(code_challenge)}'>"
             f"<input type='hidden' name='code_challenge_method' value='{esc(code_challenge_method)}'>"
             f"<input type='hidden' name='state' value='{esc(state)}'>"
+            f"<input type='hidden' name='scope' value='{esc(scope)}'>"
             "<label>Password<input type='password' name='password' autocomplete='current-password' required></label>"
             "<button type='submit'>Authorize</button>"
             "</form></body></html>"
@@ -5030,6 +6492,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         code_challenge = _p("code_challenge")
         code_challenge_method = _p("code_challenge_method")
         state = _p("state")
+        scope = _p("scope") or "mcp"
 
         if _p("response_type") != "code":
             self._send_html("<h2>Error</h2><p>response_type must be 'code'</p>", status=400)
@@ -5040,10 +6503,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if code_challenge_method != "S256" or not code_challenge:
             self._send_html("<h2>Error</h2><p>code_challenge_method must be S256 and code_challenge is required</p>", status=400)
             return
+        if not _oauth_scope_allowed(scope, cfg):
+            self._send_html("<h2>Error</h2><p>Unsupported OAuth scope</p>", status=400)
+            return
 
         self._send_html(self._oauth_login_page(
             client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-            code_challenge_method=code_challenge_method, state=state,
+            code_challenge_method=code_challenge_method, state=state, scope=scope,
         ))
 
     def handle_oauth_authorize_post(self) -> None:
@@ -5066,23 +6532,30 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         code_challenge_method = _p("code_challenge_method")
         state = _p("state")
         password = _p("password")
+        scope = _p("scope") or "mcp"
 
         if not _oauth_client_id_allowed(client_id, cfg):
             self._send_html(self._oauth_login_page(
                 client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-                code_challenge_method=code_challenge_method, state=state, error="Invalid client",
+                code_challenge_method=code_challenge_method, state=state, scope=scope, error="Invalid client",
             ), status=400)
             return
         if code_challenge_method != "S256" or not code_challenge:
             self._send_html(self._oauth_login_page(
                 client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-                code_challenge_method=code_challenge_method, state=state, error="Invalid PKCE parameters",
+                code_challenge_method=code_challenge_method, state=state, scope=scope, error="Invalid PKCE parameters",
+            ), status=400)
+            return
+        if not _oauth_scope_allowed(scope, cfg):
+            self._send_html(self._oauth_login_page(
+                client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method, state=state, scope=scope, error="Unsupported OAuth scope",
             ), status=400)
             return
         if not secrets.compare_digest(password, cfg.password):
             self._send_html(self._oauth_login_page(
                 client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
-                code_challenge_method=code_challenge_method, state=state, error="Invalid password",
+                code_challenge_method=code_challenge_method, state=state, scope=scope, error="Invalid password",
             ), status=401)
             return
 
@@ -5097,6 +6570,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "client_id": client_id,
                 "redirect_uri": redirect_uri,
                 "state": state,
+                "scope": scope,
                 "expires_at": now + OAUTH_CODE_TTL_SECONDS,
                 "server_url": self.oauth_base_url(),
             }
@@ -5189,8 +6663,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
 
         server_url = str(code_data.get("server_url") or self.oauth_base_url()).rstrip("/")
-        access_token = _create_oauth_token(cfg, server_url)
-        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
+        scope = str(code_data.get("scope") or "mcp")
+        access_token = _create_oauth_token(cfg, server_url, scope=scope)
+        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl, "scope": scope})
 
     def send_cors_headers(self) -> None:
         origin = self.headers.get("Origin")
@@ -5200,7 +6675,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Accept, Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id",
+                "Accept, Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id, X-Coding-Tools-Session",
             )
 
     def send_json(
@@ -5215,7 +6690,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Mcp-Session-Id", self.runtime.http_session_id)
+        self.send_header("Mcp-Session-Id", self.response_http_session_id())
         self.send_cors_headers()
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
@@ -5224,10 +6699,129 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
 
+class AdminUIHandler(http.server.BaseHTTPRequestHandler):
+    server_version = "CodingToolsMCPAdmin/0.1"
+
+    @property
+    def runtime(self) -> Runtime:
+        return self.server.runtime  # type: ignore[attr-defined]
+
+    def log_message(self, format: str, *args: Any) -> None:
+        print(format % args, file=sys.stderr)
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = posixpath.normpath(self.path.split("?", 1)[0])
+        if path in {"/", "/admin"}:
+            body = admin_console_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/admin/status":
+            if not self.is_admin_request():
+                self.send_json({"error": "Admin token required"}, status=401)
+                return
+            self.send_json(self.runtime.admin_status_payload(base_url=self.oauth_base_url()))
+            return
+        self.send_json({"error": "Unknown endpoint"}, status=404)
+
+    def _read_json_body(self) -> dict[str, Any] | None:
+        raw_len = self.headers.get("Content-Length")
+        try:
+            length = int(raw_len or "0")
+        except ValueError:
+            self.send_json({"error": "Invalid Content-Length"}, status=400)
+            return None
+        if not (0 <= length <= MAX_HTTP_REQUEST_BYTES):
+            self.send_json({"error": "Request body too large"}, status=413)
+            return None
+        try:
+            request = json.loads(self.rfile.read(length).decode("utf-8"))
+        except json.JSONDecodeError:
+            self.send_json({"error": "Invalid JSON"}, status=400)
+            return None
+        if not isinstance(request, dict):
+            self.send_json({"error": "Request body must be an object"}, status=400)
+            return None
+        return request
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = posixpath.normpath(self.path.split("?", 1)[0])
+        if path not in {"/api/tool", "/api/admin/tool", "/api/admin/settings", "/api/admin/runtime"}:
+            self.send_json({"error": "Unknown endpoint"}, status=404)
+            return
+        if not self.is_admin_request():
+            self.send_json({"error": "Admin token required"}, status=401)
+            return
+        request = self._read_json_body()
+        if request is None:
+            return
+        if path == "/api/admin/settings":
+            updates = request.get("settings") if isinstance(request.get("settings"), dict) else request
+            self.send_json(self.runtime.save_startup_settings(cast(dict[str, Any], updates)))
+            return
+        if path == "/api/admin/runtime":
+            try:
+                self.send_json(self.runtime.apply_runtime_update(request))
+            except ToolFailure as exc:
+                self.send_json({"error": exc.message, "code": exc.code, "details": exc.details}, status=400)
+            return
+        if not isinstance(request.get("name"), str):
+            self.send_json({"error": "name is required"}, status=400)
+            return
+        arguments = request.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            self.send_json({"error": "arguments must be an object"}, status=400)
+            return
+        try:
+            result = self.runtime.call_tool(request["name"], arguments, admin=True)
+        except JsonRpcError as exc:
+            self.send_json({"error": exc.message, "data": exc.data}, status=400)
+            return
+        self.send_json(result)
+
+    def is_admin_request(self) -> bool:
+        if not self.runtime.admin_auth_enabled() and not self.runtime.auth_enabled():
+            return True
+        header = self.headers.get("Authorization", "").strip()
+        if self.runtime.admin_token is not None:
+            if secrets.compare_digest(header, f"Bearer {self.runtime.admin_token}"):
+                return True
+        if self.runtime.oauth_config is not None and header.startswith("Bearer "):
+            token = header[len("Bearer "):]
+            claims = _decode_oauth_token(token, self.runtime.oauth_config, self.oauth_base_url())
+            scope = claims.get("scope", "") if claims else ""
+            if isinstance(scope, str) and self.runtime.oauth_config.admin_scope in scope.split():
+                return True
+        return False
+
+    def oauth_base_url(self) -> str:
+        cfg = self.runtime.oauth_config
+        if cfg is not None and cfg.server_url:
+            return cfg.server_url.rstrip("/")
+        host = _safe_external_host(self.headers.get("Host", ""))
+        if not host:
+            address = cast(tuple[Any, ...], self.server.server_address)  # type: ignore[attr-defined]
+            host = _http_base_for_bind_host(str(address[0]), int(address[1])).removeprefix("http://")
+        return f"http://{host}".rstrip("/")
+
+    def send_json(self, payload: Any, *, status: int = 200) -> None:
+        body = json_response_payload(payload)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], handler: type[MCPHandler], runtime: Runtime) -> None:
+    def __init__(self, address: tuple[str, int], handler: type[http.server.BaseHTTPRequestHandler], runtime: Runtime) -> None:
         super().__init__(address, handler)
         self.runtime = runtime
 
@@ -5238,8 +6832,31 @@ def build_runtime(
     *,
     auth_token: str | None = None,
     oauth_config: OAuthConfig | None = None,
+    config_dir: Path | None = None,
+    upstream_config_path: Path | None = None,
+    settings_path: Path | None = None,
+    startup_settings: dict[str, Any] | None = None,
+    server_host: str | None = None,
+    server_port: int | None = None,
+    admin_ui_enabled: bool = False,
 ) -> Runtime:
-    workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
+    settings = dict(startup_settings or {})
+    workspace = effective_workspace_path(args, settings)
+    if config_dir is None or upstream_config_path is None or settings_path is None:
+        config_dir, upstream_config_path, settings_path = resolve_config_paths(args, workspace)
+        if not settings:
+            settings = read_server_settings(settings_path)
+    admin_manager = McpAdminManager(upstream_config_path, protocol_version=PROTOCOL_VERSION)
+    secret_resolver = admin_manager.secret_vault.get_secret if admin_manager.secret_vault.enabled() else None
+    upstream_manager = (
+        UpstreamManager.from_config_file(
+            upstream_config_path,
+            protocol_version=PROTOCOL_VERSION,
+            secret_resolver=secret_resolver,
+        )
+        if upstream_config_path.exists()
+        else UpstreamManager.empty(PROTOCOL_VERSION)
+    )
     runtime = Runtime(
         workspace,
         enable_view_image=args.enable_view_image,
@@ -5248,7 +6865,17 @@ def build_runtime(
         allow_network=runtime_policy.allow_network,
         tool_profile=args.tool_profile,
         auth_token=auth_token,
+        admin_token=args.admin_token or os.environ.get(f"{ENV_PREFIX}_ADMIN_TOKEN") or _settings_text(settings, "admin_token"),
         oauth_config=oauth_config,
+        upstream_manager=upstream_manager,
+        admin_manager=admin_manager,
+        config_dir=config_dir,
+        upstream_config_path=upstream_config_path,
+        settings_path=settings_path,
+        startup_settings=settings,
+        server_host=server_host,
+        server_port=server_port,
+        admin_ui_enabled=admin_ui_enabled,
     )
     if runtime.capabilities.skip_all_permissions:
         print(
@@ -5262,12 +6889,23 @@ AUTH_MODE_CHOICES = ("bearer", "noauth", "oauth")
 
 
 def run_http(args: argparse.Namespace) -> int:
+    workspace = effective_workspace_path(args, {})
+    config_dir, upstream_config_path, settings_path = resolve_config_paths(args, workspace)
+    startup_settings = read_server_settings(settings_path)
+    workspace = effective_workspace_path(args, startup_settings)
+    config_dir, upstream_config_path, settings_path = resolve_config_paths(args, workspace)
+    startup_settings = read_server_settings(settings_path)
+    apply_startup_settings(args, startup_settings)
+    args.workspace = str(workspace)
+    args.host = effective_host(args, startup_settings)
+    args.port = effective_port(args, startup_settings)
+
     auth_mode = (os.environ.get(f"{ENV_PREFIX}_AUTH_MODE") or "").strip().lower()
     if auth_mode and auth_mode not in AUTH_MODE_CHOICES:
         supported = ", ".join(AUTH_MODE_CHOICES)
         print(f"ERROR: {ENV_PREFIX}_AUTH_MODE must be one of: {supported}.", file=sys.stderr)
         return 2
-    auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or None
+    auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or _settings_text(startup_settings, "auth_token")
     try:
         runtime_policy = runtime_policy_from_args(args)
     except ValueError as exc:
@@ -5284,22 +6922,17 @@ def run_http(args: argparse.Namespace) -> int:
         client_id = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_ID") or None
         client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or None
         env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD")
-        password = env_password or secrets.token_urlsafe(32)
-        server_url = (os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or "").rstrip("/") or None
+        password = env_password or _settings_text(startup_settings, "oauth_password") or secrets.token_urlsafe(32)
+        server_url = (
+            os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or _settings_text(startup_settings, "oauth_server_url") or ""
+        ).rstrip("/") or None
         if not env_password:
             print(f"OAuth authorize password: {password}", file=sys.stderr)
-        raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or ""
-        if raw_secret:
-            try:
-                token_secret = bytes.fromhex(raw_secret)
-            except ValueError:
-                print(
-                    f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_SECRET must be hex-encoded bytes.",
-                    file=sys.stderr,
-                )
-                return 2
-        else:
-            token_secret = secrets.token_bytes(32)
+        try:
+            token_secret = _resolve_oauth_token_secret(startup_settings, settings_path)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
         try:
             token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL") or OAUTH_TOKEN_TTL_SECONDS)
         except ValueError:
@@ -5335,8 +6968,29 @@ def run_http(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config)
+    admin_ui_enabled = not bool(getattr(args, "no_admin_ui", False)) and not falsy_env(os.environ.get(f"{ENV_PREFIX}_ADMIN_UI"))
+    runtime = build_runtime(
+        args,
+        runtime_policy,
+        auth_token=auth_token,
+        oauth_config=oauth_config,
+        config_dir=config_dir,
+        upstream_config_path=upstream_config_path,
+        settings_path=settings_path,
+        startup_settings=startup_settings,
+        server_host=str(args.host),
+        server_port=int(args.port),
+        admin_ui_enabled=admin_ui_enabled,
+    )
+    if admin_ui_enabled and runtime.auth_enabled() and not runtime.admin_auth_enabled():
+        print(
+            f"ERROR: same-port admin console requires --admin-token, {ENV_PREFIX}_ADMIN_TOKEN, or --oauth-mode when /mcp auth is enabled.",
+            file=sys.stderr,
+        )
+        return 2
+
     server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime)
+    admin_server: RuntimeHTTPServer | None = None
     if oauth_config:
         url_label = oauth_config.server_url or "dynamic request URL"
         suffix = " + bearer" if runtime.auth_token else ""
@@ -5347,11 +7001,25 @@ def run_http(args: argparse.Namespace) -> int:
         auth_label = "no auth configured"
     base_url = _http_base_for_bind_host(str(args.host), args.port)
     print(f"{SERVER_NAME} listening on {base_url}/mcp ({auth_label}, profile={args.tool_profile})", file=sys.stderr)
+    if admin_ui_enabled:
+        print(f"{SERVER_NAME} admin console listening on {base_url}/admin", file=sys.stderr)
+    separate_admin_enabled = bool(getattr(args, "admin_ui", False))
+    if separate_admin_enabled:
+        admin_host = str(getattr(args, "admin_host", "127.0.0.1"))
+        admin_port = int(getattr(args, "admin_port", 8766))
+        admin_server = RuntimeHTTPServer((admin_host, admin_port), AdminUIHandler, runtime)
+        admin_thread = threading.Thread(target=admin_server.serve_forever, name="coding-tools-mcp-admin", daemon=True)
+        admin_thread.start()
+        admin_url = _http_base_for_bind_host(admin_host, admin_port)
+        print(f"{SERVER_NAME} compatibility admin console listening on {admin_url}/admin", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         return 130
     finally:
+        if admin_server is not None:
+            admin_server.shutdown()
+            admin_server.server_close()
         server.server_close()
     return 0
 
@@ -5443,20 +7111,48 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
     parser.add_argument(
         "--host",
-        default=os.environ.get(f"{ENV_PREFIX}_HOST") or "127.0.0.1",
-        help=f"bind host; defaults to {ENV_PREFIX}_HOST or 127.0.0.1",
+        default=None,
+        help=f"bind host; defaults to {ENV_PREFIX}_HOST, server settings, or 127.0.0.1",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=env_int(f"{ENV_PREFIX}_PORT", 8000),
-        help=f"bind port; defaults to {ENV_PREFIX}_PORT or 8000",
+        default=None,
+        help=f"bind port; defaults to {ENV_PREFIX}_PORT, server settings, or 8000",
     )
     parser.add_argument("--stdio", action="store_true", help="serve newline-delimited JSON-RPC over stdio")
     parser.add_argument(
         "--auth-token",
         default=None,
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
+    )
+    parser.add_argument(
+        "--admin-token",
+        default=None,
+        help=f"enable admin MCP management tools for this separate bearer token; defaults to {ENV_PREFIX}_ADMIN_TOKEN",
+    )
+    parser.add_argument(
+        "--admin-ui",
+        action="store_true",
+        default=False,
+        help="start the legacy separate admin web console in addition to same-port /admin",
+    )
+    parser.add_argument(
+        "--no-admin-ui",
+        action="store_true",
+        default=False,
+        help=f"disable the same-port /admin web console; can also be disabled with {ENV_PREFIX}_ADMIN_UI=0",
+    )
+    parser.add_argument(
+        "--admin-host",
+        default=os.environ.get(f"{ENV_PREFIX}_ADMIN_HOST") or "127.0.0.1",
+        help=f"admin console bind host; defaults to {ENV_PREFIX}_ADMIN_HOST or 127.0.0.1",
+    )
+    parser.add_argument(
+        "--admin-port",
+        type=int,
+        default=env_int(f"{ENV_PREFIX}_ADMIN_PORT", 8766),
+        help=f"admin console bind port; defaults to {ENV_PREFIX}_ADMIN_PORT or 8766",
     )
     parser.add_argument(
         "--oauth-mode",
@@ -5473,6 +7169,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=TOOL_PROFILE_CHOICES,
         default=os.environ.get(f"{ENV_PREFIX}_TOOL_PROFILE", "full"),
         help="tool exposure profile",
+    )
+    parser.add_argument(
+        "--upstream-config",
+        default=None,
+        help=f"JSON config for upstream MCP gateway servers; defaults to {ENV_PREFIX}_UPSTREAM_CONFIG",
+    )
+    parser.add_argument(
+        "--config-dir",
+        default=None,
+        help=f"directory for {UPSTREAM_CONFIG_FILENAME} and {SERVER_SETTINGS_FILENAME}; defaults to {ENV_PREFIX}_CONFIG_DIR or <workspace>/{DEFAULT_CONFIG_DIR_NAME}",
     )
     parser.add_argument(
         "--shell-env-inherit",

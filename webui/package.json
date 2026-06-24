@@ -1,0 +1,16 @@
+{
+  "name": "coding-tools-mcp-webui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "npm run build",
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "preview": "vite preview --host 127.0.0.1 --port 4173"
+  },
+  "devDependencies": {
+    "@unocss/vite": "latest",
+    "unocss": "latest",
+    "vite": "latest"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "servers": {
+    "filesystem": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-filesystem", "G:/LLM"],
+      "env": {
+        "TOKEN": {"secret_ref": "github_token"}
+      },
+      "include_tools": ["read_file", "list_directory"],
+      "enabled": true
+    },
+    "browser": {
+      "transport": "streamable_http",
+      "url": "http://0.0.0.0:9000/mcp",
+      "authorization_env": "qq29250687",
+      "include_tools": ["open", "screenshot"],
+      "enabled": true
+    }
+  }
+}

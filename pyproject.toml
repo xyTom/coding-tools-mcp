@@ -38,3 +38,6 @@ coding-tools-mcp = "coding_tools_mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["coding_tools_mcp*"]
+
+[tool.setuptools.package-data]
+coding_tools_mcp = ["webui_dist/*.html"]

@@ -8,6 +8,8 @@ The server implements Streamable HTTP at `/mcp`, publishes remote discovery meta
 - `bearer` — static `Authorization: Bearer <token>` for clients that can send custom headers.
 - `oauth2` — OAuth 2.1 Authorization Code + PKCE for MCP clients that perform the standard discovery + authorization-code flow. Discovery metadata is published at `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource`.
 
+The same HTTP process also serves the built-in admin console at `/admin` by default. It uses `/api/admin/*` on the same origin and requires an admin bearer token or an OAuth token with `scope=admin` when auth is enabled. Disable it for tunnel deployments with `--no-admin-ui` or `CODING_TOOLS_MCP_ADMIN_UI=0`.
+
 ## Profile Choice
 
 Use `--tool-profile read-only` first. It exposes inspection and git read tools plus `set_default_cwd` for navigation, and omits workspace mutation tools such as `apply_patch`, `exec_command`, `write_stdin`, and `kill_session`.
@@ -72,6 +74,8 @@ scripts/tunnel.sh cloudflared /path/to/repo
 
 The script adds `--oauth-mode` to the server and prints the generated password before starting the tunnel. When cloudflared/ngrok/devtunnel prints the HTTPS URL, configure your MCP client with that URL; the server derives its OAuth issuer and metadata URLs from the incoming request host. The same flow works with `scripts/install.sh --tunnel <provider> --auth-mode oauth`.
 
+The admin console OAuth login requests `scope=admin`. Ordinary MCP clients normally request or receive `scope=mcp`; those tokens can call `/mcp` but are rejected by `/api/admin/*`. Discovery metadata advertises both supported scopes.
+
 Optional URL pinning:
 
 - `CODING_TOOLS_MCP_SERVER_URL` — optional public base URL (no trailing `/mcp`). When set, it pins the `issuer`/`aud` claim in issued tokens and discovery metadata. When unset, the server derives the URL from `Host`/`X-Forwarded-*` request headers, which is the easiest mode for one-shot tunnels whose URL is only known after startup.
@@ -84,16 +88,18 @@ Default public client + PKCE:
 
 Optional token settings:
 
-- `CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` — hex-encoded HS256 signing key. Without it, a random key is generated per process and all tokens are invalidated on restart. Generate one with `python3 -c "import secrets; print(secrets.token_bytes(32).hex())"`.
+- `CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` — hex-encoded HS256 signing key. If neither this variable nor `oauth_token_secret` in `server-settings.json` is set, the first OAuth startup generates a 32-byte key and saves it to `server-settings.json` when possible, so tokens survive normal restarts. Generate or rotate one manually with `python3 -c "import secrets; print(secrets.token_bytes(32).hex())"`.
 - `CODING_TOOLS_MCP_OAUTH_TOKEN_TTL` — access-token lifetime in seconds (default `2592000`, i.e. 30 days).
 
 Endpoints exposed when `--oauth-mode` is active:
 
 - `GET /.well-known/oauth-authorization-server` — RFC 8414 authorization-server metadata.
 - `GET /.well-known/oauth-protected-resource` — RFC 9728 protected-resource metadata.
+- `GET /admin` — built-in admin console. Its browser login button starts the PKCE flow with `scope=admin`.
 - `GET /oauth/authorize` — renders an HTML password prompt; only `response_type=code` and `code_challenge_method=S256` are accepted. Authorization codes expire after 5 minutes.
 - `POST /oauth/authorize` — accepts the password, issues a one-time code, and 302s back to `redirect_uri`.
 - `POST /oauth/token` — exchanges `grant_type=authorization_code` + `code_verifier` for a Bearer JWT.
+- `GET /api/admin/status` and `POST /api/admin/*` — admin APIs; require an admin token or OAuth `scope=admin`.
 
 `/mcp` accepts the issued OAuth token as `Authorization: Bearer <token>`. When `--auth-token` is also set alongside `--oauth-mode`, both credentials are accepted concurrently — useful for clients (e.g. Lovable) that only support static bearer tokens while OAuth-aware clients (e.g. Claude desktop) continue to use the PKCE flow. Unauthenticated requests get HTTP `401` with a `WWW-Authenticate` header pointing at the protected-resource metadata.
 
@@ -123,6 +129,10 @@ CODING_TOOLS_MCP_AUTH_MODE=bearer        # bearer | noauth | oauth
 CODING_TOOLS_MCP_PORT=8765
 CODING_TOOLS_MCP_TOOL_PROFILE=read-only
 CODING_TOOLS_MCP_AUTH_TOKEN=<existing-token>
+CODING_TOOLS_MCP_ADMIN_TOKEN=<existing-admin-token>
+CODING_TOOLS_MCP_CONFIG_DIR=<config-dir>
+CODING_TOOLS_MCP_UPSTREAM_CONFIG=<mcp-servers-json>
+CODING_TOOLS_MCP_ADMIN_UI=0              # disable /admin for tunnel-only servers
 CODING_TOOLS_MCP_SERVER_BIN=coding-tools-mcp
 
 # Auto-generated and printed at startup if unset:
@@ -176,6 +186,8 @@ WWW-Authenticate: Bearer realm="coding-tools-mcp", resource_metadata="<BASE_URL>
 
 ## Security Notes
 
-Keep the server bound to `127.0.0.1` and expose only the tunnel URL. Non-loopback binding is rejected unless a bearer token or `--oauth-mode` is configured. Use HTTPS tunnel URLs, rotate bearer tokens and OAuth client secrets if they are shared, set `CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` so OAuth tokens survive restarts only when you actually want that, and do not use `full` or `compat-readonly-all` with untrusted clients.
+Keep the server bound to `127.0.0.1` and expose only the tunnel URL. Non-loopback binding is rejected unless a bearer token or `--oauth-mode` is configured. Use HTTPS tunnel URLs, rotate bearer tokens and OAuth client secrets if they are shared, and do not use `full` or `compat-readonly-all` with untrusted clients. OAuth tokens are signed with the saved token secret and the configured server URL; use a stable Cloudflare tunnel hostname plus `CODING_TOOLS_MCP_SERVER_URL` when you want tokens to remain valid across tunnel restarts.
+
+Because `/admin` is same-origin with `/mcp`, a public tunnel exposes the admin login page too. Protect it with OAuth/admin token or disable it. Tokens saved in `server-settings.json` are plaintext and should be treated as sensitive; MCP server secrets should use `CODING_TOOLS_MCP_SECRETS_KEY` plus `secret_ref`. The admin console does not install skills.
 
 Anonymous remote MCP tunnel testing exposes whatever the selected profile permits to anyone who can reach the tunnel URL. Use `read-only`, avoid sensitive workspaces, and stop the tunnel when testing is done.
