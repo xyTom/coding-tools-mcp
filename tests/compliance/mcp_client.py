@@ -24,14 +24,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 REQUIRED_TOOLS = (
     "server_info",
+    "workspace_identity",
     "check_exec_environment",
     "read_file",
+    "file_stat",
     "list_dir",
     "list_files",
     "search_text",
     "apply_patch",
+    "restore_patch_checkpoint",
     "exec_command",
     "write_stdin",
+    "command_status",
     "kill_session",
     "git_status",
     "git_diff",

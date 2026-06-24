@@ -828,6 +828,7 @@ def resolve_env_config(env_config: dict[str, Any], *, secret_resolver: Callable[
             resolved[name] = secret_resolver(secret_ref)
             continue
         raise UpstreamConfigError(f"Environment reference for {name!r} must contain env_ref or secret_ref.")
+    return resolved
 
 
 def error_payload(exc: BaseException) -> dict[str, Any]:

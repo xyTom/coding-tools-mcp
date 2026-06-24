@@ -187,6 +187,10 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertIn("record_chat_message", normal_tools)
             self.assertIn("recall_chat_context", normal_tools)
             self.assertIn("mcp_chat_context", admin_tools)
+            self.assertIn("mcp_chat_record_context", admin_tools)
+            self.assertIn("mcp_chat_update_context", admin_tools)
+            self.assertIn("mcp_chat_delete_context", admin_tools)
+            self.assertIn("mcp_chat_recall", admin_tools)
             self.assertIn("mcp_chat_context_export", admin_tools)
             self.assertIn("mcp_chat_clear", admin_tools)
             with self.assertRaises(Exception):
@@ -237,6 +241,8 @@ class McpAdminConfigTests(unittest.TestCase):
                 "record_chat_transcript",
                 {
                     "conversation_id": "chat-2026-06-18",
+                    "conversation_title": "备份测试会话",
+                    "conversation_uid": "uid-chat-2026",
                     "source": "codex-test",
                     "messages": [
                         {"message_id": "u1", "role": "user", "timestamp": "2026-06-18T08:00:00Z", "content": "请记录完整聊天"},
@@ -246,25 +252,39 @@ class McpAdminConfigTests(unittest.TestCase):
             )["structuredContent"]
             self.assertEqual(recorded["inserted_count"], 2)
 
-            context_recorded = runtime.transcript_store.record_context_entries(
-                conversation_id="chat-2026-06-18",
-                source="context-test",
-                entries=[
-                    {
-                        "entry_id": "checkpoint-1",
-                        "kind": "checkpoint",
-                        "timestamp": "2026-06-18T08:00:03Z",
-                        "content": "Keep this as durable restore context, separate from full chat backups.",
-                    }
-                ],
-            )
+            context_recorded = runtime.call_tool(
+                "mcp_chat_record_context",
+                {
+                    "conversation_id": "chat-2026-06-18",
+                    "entry_id": "checkpoint-1",
+                    "kind": "checkpoint",
+                    "timestamp": "2026-06-18T08:00:03Z",
+                    "content": "Keep this as durable restore context, separate from full chat backups.",
+                    "source": "context-test",
+                },
+                admin=True,
+            )["structuredContent"]
             self.assertEqual(context_recorded["inserted_count"], 1)
 
             conversations = runtime.call_tool("mcp_chat_conversations", {"limit": 10}, admin=True)["structuredContent"]
             self.assertEqual(conversations["conversation_count"], 1)
             self.assertEqual(conversations["conversations"][0]["conversation_id"], "chat-2026-06-18")
+            self.assertEqual(conversations["conversations"][0]["title"], "备份测试会话")
+            self.assertEqual(conversations["conversations"][0]["unique_id"], "uid-chat-2026")
             self.assertEqual(conversations["conversations"][0]["date"], "2026-06-18")
             self.assertEqual(conversations["conversations"][0]["context_entry_count"], 1)
+            filtered_by_uid = runtime.call_tool("mcp_chat_conversations", {"limit": 10, "query": "uid-chat-2026"}, admin=True)[
+                "structuredContent"
+            ]
+            self.assertEqual(filtered_by_uid["conversation_count"], 1)
+            filtered_by_title = runtime.call_tool("mcp_chat_conversations", {"limit": 10, "query": "备份测试"}, admin=True)[
+                "structuredContent"
+            ]
+            self.assertEqual(filtered_by_title["conversation_count"], 1)
+            filtered_empty = runtime.call_tool("mcp_chat_conversations", {"limit": 10, "query": "missing-conversation"}, admin=True)[
+                "structuredContent"
+            ]
+            self.assertEqual(filtered_empty["conversation_count"], 0)
 
             messages = runtime.call_tool(
                 "mcp_chat_messages",
@@ -281,6 +301,33 @@ class McpAdminConfigTests(unittest.TestCase):
             )["structuredContent"]
             self.assertEqual(context_entries["entry_count"], 1)
             self.assertIn("durable restore context", context_entries["entries"][0]["content"])
+            context_entry = context_entries["entries"][0]
+
+            manual_context = runtime.call_tool(
+                "mcp_chat_record_context",
+                {
+                    "conversation_id": "chat-2026-06-18",
+                    "entry_id": "webui-note-1",
+                    "kind": "note",
+                    "timestamp": "2026-06-18T08:00:04Z",
+                    "content": "Manual WebUI note for reopening remote sessions.",
+                    "source": "webui-test",
+                },
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(manual_context["inserted_count"], 1)
+
+            updated_context = runtime.call_tool(
+                "mcp_chat_update_context",
+                {
+                    "id": context_entry["id"],
+                    "kind": "summary",
+                    "content": "Updated durable restore context for WebUI.",
+                    "source": "webui-test",
+                },
+                admin=True,
+            )["structuredContent"]
+            self.assertTrue(updated_context["updated"])
 
             updated = runtime.call_tool(
                 "mcp_chat_update_message",
@@ -309,11 +356,20 @@ class McpAdminConfigTests(unittest.TestCase):
             )["structuredContent"]
             self.assertEqual(recalled["conversation_id"], "chat-2026-06-18")
             self.assertEqual(recalled["message_count"], 3)
-            self.assertEqual(recalled["context_entry_count"], 1)
-            self.assertIn("durable restore context", recalled["context_text"])
+            self.assertEqual(recalled["context_entry_count"], 2)
+            self.assertIn("Updated durable restore context", recalled["context_text"])
+            self.assertIn("Manual WebUI note", recalled["context_text"])
             self.assertIn("请记录完整聊天", recalled["chat_markdown"])
             self.assertIn("扁平入口也能同步。", recalled["chat_markdown"])
             self.assertEqual(len(recalled["messages"]), 3)
+
+            admin_recalled = runtime.call_tool(
+                "mcp_chat_recall",
+                {"conversation_id": "chat-2026-06-18", "max_messages": 10, "max_context_entries": 10},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(admin_recalled["context_entry_count"], 2)
+            self.assertIn("Manual WebUI note", admin_recalled["context_text"])
 
             runtime.call_tool(
                 "record_chat_transcript",
@@ -334,7 +390,9 @@ class McpAdminConfigTests(unittest.TestCase):
                 {"conversation_id": "chat-2026-06-18", "max_messages": 20, "write_file": True},
                 admin=True,
             )["structuredContent"]
-            self.assertIn("Chat Conversation Transcript", export["markdown"])
+            self.assertIn("聊天备份记录：chat-2026-06-18", export["markdown"])
+            self.assertIn("### 2026-06-18T08:00:02Z - 助手", export["markdown"])
+            self.assertIn("- 消息 ID：`flat-a1`", export["markdown"])
             self.assertIn("已经同步并可在 WebUI 编辑。", export["markdown"])
             self.assertIn("扁平入口也能同步。", export["markdown"])
             self.assertIn("需要合并", export["markdown"])
@@ -345,9 +403,20 @@ class McpAdminConfigTests(unittest.TestCase):
                 {"conversation_id": "chat-2026-06-18", "max_entries": 20, "write_file": True},
                 admin=True,
             )["structuredContent"]
-            self.assertIn("Chat Context: chat-2026-06-18", context_export["markdown"])
-            self.assertIn("durable restore context", context_export["markdown"])
+            self.assertIn("恢复上下文：chat-2026-06-18", context_export["markdown"])
+            self.assertIn("Updated durable restore context", context_export["markdown"])
+            self.assertIn("Manual WebUI note", context_export["markdown"])
             self.assertTrue(Path(context_export["path"]).exists())
+
+            latest_context = runtime.call_tool(
+                "mcp_chat_context",
+                {"conversation_id": "chat-2026-06-18", "limit": 10},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(latest_context["entry_count"], 2)
+            manual_entry = next(item for item in latest_context["entries"] if item["entry_id"] == "webui-note-1")
+            deleted_context = runtime.call_tool("mcp_chat_delete_context", {"id": manual_entry["id"]}, admin=True)["structuredContent"]
+            self.assertEqual(deleted_context["deleted_count"], 1)
 
             deleted_message = runtime.call_tool("mcp_chat_delete_message", {"id": assistant_message["id"]}, admin=True)["structuredContent"]
             self.assertEqual(deleted_message["deleted_count"], 1)
@@ -473,17 +542,48 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("mcp_chat_export", html)
         self.assertIn("mcp_chat_messages", html)
         self.assertIn("mcp_chat_context", html)
+        self.assertIn("mcp_chat_record_context", html)
+        self.assertIn("mcp_chat_update_context", html)
+        self.assertIn("mcp_chat_delete_context", html)
+        self.assertIn("mcp_chat_recall", html)
         self.assertIn("mcp_chat_context_export", html)
         self.assertIn("mcp_secret_set", html)
         self.assertIn("authGate", html)
+        self.assertIn("result-surface", html)
+        self.assertIn("result-block", html)
+        self.assertIn(".auth-panel { display:grid; grid-template-columns:1fr;", html)
+        self.assertIn(".split.wide { grid-template-columns:1fr;", html)
         self.assertIn("navToggle", html)
         self.assertIn("closeOutput", html)
+        self.assertIn("outputBackdrop", html)
+        self.assertIn("output-dialog", html)
+        self.assertIn("见输出弹窗", html)
         self.assertIn("templateSelect", html)
         self.assertIn("exportAllTranscripts", html)
         self.assertIn("exportAllChatTranscripts", html)
         self.assertIn("exportAllChatContexts", html)
+        self.assertIn("contextConversationId", html)
+        self.assertIn("recallSelectedContext", html)
+        self.assertIn("persistenceWorkspace", html)
+        self.assertIn("conversation-workspace", html)
+        self.assertIn("chatWorkspaceEmpty", html)
+        self.assertIn("busyState", html)
+        self.assertIn("dirtyBadge", html)
+        self.assertIn("chatReadLimit", html)
+        self.assertIn("reloadSelectedConversation", html)
+        self.assertIn("deleteSelectedConversation", html)
+        self.assertIn("confirmDirty", html)
+        self.assertIn("beforeunload", html)
+        self.assertIn("withBusy", html)
+        self.assertIn("copyOutput", html)
         self.assertIn("clearChatRecords", html)
         self.assertIn("mergeChatConversations", html)
+        self.assertIn("chatSearch", html)
+        self.assertIn("chatRecordKind", html)
+        self.assertIn("applyChatFilter", html)
+        self.assertIn("showChatSource", html)
+        self.assertIn("聊天备份", html)
+        self.assertIn("UTC+8", html)
         self.assertIn("导出 MD", html)
         self.assertIn("syncJson", html)
         self.assertIn("wizardTransport", html)
@@ -493,6 +593,12 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("chatMessages", html)
         self.assertIn("chatTrackTabs", html)
         self.assertIn("chatContextEntries", html)
+        self.assertIn("chatReaderPanel", html)
+        self.assertIn("chat-reader-inline", html)
+        self.assertIn("conversation-row-selected", html)
+        self.assertIn("closeChatReader", html)
+        self.assertIn("showChatReader", html)
+        self.assertIn("已读取会话正文", html)
         self.assertIn("execSessions", html)
         self.assertIn("mcpRequests", html)
         self.assertIn("MCP HTTP 会话", html)
@@ -508,7 +614,7 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("命令执行目录", html)
         self.assertIn("聊天持久化", html)
         self.assertIn("聊天记录", html)
-        self.assertIn("聊天正文", html)
+        self.assertIn("完整消息文本", html)
         self.assertIn("恢复上下文", html)
         self.assertIn("一键清空", html)
 

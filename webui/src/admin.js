@@ -6,8 +6,16 @@ const $ = (id) => document.getElementById(id);
       templates: {},
       selectedConversation: '',
       activeChatTrack: 'backup',
+      chatConversations: [],
+      chatSearch: '',
+      chatRecordKind: 'all',
+      showChatSource: false,
       chatMessages: [],
       chatContextEntries: [],
+      editingContextId: null,
+      busyCount: 0,
+      dirty: false,
+      suppressDirtyTracking: false,
     };
     const toolTemplate = { name: 'mcp_catalog_list', arguments: {} };
     const defaultServer = { alias:'filesystem', transport:'stdio', command:'uvx', args:['mcp-server-filesystem','G:/LLM'], env:{TOKEN:{secret_ref:'github_token'}}, include_tools:['read_file'] };
@@ -23,18 +31,170 @@ const $ = (id) => document.getElementById(id);
     const setText = (id, value) => { const el = $(id); if (el) el.textContent = value ?? ''; };
     const setHtml = (id, value) => { const el = $(id); if (el) el.innerHTML = value ?? ''; };
     const setValue = (id, value) => { const el = $(id); if (el) el.value = value ?? ''; };
+    const debounce = (fn, wait = 280) => {
+      let timer = null;
+      return (...args) => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => fn(...args), wait);
+      };
+    };
     const headers = () => ({ 'Content-Type':'application/json', ...(state.token ? {'Authorization':'Bearer '+state.token} : {}) });
+    const east8Formatter = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hourCycle: 'h23',
+    });
 
-    function out(value) {
+    function parseTime(value) {
+      if (!value) return null;
+      const raw = String(value).trim();
+      const normalized = raw.includes('T') || /Z$|[+-]\d\d:?\d\d$/.test(raw) ? raw : raw.replace(' ', 'T') + 'Z';
+      const date = new Date(normalized);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+
+    function formatEast8(value) {
+      const date = parseTime(value);
+      if (!date) return String(value || '');
+      return east8Formatter.format(date).replace(/\//g, '-');
+    }
+
+    function east8DateKey(value) {
+      const formatted = formatEast8(value);
+      return formatted ? formatted.slice(0, 10) : '未分组';
+    }
+
+    function timeCell(value) {
+      const formatted = formatEast8(value);
+      return formatted ? `<span class="time-main">${esc(formatted)}</span><span class="mini-label">UTC+8</span>` : '<span class="muted">-</span>';
+    }
+
+    function utcTimestamp() {
+      return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    }
+
+    function roleLabel(role) {
+      return ({ user:'用户', assistant:'助手', system:'系统', tool:'工具' })[String(role || '').toLowerCase()] || String(role || '未知');
+    }
+
+    function kindLabel(kind) {
+      return ({ checkpoint:'上下文检查点', summary:'摘要', note:'备注', context:'上下文' })[String(kind || '').toLowerCase()] || String(kind || '上下文');
+    }
+
+    function localizeConversationTitle(title) {
+      const raw = String(title || '').trim();
+      if (!raw) return '';
+      return raw
+        .replace(/MCP Chat Backup Dual Track/gi, 'MCP 聊天备份双轨')
+        .replace(/Chat Backup Test/gi, '聊天备份测试')
+        .replace(/Chat Backup/gi, '聊天备份')
+        .replace(/Dual Track/gi, '双轨')
+        .replace(/Encoding Fixed/gi, '编码修复')
+        .replace(/Clean/gi, '清理')
+        .replace(/-/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function conversationTitle(conversation) {
+      const title = localizeConversationTitle(conversation.title);
+      if (title) return title;
+      const id = String(conversation.conversation_id || '');
+      const date = east8DateKey(conversation.last_seen || conversation.first_seen || conversation.date);
+      return date && date !== '未分组' ? `聊天会话 ${date}` : '未命名会话';
+    }
+
+    function conversationSearchText(conversation) {
+      return [conversation.conversation_id, conversation.title, conversation.unique_id, conversationTitle(conversation)]
+        .map((item) => String(item || '').toLowerCase())
+        .join('\n');
+    }
+
+    function selectedConversationLabel() {
+      const id = state.selectedConversation || '';
+      const conversation = state.chatConversations.find((item) => String(item.conversation_id || '') === id);
+      if (!conversation) return id || '未选择';
+      const uid = conversation.unique_id ? ` / UID: ${conversation.unique_id}` : '';
+      return `${conversationTitle(conversation)}${uid} / ID: ${id}`;
+    }
+
+    function restoreChatConversationsFromStatus() {
+      state.chatConversations = state.status?.chat_conversations?.conversations || [];
+    }
+
+    function setOutputContent(value) {
       const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
       setText('output', text);
       setText('outputMirror', text);
       setText('resultSummary', text.length > 120 ? text.slice(0, 120) + '...' : text);
+      return text;
+    }
+
+    function setBusy(active, label = '处理中') {
+      state.busyCount = Math.max(0, state.busyCount + (active ? 1 : -1));
+      document.body.classList.toggle('is-busy', state.busyCount > 0);
+      const pill = $('busyState');
+      if (pill) {
+        pill.textContent = state.busyCount > 0 ? label : '空闲';
+        pill.className = `status-pill busy ${state.busyCount > 0 ? '' : 'hidden'}`.trim();
+      }
+    }
+
+    async function withBusy(label, task) {
+      setBusy(true, label);
+      try { return await task(); }
+      catch (err) { out(err); throw err; }
+      finally { setBusy(false, label); }
+    }
+
+    function setDirty(value) {
+      state.dirty = Boolean(value);
+      $('dirtyBadge')?.classList.toggle('hidden', !state.dirty);
+    }
+
+    function confirmDirty(action = '继续') {
+      return !state.dirty || confirm(`还有未保存的编辑，确认${action}？`);
+    }
+
+    function setFormValues(values) {
+      state.suppressDirtyTracking = true;
+      try {
+        for (const [id, value] of Object.entries(values)) setValue(id, value);
+      } finally {
+        state.suppressDirtyTracking = false;
+      }
+    }
+
+    function out(value) {
+      const text = setOutputContent(value);
       $('outputPanel')?.classList.remove('hidden');
       return text;
     }
 
+    function closeOutputPanel() {
+      $('outputPanel')?.classList.add('hidden');
+    }
+
+    function showOutputPanel() {
+      $('outputPanel')?.classList.remove('hidden');
+    }
+
+    function closeChatReader() {
+      if (!confirmDirty('收起会话工作区')) return;
+      $('chatReaderPanel')?.classList.add('hidden');
+      $('chatWorkspaceEmpty')?.classList.remove('hidden');
+    }
+
+    function showChatReader() {
+      $('chatWorkspaceEmpty')?.classList.add('hidden');
+      $('chatReaderPanel')?.classList.remove('hidden');
+      const body = document.querySelector('.chat-reader-body');
+      if (body) body.scrollTop = 0;
+    }
+
     function setView(name) {
+      if (name !== state.active && !confirmDirty('切换页面')) return;
       state.active = name;
       document.querySelectorAll('[data-view]').forEach((el) => el.classList.toggle('active', el.dataset.view === name));
       document.querySelectorAll('[data-nav]').forEach((el) => el.classList.toggle('active', el.dataset.nav === name));
@@ -66,8 +226,10 @@ const $ = (id) => document.getElementById(id);
     }
 
     async function callTool(name, args = {}) {
-      const data = await api('/api/admin/tool', { name, arguments: args });
-      return data.structuredContent || data;
+      return withBusy(name, async () => {
+        const data = await api('/api/admin/tool', { name, arguments: args });
+        return data.structuredContent || data;
+      });
     }
 
     function parseList(value) {
@@ -172,7 +334,10 @@ const $ = (id) => document.getElementById(id);
       return settings;
     }
 
-    async function refreshStatus() {
+    async function refreshStatus(options = {}) {
+      const { silent = false, force = false } = options;
+      if (state.dirty && !force) return;
+      if (!silent) setBusy(true, '刷新中');
       try {
         const res = await fetch('/api/admin/status', { headers: state.token ? {'Authorization':'Bearer '+state.token} : {} });
         const data = await res.json().catch(() => ({ ok:false, error:`HTTP ${res.status}` }));
@@ -184,11 +349,14 @@ const $ = (id) => document.getElementById(id);
         const status = err && typeof err === 'object' ? err.status : undefined;
         setAuthGate(status === 401 || status === 403 ? 'auth' : 'bad', status === 401 || status === 403 ? '需要管理 token 或 OAuth 登录。' : '无法读取管理状态，请检查服务是否运行。');
         out(err);
+      } finally {
+        if (!silent) setBusy(false, '刷新中');
       }
     }
 
     function renderStatus(data) {
       const conversations = data.chat_conversations?.conversations || [];
+      if (!state.chatSearch) state.chatConversations = conversations;
       const contextCount = conversations.reduce((sum, item) => sum + Number(item.context_entry_count || 0), 0);
       setText('metricServers', data.catalog?.server_count ?? 0);
       setText('metricTools', data.tool_counts?.total ?? 0);
@@ -202,7 +370,7 @@ const $ = (id) => document.getElementById(id);
       renderServers(data.catalog?.servers || []);
       renderTemplates(data.templates?.templates || []);
       renderSessions(data.http_sessions || [], data.exec_sessions || []);
-      renderChatConversations(conversations);
+      renderChatConversations();
       renderMcpRequests(data.recent_mcp_requests || []);
       renderCalls(data.recent_tool_calls || []);
       setValue('defaultCwd', data.runtime?.default_cwd_display || '.');
@@ -263,35 +431,87 @@ const $ = (id) => document.getElementById(id);
     }
 
     function renderSessions(httpSessions, execSessions) {
-      setHtml('httpSessions', httpSessions.map((s) => `<tr><td><code>${esc(s.session_id)}</code><div class="muted">请求 ${esc(s.request_count || 0)} 次</div></td><td><span class="mini-label">最近 RPC</span><code>${esc(s.last_rpc_method || s.last_method || '')}</code><div class="muted">${esc(s.last_seen || '')}</div></td><td class="path-cell"><span class="mini-label">会话默认目录</span><code>${esc(s.default_cwd_display || s.default_cwd || '')}</code></td><td class="path-cell"><span class="mini-label">工作区</span><code>${esc(s.workspace || '')}</code></td><td><span class="mini-label">来源</span>${esc(s.remote_addr || '')}<div class="muted">${esc(s.user_agent || '')}</div></td><td><button class="secondary" onclick="exportTranscript('${esc(jsArg(s.session_id))}')">导出 MD</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无 MCP HTTP 会话。访问 /mcp 后会显示在这里。</td></tr>');
-      setHtml('execSessions', execSessions.map((s) => `<tr><td><code>${esc(s.session_id)}</code><div class="muted">${esc(s.started_at || '')}</div></td><td>${esc(s.status)}</td><td class="path-cell"><span class="mini-label">命令执行目录</span><code>${esc(s.workdir)}</code></td><td><span class="mini-label">命令</span>${esc(s.command)}</td><td><button class="danger" onclick="terminateSession('${esc(jsArg(s.session_id))}')">终止</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">暂无运行命令会话。</td></tr>');
+      setHtml('httpSessions', httpSessions.map((s) => `<tr><td><code>${esc(s.session_id)}</code><div class="muted">请求 ${esc(s.request_count || 0)} 次</div></td><td><span class="mini-label">最近 RPC</span><code>${esc(s.last_rpc_method || s.last_method || '')}</code><div class="time-cell">${timeCell(s.last_seen)}</div></td><td class="path-cell"><span class="mini-label">会话默认目录</span><code>${esc(s.default_cwd_display || s.default_cwd || '')}</code></td><td class="path-cell"><span class="mini-label">工作区</span><code>${esc(s.workspace || '')}</code></td><td><span class="mini-label">来源</span>${esc(s.remote_addr || '')}<div class="muted">${esc(s.user_agent || '')}</div></td><td><button class="secondary" onclick="exportTranscript('${esc(jsArg(s.session_id))}')">导出 MD</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无 MCP HTTP 会话。访问 /mcp 后会显示在这里。</td></tr>');
+      setHtml('execSessions', execSessions.map((s) => `<tr><td><code>${esc(s.session_id)}</code><div class="time-cell">${timeCell(s.started_at)}</div></td><td>${esc(s.status)}</td><td class="path-cell"><span class="mini-label">命令执行目录</span><code>${esc(s.workdir)}</code></td><td><span class="mini-label">命令</span>${esc(s.command)}</td><td><button class="danger" onclick="terminateSession('${esc(jsArg(s.session_id))}')">终止</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">暂无运行命令会话。</td></tr>');
     }
 
-    function renderChatConversations(conversations) {
+    function renderChatConversations(conversations = state.chatConversations) {
+      const search = String(state.chatSearch || '').trim().toLowerCase();
+      const kind = state.chatRecordKind || 'all';
+      const visible = conversations.filter((c) => {
+        const messageCount = Number(c.message_count || 0);
+        const contextCount = Number(c.context_entry_count || 0);
+        if (kind === 'backup' && messageCount <= 0) return false;
+        if (kind === 'context' && contextCount <= 0) return false;
+        if (kind === 'both' && (messageCount <= 0 || contextCount <= 0)) return false;
+        return !search || conversationSearchText(c).includes(search);
+      });
+      const table = $('chatConversationsTable');
+      if (table) table.classList.toggle('hide-source', !state.showChatSource);
+      const columnCount = state.showChatSource ? 5 : 4;
       let currentDate = '';
       const rows = [];
-      for (const c of conversations) {
+      for (const c of visible) {
         const id = String(c.conversation_id || '');
-        const date = c.date || String(c.last_seen || '').slice(0, 10) || '未分组';
+        const date = east8DateKey(c.last_seen || c.first_seen || c.date);
         if (date !== currentDate) {
           currentDate = date;
-          rows.push(`<tr class="group-row"><td colspan="8">${esc(date)}</td></tr>`);
+          rows.push(`<tr class="group-row"><td colspan="${columnCount}">${esc(date)}</td></tr>`);
         }
-        const label = c.title ? `${c.title} / ${id}` : id;
-        rows.push(`<tr><td><label class="checkline"><input type="checkbox" class="chat-merge-select" value="${esc(id)}"><span><strong>${esc(c.title || '未命名会话')}</strong><br><code>${esc(id)}</code>${c.unique_id ? `<div class="muted">UID: ${esc(c.unique_id)}</div>` : ''}</span></label></td><td>${esc(c.message_count || 0)}</td><td>${esc(c.context_entry_count || 0)}</td><td>${esc(c.first_seen || '')}</td><td>${esc(c.last_seen || '')}</td><td>${esc(c.source || '')}</td><td><input class="merge-target" value="${esc(id)}" aria-label="合并目标 ${esc(label)}" oninput="document.getElementById('chatMergeTarget').value=this.value"></td><td class="toolbar"><button class="secondary" onclick="readChatConversation('${esc(jsArg(id))}')">读取</button><button class="secondary" onclick="exportChatTranscript('${esc(jsArg(id))}')">聊天 MD</button><button class="secondary" onclick="exportChatContext('${esc(jsArg(id))}')">上下文 MD</button><button class="danger" onclick="deleteChatConversation('${esc(jsArg(id))}')">删除</button></td></tr>`);
+        const title = conversationTitle(c);
+        const originalTitle = c.title && localizeConversationTitle(c.title) !== c.title ? `<div class="muted">原名：${esc(c.title)}</div>` : '';
+        const uid = c.unique_id ? `<div class="identity-line"><span>UID</span><code>${esc(c.unique_id)}</code></div>` : '';
+        const selected = state.selectedConversation === id ? ' class="conversation-row-selected"' : '';
+        rows.push(`<tr${selected}><td class="conversation-cell"><label class="checkline conversation-check"><input type="checkbox" class="chat-merge-select" value="${esc(id)}"><span><strong>${esc(title)}</strong>${originalTitle}${uid}<div class="identity-line"><span>ID</span><code>${esc(id)}</code></div><div class="identity-line"><span>开始</span><code>${esc(formatEast8(c.first_seen) || '-')}</code></div></span></label></td><td><span class="record-count backup-count"><strong>${esc(c.message_count || 0)}</strong><span>聊天</span></span> <span class="record-count context-count"><strong>${esc(c.context_entry_count || 0)}</strong><span>上下文</span></span></td><td class="time-cell">${timeCell(c.last_seen)}</td><td class="chat-source-col source-cell"><code>${esc(c.source || '')}</code></td><td class="toolbar action-stack"><button onclick="readChatConversation('${esc(jsArg(id))}')">打开</button><button class="secondary" onclick="recallChatConversation('${esc(jsArg(id))}')">恢复包</button></td></tr>`);
       }
-      setHtml('chatConversations', rows.join('') || '<tr><td colspan="8" class="muted">暂无聊天记录。agent 调用 record_chat_transcript 或 record_chat_message 后会显示在这里。</td></tr>');
+      const empty = search || kind !== 'all'
+        ? '没有符合筛选条件的聊天记录。'
+        : '暂无聊天记录。agent 调用 record_chat_transcript 或 record_chat_message 后会显示在这里。';
+      setHtml('chatConversations', rows.join('') || `<tr><td colspan="${columnCount}" class="muted">${empty}</td></tr>`);
+    }
+
+    async function applyChatFilter() {
+      state.chatSearch = $('chatSearch')?.value.trim() || '';
+      state.chatRecordKind = $('chatRecordKind')?.value || 'all';
+      state.showChatSource = Boolean($('showChatSource')?.checked);
+      localStorage.setItem('mcpShowChatSource', state.showChatSource ? '1' : '0');
+      if (state.chatSearch) {
+        try {
+          const data = await callTool('mcp_chat_conversations', { limit:500, query:state.chatSearch });
+          state.chatConversations = data.conversations || [];
+        } catch (err) {
+          out(err);
+        }
+      } else {
+        restoreChatConversationsFromStatus();
+      }
+      renderChatConversations();
+    }
+
+    function clearChatFilter() {
+      state.chatSearch = '';
+      state.chatRecordKind = 'all';
+      state.showChatSource = false;
+      setValue('chatSearch', '');
+      setValue('chatRecordKind', 'all');
+      const showSource = $('showChatSource');
+      if (showSource) showSource.checked = false;
+      localStorage.removeItem('mcpShowChatSource');
+      restoreChatConversationsFromStatus();
+      renderChatConversations();
     }
 
     function renderChatMessages(data) {
       const messages = data.messages || [];
       state.chatMessages = messages;
       state.selectedConversation = data.conversation_id || state.selectedConversation || '';
-      setText('chatSelectedConversation', state.selectedConversation || '未选择');
+      setText('chatSelectedConversation', selectedConversationLabel());
       setText('backupCount', `${messages.length} 条`);
       setHtml('chatMessages', messages.map((m) => {
         const id = Number(m.id);
-        return `<div class="chat-message"><div class="chat-message-head"><strong>#${esc(id)} ${esc(m.role || '')}</strong><span class="muted">${esc(m.timestamp || '')}</span><button class="danger" onclick="deleteChatMessage(${id})">删除</button></div><div class="form-grid"><div><label>角色</label><input id="chatRole-${id}" value="${esc(m.role || '')}"></div><div><label>时间</label><input id="chatTime-${id}" value="${esc(m.timestamp || '')}"></div><div class="full"><label>来源</label><input id="chatSource-${id}" value="${esc(m.source || '')}"></div><div class="full"><label>聊天文本</label><textarea class="chat-content" id="chatContent-${id}">${esc(m.content || '')}</textarea></div></div><div class="toolbar"><button onclick="saveChatMessage(${id})">保存修改</button></div></div>`;
+        const role = String(m.role || '').toLowerCase();
+        const roleClass = role.replace(/[^a-z0-9_-]/g, '') || 'unknown';
+        return `<div class="chat-message role-${esc(roleClass)}"><div class="chat-message-head"><strong><span class="role-pill">${esc(roleLabel(role))}</span> #${esc(id)}</strong><span class="time-cell">${timeCell(m.timestamp)}</span><button class="danger" onclick="deleteChatMessage(${id})">删除</button></div><div class="form-grid"><div><label>角色</label><input id="chatRole-${id}" value="${esc(m.role || '')}"></div><div><label>时间</label><input id="chatTime-${id}" value="${esc(m.timestamp || '')}"></div><details class="source-detail full"><summary>来源</summary><label>来源</label><input id="chatSource-${id}" value="${esc(m.source || '')}"></details><div class="full"><label>聊天文本</label><textarea class="chat-content" id="chatContent-${id}">${esc(m.content || '')}</textarea></div></div><div class="toolbar"><button onclick="saveChatMessage(${id})">保存修改</button></div></div>`;
       }).join('') || '<div class="muted">选择一个聊天会话后，这里会显示可编辑的完整消息文本。</div>');
     }
 
@@ -299,17 +519,97 @@ const $ = (id) => document.getElementById(id);
       const entries = data.entries || [];
       state.chatContextEntries = entries;
       state.selectedConversation = data.conversation_id || state.selectedConversation || '';
-      setText('chatSelectedConversation', state.selectedConversation || '未选择');
+      setText('chatSelectedConversation', selectedConversationLabel());
       setText('contextCount', `${entries.length} 条`);
-      setHtml('chatContextEntries', entries.map((entry) => `<div class="context-entry"><div class="context-entry-head"><strong>#${esc(entry.id)} ${esc(entry.kind || 'context')}</strong><span class="muted">${esc(entry.timestamp || '')}</span></div><div class="muted">来源：${esc(entry.source || '')}${entry.entry_id ? ` / entry_id: ${esc(entry.entry_id)}` : ''}</div><pre>${esc(entry.content || '')}</pre></div>`).join('') || '<div class="muted">这个会话还没有恢复上下文条目。agent 调用 record-context 或兼容入口后会显示在这里。</div>');
+      setHtml('chatContextEntries', entries.map((entry) => `<div class="context-entry"><div class="context-entry-head"><strong><span class="context-pill">${esc(kindLabel(entry.kind))}</span> #${esc(entry.id)}</strong><span class="time-cell">${timeCell(entry.timestamp)}</span><div class="toolbar"><button class="secondary" onclick="editContextEntry(${Number(entry.id)})">编辑</button><button class="danger" onclick="deleteContextEntry(${Number(entry.id)})">删除</button></div></div><details class="source-detail"><summary>来源与条目 ID</summary><div class="muted">来源：${esc(entry.source || '')}${entry.entry_id ? ` / entry_id: ${esc(entry.entry_id)}` : ''}</div></details><pre>${esc(entry.content || '')}</pre></div>`).join('') || '<div class="muted">这个会话还没有恢复上下文条目。agent 调用 record-context 或兼容入口后会显示在这里。</div>');
     }
 
+    function resetContextForm() {
+      state.editingContextId = null;
+      setText('contextEditorMode', '新增');
+      setFormValues({
+        contextConversationId: state.selectedConversation || '',
+        contextKind: 'checkpoint',
+        contextEntryId: `manual-${Date.now()}`,
+        contextTimestamp: utcTimestamp(),
+        contextSource: 'webui',
+        contextContent: '',
+      });
+      setDirty(false);
+    }
+
+    function prefillContextFromSelected() {
+      setFormValues({ contextConversationId: state.selectedConversation || $('contextConversationId')?.value || '' });
+      if (!$('contextEntryId')?.value) setValue('contextEntryId', `manual-${Date.now()}`);
+      if (!$('contextTimestamp')?.value) setValue('contextTimestamp', utcTimestamp());
+      if (!$('contextSource')?.value) setValue('contextSource', 'webui');
+    }
+
+    function contextFormPayload() {
+      const conversationId = $('contextConversationId')?.value.trim() || state.selectedConversation;
+      const content = $('contextContent')?.value || '';
+      if (!conversationId) return { ok:false, error:'请先填写或选择会话 ID' };
+      if (!content.trim()) return { ok:false, error:'恢复上下文内容不能为空' };
+      return {
+        ok:true,
+        payload: {
+          conversation_id: conversationId,
+          kind: $('contextKind')?.value || 'checkpoint',
+          entry_id: $('contextEntryId')?.value.trim() || undefined,
+          timestamp: $('contextTimestamp')?.value.trim() || utcTimestamp(),
+          source: $('contextSource')?.value.trim() || 'webui',
+          content,
+        },
+      };
+    }
+
+    async function saveContextEntry() {
+      const form = contextFormPayload();
+      if (!form.ok) { out(form); return; }
+      const payload = form.payload;
+      const conversationId = payload.conversation_id;
+      const toolName = state.editingContextId ? 'mcp_chat_update_context' : 'mcp_chat_record_context';
+      if (state.editingContextId) payload.id = state.editingContextId;
+      out(await callTool(toolName, payload));
+      state.editingContextId = null;
+      setDirty(false);
+      await refreshStatus({ force:true });
+      await window.readChatConversation(conversationId);
+      setChatTrack('context');
+    }
+
+    window.editContextEntry = (id) => {
+      const entry = state.chatContextEntries.find((item) => Number(item.id) === Number(id));
+      if (!entry) { out({ok:false, error:'没有找到上下文条目'}); return; }
+      state.editingContextId = Number(id);
+      setText('contextEditorMode', `编辑 #${id}`);
+      setFormValues({
+        contextConversationId: state.selectedConversation || entry.conversation_id || '',
+        contextKind: entry.kind || 'checkpoint',
+        contextEntryId: entry.entry_id || '',
+        contextTimestamp: entry.timestamp || utcTimestamp(),
+        contextSource: entry.source || 'webui',
+        contextContent: entry.content || '',
+      });
+      setDirty(false);
+      setView('persistence');
+      $('contextContent')?.focus();
+    };
+
+    window.deleteContextEntry = async (id) => {
+      if (!confirmDirty('删除上下文条目')) return;
+      if (!confirm('确认删除这条恢复上下文？')) return;
+      out(await callTool('mcp_chat_delete_context', { id }));
+      if (state.selectedConversation) await window.readChatConversation(state.selectedConversation);
+      await refreshStatus({ force:true });
+    };
+
     function renderMcpRequests(requests) {
-      setHtml('mcpRequests', requests.slice().reverse().map((r) => `<tr><td>${esc(r.timestamp)}</td><td><code>${esc(r.session_id)}</code></td><td><code>${esc(r.method)} ${esc(r.path)}</code></td><td><code>${esc(r.rpc_method || '')}</code></td><td>${esc(r.status)}</td><td><code>${esc(r.default_cwd_display || '')}</code></td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无 /mcp 访问记录。</td></tr>');
+      setHtml('mcpRequests', requests.slice().reverse().map((r) => `<tr><td class="time-cell">${timeCell(r.timestamp)}</td><td><code>${esc(r.session_id)}</code></td><td><code>${esc(r.method)} ${esc(r.path)}</code></td><td><code>${esc(r.rpc_method || '')}</code></td><td>${esc(r.status)}</td><td><code>${esc(r.default_cwd_display || '')}</code></td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无 /mcp 访问记录。</td></tr>');
     }
 
     function renderCalls(calls) {
-      setHtml('calls', calls.slice().reverse().map((c) => `<tr><td>${esc(c.timestamp)}</td><td><code>${esc(c.tool)}</code></td><td>${c.ok ? '成功' : '失败'}</td><td>${esc(c.duration_ms)} ms</td><td>${esc(c.error_code || '')}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">暂无调用记录。</td></tr>');
+      setHtml('calls', calls.slice().reverse().map((c) => `<tr><td class="time-cell">${timeCell(c.timestamp)}</td><td><code>${esc(c.tool)}</code></td><td>${c.ok ? '成功' : '失败'}</td><td>${esc(c.duration_ms)} ms</td><td>${esc(c.error_code || '')}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">暂无调用记录。</td></tr>');
     }
 
     window.toggleServer = async (alias, enabled) => { out(await callTool(enabled ? 'mcp_server_enable' : 'mcp_server_disable', { alias, apply:true })); await refreshStatus(); };
@@ -320,54 +620,79 @@ const $ = (id) => document.getElementById(id);
     window.terminateSession = async (sessionId) => { if (!confirm('确认终止这个会话？')) return; out(await api('/api/admin/runtime', { terminate_session: sessionId })); await refreshStatus(); };
     window.exportTranscript = async (sessionId) => exportTranscriptPayload(sessionId);
     window.readChatConversation = async (conversationId) => {
+      if (state.dirty && !confirmDirty(conversationId === state.selectedConversation ? '重新读取会话' : '切换会话')) return;
       state.selectedConversation = conversationId;
+      if (!state.editingContextId) setFormValues({ contextConversationId: conversationId });
+      const limit = Math.max(1, Math.min(5000, Number($('chatReadLimit')?.value || 1000)));
       const [messages, context] = await Promise.all([
-        callTool('mcp_chat_messages', { conversation_id: conversationId, limit:5000 }),
-        callTool('mcp_chat_context', { conversation_id: conversationId, limit:5000 }),
+        callTool('mcp_chat_messages', { conversation_id: conversationId, limit }),
+        callTool('mcp_chat_context', { conversation_id: conversationId, limit }),
       ]);
       renderChatMessages(messages);
       renderChatContext(context);
-      out({ ok:true, conversation_id:conversationId, chat_backup_messages:messages.message_count || 0, restore_context_entries:context.entry_count || 0 });
+      renderChatConversations();
+      setChatTrack((messages.message_count || messages.messages?.length) ? 'backup' : 'context');
+      setOutputContent({ ok:true, message:'已读取会话正文', conversation_id:conversationId, chat_backup_messages:messages.message_count || 0, restore_context_entries:context.entry_count || 0 });
+      setDirty(false);
+      showChatReader();
     };
     window.exportChatTranscript = async (conversationId) => exportChatPayload(conversationId);
     window.exportChatContext = async (conversationId) => exportChatContextPayload(conversationId);
+    window.recallChatConversation = async (conversationId) => {
+      const id = conversationId || state.selectedConversation || $('contextConversationId')?.value.trim();
+      if (!id) { out({ok:false, error:'请先选择或填写会话 ID'}); return; }
+      const data = await callTool('mcp_chat_recall', { conversation_id:id, max_messages:5000, max_context_entries:5000 });
+      setOutputContent(data.context_text || data.markdown || data);
+      showOutputPanel();
+    };
     window.saveChatMessage = async (id) => {
       const payload = { id, role:$(`chatRole-${id}`).value, timestamp:$(`chatTime-${id}`).value, source:$(`chatSource-${id}`).value, content:$(`chatContent-${id}`).value };
       out(await callTool('mcp_chat_update_message', payload));
-      if (state.selectedConversation) await readChatConversation(state.selectedConversation);
-      await refreshStatus();
+      setDirty(false);
+      if (state.selectedConversation) await window.readChatConversation(state.selectedConversation);
+      await refreshStatus({ force:true });
     };
     window.deleteChatMessage = async (id) => {
+      if (!confirmDirty('删除消息')) return;
       if (!confirm('确认删除这条聊天消息？')) return;
       out(await callTool('mcp_chat_delete_message', { id }));
-      if (state.selectedConversation) await readChatConversation(state.selectedConversation);
-      await refreshStatus();
+      if (state.selectedConversation) await window.readChatConversation(state.selectedConversation);
+      await refreshStatus({ force:true });
     };
     window.deleteChatConversation = async (conversationId) => {
+      if (!confirmDirty('删除会话')) return;
       if (!confirm('确认删除这个聊天会话的全部消息与上下文？')) return;
       out(await callTool('mcp_chat_delete_conversation', { conversation_id: conversationId }));
       if (state.selectedConversation === conversationId) {
+        state.selectedConversation = '';
+        setDirty(false);
         renderChatMessages({ conversation_id:'', messages:[] });
         renderChatContext({ conversation_id:'', entries:[] });
+        closeChatReader();
       }
-      await refreshStatus();
+      await refreshStatus({ force:true });
     };
 
     async function clearChatRecords() {
+      if (!confirmDirty('清空全部记录')) return;
       if (!confirm('确认清空全部聊天记录和恢复上下文？这个操作不可撤销。')) return;
       out(await callTool('mcp_chat_clear', {}));
+      state.selectedConversation = '';
+      setDirty(false);
       renderChatMessages({ conversation_id:'', messages:[] });
       renderChatContext({ conversation_id:'', entries:[] });
-      await refreshStatus();
+      closeChatReader();
+      await refreshStatus({ force:true });
     }
 
     async function mergeChatConversations() {
+      if (!confirmDirty('合并会话')) return;
       const target = $('chatMergeTarget').value.trim();
       const sources = Array.from(document.querySelectorAll('.chat-merge-select:checked')).map((el) => el.value).filter((item) => item && item !== target);
       if (!target || !sources.length) { out({ok:false, error:'请选择要合并的会话，并填写目标会话 ID'}); return; }
       out(await callTool('mcp_chat_merge', { target_conversation_id: target, source_conversation_ids: sources }));
-      await refreshStatus();
-      await readChatConversation(target);
+      await refreshStatus({ force:true });
+      await window.readChatConversation(target);
     }
 
     const safeName = (value, fallback) => String(value || fallback).replace(/[^A-Za-z0-9_.-]+/g, '-');
@@ -414,6 +739,21 @@ const $ = (id) => document.getElementById(id);
       await refreshStatus();
     }
 
+    async function copyOutput() {
+      const text = $('output')?.textContent || '';
+      const button = $('copyOutput');
+      try {
+        await navigator.clipboard.writeText(text);
+        setText('resultSummary', '输出已复制');
+        if (button) {
+          button.textContent = '已复制';
+          window.setTimeout(() => { button.textContent = '复制'; }, 1200);
+        }
+      } catch (err) {
+        out({ok:false, error:'浏览器不允许复制，请手动选中输出内容复制', detail:String(err)});
+      }
+    }
+
     async function oauthLogin() {
       const verifier = Array.from(crypto.getRandomValues(new Uint8Array(48))).map((b) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'[b % 66]).join('');
       const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
@@ -440,11 +780,29 @@ const $ = (id) => document.getElementById(id);
     }
 
     function wireEvents() {
+      const debouncedChatFilter = debounce(() => applyChatFilter(), 320);
+      const dirtySelector = '.chat-content, [id^="chatRole-"], [id^="chatTime-"], [id^="chatSource-"], #contextConversationId, #contextKind, #contextEntryId, #contextTimestamp, #contextSource, #contextContent';
+      const trackDirty = (event) => {
+        if (!state.suppressDirtyTracking && event.target.matches(dirtySelector)) setDirty(true);
+      };
       document.addEventListener('click', (event) => {
         const nav = event.target.closest('[data-nav]');
         if (nav) setView(nav.dataset.nav);
         const track = event.target.closest('[data-chat-track]');
         if (track) setChatTrack(track.dataset.chatTrack);
+      });
+      document.addEventListener('input', trackDirty);
+      document.addEventListener('change', trackDirty);
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          closeOutputPanel();
+          closeChatReader();
+        }
+      });
+      window.addEventListener('beforeunload', (event) => {
+        if (!state.dirty) return;
+        event.preventDefault();
+        event.returnValue = '';
       });
       $('navToggle').onclick = () => {
         const app = $('adminApp');
@@ -453,16 +811,23 @@ const $ = (id) => document.getElementById(id);
       };
       $('navClose').onclick = () => $('adminApp').classList.remove('nav-open');
       $('navBackdrop').onclick = () => $('adminApp').classList.remove('nav-open');
-      $('closeOutput').onclick = () => $('outputPanel').classList.add('hidden');
-      $('showOutput').onclick = () => $('outputPanel').classList.remove('hidden');
+      $('closeOutput').onclick = closeOutputPanel;
+      $('outputBackdrop').onclick = closeOutputPanel;
+      $('showOutput').onclick = showOutputPanel;
+      $('closeChatReader').onclick = closeChatReader;
+      const chatReaderBackdrop = $('chatReaderBackdrop');
+      if (chatReaderBackdrop) chatReaderBackdrop.onclick = closeChatReader;
       $('token').value = state.token;
       populateWizard(defaultServer);
       syncJsonFromWizard();
       setValue('advancedPayload', JSON.stringify(toolTemplate, null, 2));
+      state.showChatSource = localStorage.getItem('mcpShowChatSource') === '1';
+      const showSource = $('showChatSource');
+      if (showSource) showSource.checked = state.showChatSource;
       $('saveToken').onclick = () => { state.token = $('token').value.trim(); localStorage.setItem('mcpAdminToken', state.token); refreshStatus(); };
       $('clearToken').onclick = () => { if (!confirm('确认清除本地保存的 token？')) return; state.token = ''; localStorage.removeItem('mcpAdminToken'); setValue('token', ''); refreshStatus(); };
       $('oauthLogin').onclick = oauthLogin;
-      $('refresh').onclick = refreshStatus;
+      $('refresh').onclick = () => { if (confirmDirty('刷新页面状态')) refreshStatus({ force:true }); };
       $('wizardTransport').onchange = updateTransportFields;
       $('applyTemplate').onclick = () => { populateWizard(selectedTemplateConfig()); syncJsonFromWizard(); };
       $('refreshTemplates').onclick = refreshTemplatesFromTool;
@@ -493,6 +858,22 @@ const $ = (id) => document.getElementById(id);
       $('exportAllChatContexts').onclick = async () => exportChatContextPayload();
       $('clearChatRecords').onclick = clearChatRecords;
       $('mergeChatConversations').onclick = mergeChatConversations;
+      $('prefillContextFromSelected').onclick = prefillContextFromSelected;
+      $('saveContextEntry').onclick = saveContextEntry;
+      $('resetContextEntry').onclick = resetContextForm;
+      $('recallSelectedContext').onclick = () => window.recallChatConversation();
+      $('reloadSelectedConversation').onclick = () => state.selectedConversation ? window.readChatConversation(state.selectedConversation) : out({ok:false, error:'请先选择会话'});
+      $('exportSelectedChatTranscript').onclick = () => state.selectedConversation ? exportChatPayload(state.selectedConversation) : out({ok:false, error:'请先选择会话'});
+      $('exportSelectedChatContext').onclick = () => state.selectedConversation ? exportChatContextPayload(state.selectedConversation) : out({ok:false, error:'请先选择会话'});
+      $('deleteSelectedConversation').onclick = () => state.selectedConversation ? window.deleteChatConversation(state.selectedConversation) : out({ok:false, error:'请先选择会话'});
+      $('applyChatFilter').onclick = () => applyChatFilter();
+      $('clearChatFilter').onclick = clearChatFilter;
+      $('chatSearch').oninput = debouncedChatFilter;
+      $('chatSearch').onkeydown = (event) => { if (event.key === 'Enter') applyChatFilter(); };
+      $('chatRecordKind').onchange = () => applyChatFilter();
+      $('showChatSource').onchange = () => applyChatFilter();
+      $('chatReadLimit').onchange = () => { if (state.selectedConversation) window.readChatConversation(state.selectedConversation); };
+      $('copyOutput').onclick = copyOutput;
       $('saveRuntimeAuth').onclick = async () => { out(await api('/api/admin/runtime', { auth_token:$('runtimeAuthToken').value, admin_token:$('runtimeAdminToken').value, oauth_password:$('runtimeOAuthPassword').value })); await refreshStatus(); };
       $('generateOAuthTokenSecret').onclick = () => { $('settingsOAuthTokenSecret').value = randomHex(32); };
       $('saveStartupSettings').onclick = async () => { out(await api('/api/admin/settings', { settings:startupSettingsPayload() })); setValue('settingsOAuthTokenSecret', ''); await refreshStatus(); };
@@ -502,4 +883,5 @@ const $ = (id) => document.getElementById(id);
     wireEvents();
     setView('overview');
     setChatTrack('backup');
-    exchangeOAuthCode().catch(out).finally(() => { refreshStatus(); setInterval(refreshStatus, 5000); });
+    resetContextForm();
+    exchangeOAuthCode().catch(out).finally(() => { refreshStatus(); setInterval(() => refreshStatus({ silent:true }), 5000); });

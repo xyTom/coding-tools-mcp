@@ -6,15 +6,19 @@ The normative schema source is [profile-v0.1.md](profile-v0.1.md). Live schemas 
 
 - `read_file`: read UTF-8 text slices inside the workspace.
 - `server_info`: inspect server/version/protocol/workspace/default cwd/profile/auth/runtime policy metadata.
+- `workspace_identity`: confirm the active host, platform, workspace identity, and git state before remote edits.
 - `check_exec_environment`: inspect lightweight `exec_command` environment and sandbox state known to the server.
 - `get_default_cwd`: return the current default cwd inside the workspace.
 - `set_default_cwd`: set the default cwd for relative tool paths.
+- `file_stat`: inspect file existence and version metadata for optimistic concurrency checks.
 - `list_dir`: list directory entries under the workspace.
 - `list_files`: glob workspace files.
 - `search_text`: search text or regex matches.
 - `apply_patch`: apply a patch envelope.
+- `restore_patch_checkpoint`: restore the before-image captured by a previous patch checkpoint.
 - `exec_command`: run a bounded command under policy, with Landlock confinement when available.
 - `write_stdin`: write to a live server-managed command session.
+- `command_status`: read retained status and output from a command session without writing stdin.
 - `kill_session`: terminate a server-managed command session.
 - `git_status`: inspect git status.
 - `git_diff`: inspect unified diff.

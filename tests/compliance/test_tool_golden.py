@@ -143,6 +143,49 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 """
         self.assert_tool_error("apply_patch", {"patch": mismatch})
 
+    def test_file_versions_expected_hash_checkpoint_and_restore(self) -> None:
+        identity = self.assert_tool_success(self.client.call_tool("workspace_identity", {}))
+        self.assertIn("workspace_id", identity)
+
+        stat_payload = self.assert_tool_success(self.client.call_tool("file_stat", {"path": "src/math.js"}))
+        expected_hash = stat_payload.get("sha256")
+        self.assertIsInstance(expected_hash, str)
+
+        patch = """*** Begin Patch
+*** Update File: src/math.js
+@@
+-  return a - b;
++  return a * b;
+*** End Patch
+"""
+        applied = self.assert_tool_success(
+            self.client.call_tool(
+                "apply_patch",
+                {"patch": patch, "operation_id": "golden-versioned-edit", "expected_hashes": {"src/math.js": expected_hash}},
+            )
+        )
+        checkpoint_id = applied.get("checkpoint_id")
+        self.assertIsInstance(checkpoint_id, str)
+        self.assertIn("pre_versions", applied)
+        self.assertIn("post_versions", applied)
+
+        stale_patch = """*** Begin Patch
+*** Update File: src/math.js
+@@
+-  return a * b;
++  return a / b;
+*** End Patch
+"""
+        conflict = self.assert_tool_error(
+            "apply_patch", {"patch": stale_patch, "expected_hashes": {"src/math.js": expected_hash}}
+        )
+        self.assertIn("PATCH_CONFLICT", json_dump(conflict))
+
+        restored = self.assert_tool_success(self.client.call_tool("restore_patch_checkpoint", {"checkpoint_id": checkpoint_id}))
+        self.assertEqual(restored.get("operation_id"), "golden-versioned-edit")
+        restored_content = self.tool_text(self.client.call_tool("read_file", {"path": "src/math.js"}))
+        self.assertIn("return a - b", restored_content)
+
     def test_apply_patch_preserves_bom_crlf_and_rejects_ambiguous_context(self) -> None:
         crlf_file = self.workspace.root / "src" / "crlf.txt"
         crlf_file.write_bytes("\ufeffalpha\r\nold\r\nomega\r\n".encode("utf-8"))
@@ -290,6 +333,11 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             session_id = payload.get("session_id")
             self.assertIsInstance(session_id, str, f"long-running command must return session_id: {payload!r}")
             self.assertIn("ready", self.tool_text(started))
+            status_payload = self.assert_tool_success(
+                client.call_tool("command_status", {"session_id": session_id, "from_start": True, "max_output_bytes": 4096})
+            )
+            self.assertEqual(status_payload.get("status"), "running")
+            self.assertIn("ready", json_dump(status_payload))
             hello = client.call_tool("write_stdin", {"session_id": session_id, "chars": "hello\n"})
             self.assertIn("echo:hello", self.tool_text(hello))
             client.call_tool("write_stdin", {"session_id": session_id, "chars": "exit\n"})

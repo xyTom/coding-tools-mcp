@@ -436,7 +436,8 @@ class RuntimeHelperTests(unittest.TestCase):
             with patch.dict(server_module.os.environ, host_env, clear=True):
                 env = runtime._command_env({})
 
-            self.assertEqual(env.get("PATH"), "/usr/bin")
+            path_key = server_module.canonical_command_env_name("PATH")
+            self.assertEqual(env.get(path_key), "/usr/bin")
             self.assertEqual(env.get("KEEP_THIS"), "yes")
             self.assertEqual(env.get("SET_BY_POLICY"), "configured")
             self.assertNotIn("KEEP_DROP", env)
@@ -558,12 +559,13 @@ class RuntimeHelperTests(unittest.TestCase):
                 clear=True,
             ):
                 roots = set(guard_allow_roots())
-        self.assertIn("/etc/resolv.conf", roots)
-        self.assertIn("/etc/hosts", roots)
-        self.assertIn("/usr", roots)
-        self.assertIn("/usr/local/sdkman/candidates", roots)
-        self.assertIn("/etc/gitconfig", roots)
-        self.assertIn("/etc/gitconfig.d", roots)
+        if os.name != "nt":
+            self.assertIn("/etc/resolv.conf", roots)
+            self.assertIn("/etc/hosts", roots)
+            self.assertIn("/usr", roots)
+            self.assertIn("/usr/local/sdkman/candidates", roots)
+            self.assertIn("/etc/gitconfig", roots)
+            self.assertIn("/etc/gitconfig.d", roots)
         self.assertIn(str(java_home.resolve()), roots)
         self.assertIn(str(explicit_root.resolve()), roots)
         self.assertNotIn(str(private_path_dir.resolve()), roots)
@@ -574,7 +576,15 @@ class RuntimeHelperTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             runtime = Runtime(workspace)
-            with patch.dict(server_module.os.environ, {"PATH": os.environ.get("PATH", "")}, clear=True):
+            patched_env = {"PATH": os.environ.get("PATH", "")}
+            if os.name == "nt":
+                patched_env.update(
+                    {
+                        "ComSpec": os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe"),
+                        "SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"),
+                    }
+                )
+            with patch.dict(server_module.os.environ, patched_env, clear=True):
                 self.assertNotIn("GIT_CONFIG_NOSYSTEM", runtime._command_env({}))
                 result = runtime.exec_command(
                     {

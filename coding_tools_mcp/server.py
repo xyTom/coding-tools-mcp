@@ -12,12 +12,14 @@ import http.server
 import json
 import mimetypes
 import os
+import platform
 import posixpath
 import re
 import secrets
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -137,6 +139,14 @@ PERMISSION_MODE_CHOICES = tuple(PERMISSION_MODE_CAPABILITIES)
 KILL_SESSION_STATUSES = ("terminated", "killed", "exited", "terminating", "not_found")
 POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM"}
 WINDOWS_CORE_ENV_NAMES = {"PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR"}
+WINDOWS_CANONICAL_ENV_NAMES = {
+    "PATH": "Path",
+    "PATHEXT": "PATHEXT",
+    "COMSPEC": "ComSpec",
+    "SYSTEMROOT": "SystemRoot",
+    "WINDIR": "windir",
+}
+FORCE_KILL_SIGNAL = cast(signal.Signals, getattr(signal, "SIGKILL", signal.SIGTERM))
 NETWORK_RE = re.compile(
     r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
     re.I,
@@ -148,6 +158,7 @@ DESTRUCTIVE_RE = re.compile(
 )
 MAX_HTTP_REQUEST_BYTES = 1_048_576
 MAX_JSON_RPC_BATCH_ITEMS = 50
+PATCH_CHECKPOINT_LIMIT = 50
 HTTP_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.~:-]{1,128}$")
 RECENT_MCP_REQUEST_LIMIT = 100
 SESSION_BUFFER_BYTES = 1_048_576
@@ -404,6 +415,12 @@ def is_core_command_env_name(name: str) -> bool:
     if os.name == "nt":
         return upper in WINDOWS_CORE_ENV_NAMES
     return upper in POSIX_CORE_ENV_NAMES or upper.startswith("LC_")
+
+
+def canonical_command_env_name(name: str) -> str:
+    if os.name == "nt":
+        return WINDOWS_CANONICAL_ENV_NAMES.get(name.upper(), name)
+    return name
 
 
 def split_env_patterns(value: str | None) -> tuple[str, ...]:
@@ -681,6 +698,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotent=True,
         in_read_only_profile=True,
     ),
+    "workspace_identity": ToolSpec(
+        title="Workspace identity",
+        description="Return stable workspace identity, host, platform, and git state for remote editing confirmation.",
+        read_only=True,
+        idempotent=True,
+        in_read_only_profile=True,
+    ),
     "check_exec_environment": ToolSpec(
         title="Check exec environment",
         description="Return lightweight exec_command sandbox and environment status known to the server.",
@@ -705,6 +729,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "read_file": ToolSpec(
         title="Read file",
         description="Read a UTF-8 text file slice inside the configured workspace.",
+        read_only=True,
+        idempotent=True,
+        in_read_only_profile=True,
+    ),
+    "file_stat": ToolSpec(
+        title="File stat",
+        description="Return path identity, existence, size, mtime, and sha256 version metadata.",
         read_only=True,
         idempotent=True,
         in_read_only_profile=True,
@@ -735,6 +766,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Apply a patch envelope transactionally inside the workspace.",
         destructive=True,
     ),
+    "restore_patch_checkpoint": ToolSpec(
+        title="Restore patch checkpoint",
+        description="Restore the before-image captured by a previous apply_patch checkpoint.",
+        destructive=True,
+    ),
     "exec_command": ToolSpec(
         title="Execute command",
         description="Run a bounded command in the workspace under runtime policy.",
@@ -744,6 +780,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "write_stdin": ToolSpec(
         title="Write stdin",
         description="Write characters to a server-managed running command session.",
+    ),
+    "command_status": ToolSpec(
+        title="Command status",
+        description="Return status and retained output for a server-managed command session without writing stdin.",
+        read_only=True,
+        idempotent=True,
+        in_read_only_profile=True,
     ),
     "kill_session": ToolSpec(
         title="Kill session",
@@ -976,6 +1019,34 @@ ADMIN_TOOL_REGISTRY: dict[str, ToolSpec] = {
     "mcp_chat_context": ToolSpec(
         title="MCP chat context",
         description="List persisted restore-context entries for one chat conversation.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_record_context": ToolSpec(
+        title="MCP chat record context",
+        description="Create one persisted restore-context entry for a chat conversation.",
+        read_only=False,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_update_context": ToolSpec(
+        title="MCP chat update context",
+        description="Edit one persisted restore-context entry.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_chat_delete_context": ToolSpec(
+        title="MCP chat delete context",
+        description="Delete one persisted restore-context entry.",
+        read_only=False,
+        destructive=True,
+        open_world=False,
+    ),
+    "mcp_chat_recall": ToolSpec(
+        title="MCP chat recall",
+        description="Build a recovery payload from persisted chat messages and restore-context entries.",
         read_only=True,
         destructive=False,
         open_world=False,
@@ -1320,9 +1391,90 @@ def is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+def utc_isoformat(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def signal_name(signum: int | signal.Signals) -> str:
+    try:
+        return signal.Signals(int(signum)).name
+    except ValueError:
+        return str(int(signum))
+
+
+def file_version_payload(
+    path: Path,
+    root: Path,
+    *,
+    display: str | None = None,
+    data: bytes | None = None,
+    stat_result: os.stat_result | None = None,
+) -> dict[str, Any]:
+    display_path = display or normalize_rel_display(path, root)
+    try:
+        stat_payload = stat_result or path.stat()
+    except FileNotFoundError:
+        return {
+            "path": display_path,
+            "exists": False,
+            "is_file": False,
+            "is_dir": False,
+            "size_bytes": None,
+            "mtime_ns": None,
+            "mtime": None,
+            "sha256": None,
+        }
+    is_file = path.is_file()
+    content = data if data is not None else (path.read_bytes() if is_file else None)
+    return {
+        "path": display_path,
+        "exists": True,
+        "is_file": is_file,
+        "is_dir": path.is_dir(),
+        "size_bytes": stat_payload.st_size,
+        "mtime_ns": stat_payload.st_mtime_ns,
+        "mtime": utc_isoformat(stat_payload.st_mtime),
+        "sha256": hashlib.sha256(content).hexdigest() if content is not None else None,
+    }
+
+
+def git_workspace_summary(root: Path) -> dict[str, Any]:
+    git = shutil.which("git")
+    if not git:
+        return {"available": False, "reason": "git_not_found"}
+
+    def run_git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [git, "-C", str(root), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+
+    try:
+        inside = run_git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return {"available": True, "inside_work_tree": False}
+        top = run_git("rev-parse", "--show-toplevel")
+        branch = run_git("rev-parse", "--abbrev-ref", "HEAD")
+        commit = run_git("rev-parse", "HEAD")
+        status = run_git("status", "--porcelain=v1")
+    except (OSError, subprocess.SubprocessError):
+        return {"available": True, "inside_work_tree": None, "error": "git_query_failed"}
+    return {
+        "available": True,
+        "inside_work_tree": True,
+        "root": top.stdout.strip() if top.returncode == 0 else None,
+        "branch": branch.stdout.strip() if branch.returncode == 0 else None,
+        "commit": commit.stdout.strip() if commit.returncode == 0 else None,
+        "dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
+    }
+
+
 def terminate_process_group(process: subprocess.Popen[bytes], signum: signal.Signals) -> None:
     if not hasattr(os, "killpg"):
-        if os.name == "nt" and signum != signal.SIGKILL:
+        if os.name == "nt" and signum != FORCE_KILL_SIGNAL:
             event = getattr(signal, "CTRL_BREAK_EVENT", None)
             if event is not None:
                 try:
@@ -1332,7 +1484,7 @@ def terminate_process_group(process: subprocess.Popen[bytes], signum: signal.Sig
                 except Exception:
                     pass
         try:
-            if signum == signal.SIGKILL:
+            if signum == FORCE_KILL_SIGNAL:
                 process.kill()
             else:
                 process.terminate()
@@ -1350,7 +1502,7 @@ def terminate_process_group(process: subprocess.Popen[bytes], signum: signal.Sig
         process.wait(timeout=1)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            os.killpg(process.pid, FORCE_KILL_SIGNAL)
         except Exception:
             process.kill()
 
@@ -1738,6 +1890,7 @@ class ExecSession:
     lock: threading.Lock = field(default_factory=threading.Lock)
     reader_threads: list[threading.Thread] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
+    last_heartbeat_at: float = field(default_factory=time.time)
     closed: bool = False
     exit_code: int | None = None
     signal_name: str | None = None
@@ -1768,17 +1921,21 @@ class ExecSession:
                 session=self,
             )
 
-    def snapshot_since_cursor(self, max_output_bytes: int) -> dict[str, Any]:
+    def snapshot_output(self, max_output_bytes: int, *, consume: bool = True, from_start: bool = False) -> dict[str, Any]:
+        self.last_heartbeat_at = time.time()
         self.refresh_status()
         with self.lock:
-            stdout_omitted = max(0, self.stdout_start_offset - self.stdout_cursor)
-            stderr_omitted = max(0, self.stderr_start_offset - self.stderr_cursor)
-            stdout_start = max(0, self.stdout_cursor - self.stdout_start_offset)
-            stderr_start = max(0, self.stderr_cursor - self.stderr_start_offset)
+            stdout_cursor = self.stdout_start_offset if from_start else self.stdout_cursor
+            stderr_cursor = self.stderr_start_offset if from_start else self.stderr_cursor
+            stdout_omitted = max(0, self.stdout_start_offset - stdout_cursor)
+            stderr_omitted = max(0, self.stderr_start_offset - stderr_cursor)
+            stdout_start = max(0, stdout_cursor - self.stdout_start_offset)
+            stderr_start = max(0, stderr_cursor - self.stderr_start_offset)
             stdout_bytes = bytes(self.stdout[stdout_start:])
             stderr_bytes = bytes(self.stderr[stderr_start:])
-            self.stdout_cursor = self.stdout_total_bytes
-            self.stderr_cursor = self.stderr_total_bytes
+            if consume:
+                self.stdout_cursor = self.stdout_total_bytes
+                self.stderr_cursor = self.stderr_total_bytes
         stdout_truncation = truncate_output_bytes_tail(stdout_bytes, max_output_bytes)
         stderr_truncation = truncate_output_bytes_tail(stderr_bytes, max_output_bytes)
         stdout = stdout_truncation.content
@@ -1797,6 +1954,13 @@ class ExecSession:
             "exit_code": self.exit_code,
             "signal": self.signal_name,
             "timed_out": self.timed_out,
+            "command": self.command,
+            "workdir": self.workdir,
+            "started_at": utc_isoformat(self.started_at),
+            "heartbeat_at": utc_isoformat(self.last_heartbeat_at),
+            "timeout_at": utc_isoformat(self.timeout_at) if self.timeout_at is not None else None,
+            "consume": consume,
+            "from_start": from_start,
             "stdout": stdout,
             "stderr": stderr,
             "stdout_truncated": stdout_truncated,
@@ -1827,6 +1991,9 @@ class ExecSession:
             payload["warnings"] = warnings
         return payload
 
+    def snapshot_since_cursor(self, max_output_bytes: int) -> dict[str, Any]:
+        return self.snapshot_output(max_output_bytes, consume=True, from_start=False)
+
     def refresh_status(self) -> None:
         if (
             self.timeout_at is not None
@@ -1854,6 +2021,15 @@ class ExecSession:
             if remaining <= 0:
                 break
             thread.join(timeout=remaining)
+
+
+@dataclass(frozen=True)
+class PatchCheckpoint:
+    checkpoint_id: str
+    operation_id: str
+    created_at: float
+    summary: str
+    files: dict[str, bytes | None]
 
 
 class Runtime:
@@ -1946,6 +2122,8 @@ class Runtime:
         self.recent_mcp_requests: list[dict[str, Any]] = []
         self.recent_mcp_requests_lock = threading.Lock()
         self.patch_baselines: dict[str, str | None] = {}
+        self.patch_checkpoints: dict[str, PatchCheckpoint] = {}
+        self.patch_checkpoints_lock = threading.Lock()
         self.initialized = False
         self.logging_level = "warning"
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
@@ -2184,8 +2362,31 @@ class Runtime:
             "cache_dir": str(self.cache_dir),
         }
 
+    def workspace_ref_payload(self) -> dict[str, Any]:
+        return {
+            "workspace_id": workspace_runtime_hash(self.workspace.root),
+            "root": str(self.workspace.root),
+            "server_instance_id": self.server_instance_id,
+        }
+
+    def workspace_identity_payload(self) -> dict[str, Any]:
+        return {
+            **self.workspace_ref_payload(),
+            "host": socket.gethostname(),
+            "platform": {
+                "os_name": os.name,
+                "sys_platform": sys.platform,
+                "platform": platform.platform(),
+            },
+            "default_cwd": self.default_cwd_display(),
+            "git": git_workspace_summary(self.workspace.root),
+        }
+
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
         return bool(landlock.get("available")) and self.landlock_enabled()
+
+    def workspace_identity(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self.workspace_identity_payload()
 
     def server_info_payload(self) -> dict[str, Any]:
         tools = self.exposed_tool_names()
@@ -2197,6 +2398,7 @@ class Runtime:
             "version": __version__,
             "protocol_version": PROTOCOL_VERSION,
             **self._exec_environment_summary(),
+            "workspace_identity": self.workspace_identity_payload(),
             "default_cwd": self.default_cwd_display(),
             "package_root": str(Path(__file__).resolve().parents[1]),
             "config_dir": str(self.config_dir or (self.workspace.root / DEFAULT_CONFIG_DIR_NAME)),
@@ -2586,7 +2788,11 @@ class Runtime:
                     write_file=bool(args.get("write_file", True)),
                 )
             if name == "mcp_chat_conversations":
-                return self.transcript_store.list_chat_conversations(limit=int(args.get("limit", 100)))
+                query = args.get("query")
+                return self.transcript_store.list_chat_conversations(
+                    limit=int(args.get("limit", 100)),
+                    query=str(query) if isinstance(query, str) and query else None,
+                )
             if name == "mcp_chat_messages":
                 return self.transcript_store.list_chat_messages(
                     conversation_id=str(args.get("conversation_id", "")),
@@ -2596,6 +2802,39 @@ class Runtime:
                 return self.transcript_store.list_context_entries(
                     conversation_id=str(args.get("conversation_id", "")),
                     limit=int(args.get("limit", 200)),
+                )
+            if name == "mcp_chat_record_context":
+                entry: dict[str, Any] = {
+                    "entry_id": str(args.get("entry_id")) if isinstance(args.get("entry_id"), str) and args.get("entry_id") else None,
+                    "kind": str(args.get("kind") or "checkpoint"),
+                    "timestamp": str(args.get("timestamp")) if isinstance(args.get("timestamp"), str) and args.get("timestamp") else None,
+                    "content": str(args.get("content") or ""),
+                    "source": str(args.get("source")) if isinstance(args.get("source"), str) and args.get("source") else None,
+                }
+                metadata = args.get("metadata")
+                if isinstance(metadata, dict):
+                    entry["metadata"] = metadata
+                return self.transcript_store.record_context_entries(
+                    conversation_id=str(args.get("conversation_id") or "default"),
+                    entries=[entry],
+                    source=str(args.get("source")) if isinstance(args.get("source"), str) and args.get("source") else None,
+                    conversation_title=str(args.get("conversation_title")) if isinstance(args.get("conversation_title"), str) else None,
+                    conversation_uid=str(args.get("conversation_uid")) if isinstance(args.get("conversation_uid"), str) else None,
+                )
+            if name == "mcp_chat_update_context":
+                return self.transcript_store.update_context_entry(
+                    row_id=int(args.get("id", 0)),
+                    updates={key: value for key, value in args.items() if key in {"entry_id", "kind", "timestamp", "content", "source", "metadata"}},
+                )
+            if name == "mcp_chat_delete_context":
+                return self.transcript_store.delete_context_entry(row_id=int(args.get("id", 0)))
+            if name == "mcp_chat_recall":
+                return self.recall_chat_context(
+                    {
+                        "conversation_id": args.get("conversation_id"),
+                        "max_messages": args.get("max_messages", 200),
+                        "max_context_entries": args.get("max_context_entries", 200),
+                    }
                 )
             if name == "mcp_chat_export":
                 conversation_id = args.get("conversation_id")
@@ -2670,10 +2909,10 @@ class Runtime:
             "role": str(args.get("role") or "message"),
             "content": str(args.get("content") or ""),
         }
-        for field in ("message_id", "timestamp", "source"):
-            value = args.get(field)
+        for message_field in ("message_id", "timestamp", "source"):
+            value = args.get(message_field)
             if isinstance(value, str) and value:
-                message[field] = value
+                message[message_field] = value
         metadata_json = args.get("metadata_json")
         if isinstance(metadata_json, str) and metadata_json.strip():
             try:
@@ -2830,6 +3069,21 @@ class Runtime:
         if os.environ.get(f"{ENV_PREFIX}_TRACE") == "1":
             print(json.dumps(event, sort_keys=True, separators=(",", ":")), file=sys.stderr, flush=True)
 
+    def _resolve_version_path(self, raw_path: str) -> ResolvedPath:
+        try:
+            return self.resolve_existing(raw_path)
+        except ToolFailure as exc:
+            if exc.code != "NOT_FOUND":
+                raise
+            return self.resolve_for_write(raw_path)
+
+    def file_stat(self, args: dict[str, Any]) -> dict[str, Any]:
+        resolved = self._resolve_version_path(str(args.get("path", "")))
+        return {
+            **file_version_payload(resolved.path, self.workspace.root, display=resolved.display),
+            "workspace": self.workspace_ref_payload(),
+        }
+
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", "")))
         if resolved.path.is_dir():
@@ -2840,6 +3094,7 @@ class Runtime:
         encoding = args.get("encoding", "utf-8")
         if encoding != "utf-8":
             raise ToolFailure("UNSUPPORTED_ENCODING", "Only utf-8 is supported.", category="validation")
+        stat_result = resolved.path.stat()
         data = resolved.path.read_bytes()
         if b"\x00" in data[:4096]:
             raise ToolFailure("BINARY_FILE", "Binary file read blocked for text tool.", category="validation")
@@ -2877,6 +3132,13 @@ class Runtime:
             "end_line": actual_end,
             "total_lines": total_lines,
             "total_bytes": total_bytes,
+            "version": file_version_payload(
+                resolved.path,
+                self.workspace.root,
+                display=resolved.display,
+                data=data,
+                stat_result=stat_result,
+            ),
             "bytes_read": len(selected.encode("utf-8")),
             "truncated": truncated,
             "truncated_by": truncation.truncated_by,
@@ -3273,9 +3535,79 @@ class Runtime:
             "warnings": ["result limit reached"] if total > len(matches) else [],
         }
 
+    def _normalize_expected_versions(self, raw: Any, *, name: str) -> dict[str, Any]:
+        if raw in (None, ""):
+            return {}
+        if not isinstance(raw, dict):
+            raise ToolFailure("INVALID_ARGUMENT", f"{name} must be an object keyed by workspace path.", category="validation")
+        normalized: dict[str, Any] = {}
+        for raw_path, expected in raw.items():
+            resolved = self._resolve_version_path(str(raw_path))
+            normalized[resolved.display] = expected
+        return normalized
+
+    def _collect_file_versions(self, paths: list[str] | set[str]) -> dict[str, dict[str, Any]]:
+        versions: dict[str, dict[str, Any]] = {}
+        for display in sorted(set(paths)):
+            resolved = self._resolve_version_path(display)
+            versions[resolved.display] = file_version_payload(resolved.path, self.workspace.root, display=resolved.display)
+        return versions
+
+    def _check_patch_preconditions(
+        self,
+        versions: dict[str, dict[str, Any]],
+        expected_hashes: dict[str, Any],
+        expected_mtimes: dict[str, Any],
+    ) -> None:
+        for display, expected in expected_hashes.items():
+            actual = versions[display].get("sha256")
+            expected_hash = None if expected is None else str(expected)
+            if actual != expected_hash:
+                raise ToolFailure(
+                    "PATCH_CONFLICT",
+                    "File sha256 no longer matches the expected version.",
+                    category="conflict",
+                    details={"path": display, "expected_sha256": expected_hash, "actual_sha256": actual, "version": versions[display]},
+                )
+        for display, expected in expected_mtimes.items():
+            actual = versions[display].get("mtime_ns")
+            expected_mtime = None if expected is None else int(expected)
+            if actual != expected_mtime:
+                raise ToolFailure(
+                    "PATCH_CONFLICT",
+                    "File mtime no longer matches the expected version.",
+                    category="conflict",
+                    details={"path": display, "expected_mtime_ns": expected_mtime, "actual_mtime_ns": actual, "version": versions[display]},
+                )
+
+    def _store_patch_checkpoint(
+        self,
+        *,
+        checkpoint_id: str,
+        operation_id: str,
+        summary: str,
+        files: dict[str, bytes | None],
+    ) -> None:
+        checkpoint = PatchCheckpoint(
+            checkpoint_id=checkpoint_id,
+            operation_id=operation_id,
+            created_at=time.time(),
+            summary=summary,
+            files=dict(files),
+        )
+        with self.patch_checkpoints_lock:
+            self.patch_checkpoints[checkpoint_id] = checkpoint
+            if len(self.patch_checkpoints) > PATCH_CHECKPOINT_LIMIT:
+                oldest = min(self.patch_checkpoints.values(), key=lambda item: item.created_at)
+                self.patch_checkpoints.pop(oldest.checkpoint_id, None)
+
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
         patch = str(args.get("patch", ""))
         dry_run = bool(args.get("dry_run", False))
+        operation_id = str(args.get("operation_id") or secrets.token_urlsafe(12))
+        create_checkpoint = bool(args.get("create_checkpoint", True))
+        expected_hashes = self._normalize_expected_versions(args.get("expected_hashes"), name="expected_hashes")
+        expected_mtimes = self._normalize_expected_versions(args.get("expected_mtimes"), name="expected_mtimes")
         operations = parse_patch(patch)
         staged: dict[str, str | None] = {}
         summaries: list[str] = []
@@ -3324,13 +3656,32 @@ class Runtime:
                     summaries.append(f"M {source.display}")
         if not affected:
             raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
+        version_paths = set(staged) | set(expected_hashes) | set(expected_mtimes)
+        pre_versions = self._collect_file_versions(version_paths)
+        self._check_patch_preconditions(pre_versions, expected_hashes, expected_mtimes)
+        checkpoint_id = secrets.token_urlsafe(12) if create_checkpoint and not dry_run else None
+        summary = "\n".join(summaries)
         if not dry_run:
-            self._commit_staged_files(staged)
+            backups = self._commit_staged_files(staged)
+            if checkpoint_id is not None:
+                self._store_patch_checkpoint(
+                    checkpoint_id=checkpoint_id,
+                    operation_id=operation_id,
+                    summary=summary,
+                    files=backups,
+                )
+        post_versions = self._collect_file_versions(set(staged)) if not dry_run else {}
         return {
             "dry_run": dry_run,
             "clean": True,
-            "summary": "\n".join(summaries),
+            "operation_id": operation_id,
+            "checkpoint_id": checkpoint_id,
+            "checkpoint_created": checkpoint_id is not None,
+            "summary": summary,
             "affected_files": affected,
+            "pre_versions": [pre_versions[path] for path in sorted(version_paths)],
+            "post_versions": [post_versions[path] for path in sorted(post_versions)],
+            "workspace": self.workspace_ref_payload(),
             "warnings": [],
         }
 
@@ -3340,17 +3691,18 @@ class Runtime:
         else:
             self.workspace.resolve_for_write(raw_path)
 
-    def _commit_staged_files(self, staged: dict[str, str | None]) -> None:
-        backups: dict[Path, bytes | None] = {}
+    def _commit_staged_files(self, staged: dict[str, str | None]) -> dict[str, bytes | None]:
+        backups: dict[str, bytes | None] = {}
         try:
             for rel, content in staged.items():
                 path = self.workspace.resolve_for_write(rel).path
-                backups[path] = path.read_bytes() if path.exists() and not path.is_dir() else None
+                backups[rel] = path.read_bytes() if path.exists() and not path.is_dir() else None
                 if rel not in self.patch_baselines:
-                    if backups[path] is None:
+                    baseline = backups[rel]
+                    if baseline is None:
                         self.patch_baselines[rel] = None
                     else:
-                        self.patch_baselines[rel] = backups[path].decode("utf-8", errors="replace")
+                        self.patch_baselines[rel] = baseline.decode("utf-8", errors="replace")
                 if content is None:
                     if path.exists():
                         if path.is_dir():
@@ -3361,8 +3713,9 @@ class Runtime:
                     with path.open("w", encoding="utf-8", newline="") as handle:
                         handle.write(content)
         except Exception:
-            for path, data in backups.items():
+            for rel, data in backups.items():
                 try:
+                    path = self.workspace.resolve_for_write(rel).path
                     if data is None:
                         if path.exists() and not path.is_dir():
                             path.unlink()
@@ -3372,6 +3725,52 @@ class Runtime:
                 except OSError:
                     pass
             raise
+        return backups
+
+    def _restore_checkpoint_files(self, files: dict[str, bytes | None]) -> None:
+        backups: dict[str, bytes | None] = {}
+        try:
+            for rel, data in files.items():
+                path = self.workspace.resolve_for_write(rel).path
+                backups[rel] = path.read_bytes() if path.exists() and not path.is_dir() else None
+                if data is None:
+                    if path.exists():
+                        if path.is_dir():
+                            raise ToolFailure("PATCH_FAILED", "Cannot restore over a directory.", category="validation")
+                        path.unlink()
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+        except Exception:
+            for rel, data in backups.items():
+                try:
+                    path = self.workspace.resolve_for_write(rel).path
+                    if data is None:
+                        if path.exists() and not path.is_dir():
+                            path.unlink()
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(data)
+                except OSError:
+                    pass
+            raise
+
+    def restore_patch_checkpoint(self, args: dict[str, Any]) -> dict[str, Any]:
+        checkpoint_id = str(args.get("checkpoint_id", ""))
+        with self.patch_checkpoints_lock:
+            checkpoint = self.patch_checkpoints.get(checkpoint_id)
+        if checkpoint is None:
+            raise ToolFailure("CHECKPOINT_NOT_FOUND", "Patch checkpoint not found.", category="not_found")
+        self._restore_checkpoint_files(checkpoint.files)
+        versions = self._collect_file_versions(set(checkpoint.files))
+        return {
+            "checkpoint_id": checkpoint.checkpoint_id,
+            "operation_id": checkpoint.operation_id,
+            "created_at": utc_isoformat(checkpoint.created_at),
+            "summary": checkpoint.summary,
+            "restored_files": [versions[path] for path in sorted(versions)],
+            "workspace": self.workspace_ref_payload(),
+        }
 
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
         cmd = str(args.get("cmd", ""))
@@ -3454,6 +3853,7 @@ class Runtime:
             payload["status"] = status
             payload["elapsed_ms"] = int((time.time() - start) * 1000)
             payload.update(extra)
+            payload["workspace"] = self.workspace_ref_payload()
             self._add_exec_diagnostics(payload)
             return payload
 
@@ -3534,6 +3934,14 @@ class Runtime:
             )
 
     def _add_exec_diagnostics(self, payload: dict[str, Any]) -> None:
+        status = str(payload.get("status") or "")
+        exit_code = payload.get("exit_code")
+        failure_kind = None
+        if payload.get("timed_out") or status == "timeout":
+            failure_kind = "timeout"
+        elif isinstance(exit_code, int) and exit_code != 0 and status not in {"running", "terminating"}:
+            failure_kind = "command_failed"
+        payload["failure_kind"] = failure_kind
         diagnostics = exec_output_diagnostics(payload)
         if diagnostics:
             payload["diagnostics"] = diagnostics
@@ -3639,7 +4047,7 @@ class Runtime:
                 for key, value in env.items()
                 if env_pattern_matches(key, self.shell_env_policy.include_only)
             }
-        env.update({str(key): str(value) for key, value in self.shell_env_policy.set.items()})
+        env.update({canonical_command_env_name(str(key)): str(value) for key, value in self.shell_env_policy.set.items()})
         self._ensure_runtime_dirs()
         tmp_dir = self.command_tmp_dir()
         env["HOME"] = str(self.command_home_dir())
@@ -3647,22 +4055,34 @@ class Runtime:
         if os.name == "nt":
             env["TEMP"] = str(tmp_dir)
             env["TMP"] = str(tmp_dir)
+            system_root = env.get("SystemRoot") or env.get("WINDIR") or os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+            if not system_root and Path(r"C:\Windows\System32\cmd.exe").exists():
+                system_root = r"C:\Windows"
+            if system_root:
+                env.setdefault("SystemRoot", system_root)
+            comspec = env.get("ComSpec") or os.environ.get("ComSpec")
+            if not comspec and system_root:
+                candidate = Path(system_root) / "System32" / "cmd.exe"
+                if candidate.exists():
+                    comspec = str(candidate)
+            if comspec:
+                env.setdefault("ComSpec", comspec)
         if isinstance(extra, dict):
             for key, value in extra.items():
                 key_text = str(key)
                 value_text = str(value)
                 if not self.dangerously_skip_all_permissions and is_filtered_env_var(key_text, value_text):
                     continue
-                env[key_text] = value_text
+                env[canonical_command_env_name(key_text)] = value_text
         return env
 
     def _base_command_env(self) -> dict[str, str]:
         if self.shell_env_policy.inherit == "none":
             return {}
         if self.shell_env_policy.inherit == "all":
-            return {str(key): str(value) for key, value in os.environ.items()}
+            return {canonical_command_env_name(str(key)): str(value) for key, value in os.environ.items()}
         return {
-            str(key): str(value)
+            canonical_command_env_name(str(key)): str(value)
             for key, value in os.environ.items()
             if is_core_command_env_name(str(key))
         }
@@ -3685,6 +4105,25 @@ class Runtime:
             warnings=warnings or [],
         )
 
+    def _decorate_session_payload(self, session: ExecSession, payload: dict[str, Any]) -> dict[str, Any]:
+        payload["elapsed_ms"] = int((time.time() - session.started_at) * 1000)
+        payload["workspace"] = self.workspace_ref_payload()
+        self._add_exec_diagnostics(payload)
+        return payload
+
+    def command_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        session_id = str(args.get("session_id", ""))
+        session = self._get_session(session_id)
+        wait_until = time.time() + (int(args.get("yield_time_ms", 0)) / 1000.0)
+        while time.time() < wait_until and session.process.poll() is None:
+            time.sleep(0.02)
+        payload = session.snapshot_output(
+            int(args.get("max_output_bytes", 65536)),
+            consume=bool(args.get("consume", False)),
+            from_start=bool(args.get("from_start", True)),
+        )
+        return self._decorate_session_payload(session, payload)
+
     def write_stdin(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = str(args.get("session_id", ""))
         session = self._get_session(session_id)
@@ -3693,7 +4132,8 @@ class Runtime:
         if session.process.poll() is not None:
             if chars:
                 raise ToolFailure("SESSION_CLOSED", "Session is closed; stdin write blocked.", category="runtime")
-            return session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+            payload = session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+            return self._decorate_session_payload(session, payload)
         if chars:
             if session.process.stdin is None or session.process.stdin.closed:
                 raise ToolFailure("SESSION_CLOSED", "Session stdin is closed.", category="runtime")
@@ -3715,7 +4155,8 @@ class Runtime:
                         first_output_at = time.time()
                     if time.time() - first_output_at >= 0.05:
                         break
-        return session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+        payload = session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+        return self._decorate_session_payload(session, payload)
 
     def _wait_for_session_exit(self, session: ExecSession, wait_seconds: float) -> bool:
         wait_until = time.time() + max(0.0, wait_seconds)
@@ -3728,22 +4169,24 @@ class Runtime:
     def kill_session(self, args: dict[str, Any]) -> dict[str, Any]:
         session_id = str(args.get("session_id", ""))
         session = self._get_session(session_id)
-        signal_name = str(args.get("signal", "TERM"))
-        signum = {"TERM": signal.SIGTERM, "KILL": signal.SIGKILL, "INT": signal.SIGINT}.get(signal_name, signal.SIGTERM)
+        requested_signal = str(args.get("signal", "TERM"))
+        signum = {"TERM": signal.SIGTERM, "KILL": FORCE_KILL_SIGNAL, "INT": signal.SIGINT}.get(
+            requested_signal, signal.SIGTERM
+        )
         evict = True
-        signal_sent = signal.Signals(signum).name
+        signal_sent = signal_name(signum)
         if session.process.poll() is None:
             session.terminating = True
             self._terminate_process_group(session.process, signum)
             exited = self._wait_for_session_exit(session, int(args.get("wait_ms", 5000)) / 1000.0)
-            if not exited and signum != signal.SIGKILL:
-                signum = signal.SIGKILL
-                signal_sent = signal.SIGKILL.name
-                self._terminate_process_group(session.process, signal.SIGKILL)
+            if not exited and signum != FORCE_KILL_SIGNAL:
+                signum = FORCE_KILL_SIGNAL
+                signal_sent = signal_name(FORCE_KILL_SIGNAL)
+                self._terminate_process_group(session.process, FORCE_KILL_SIGNAL)
                 exited = self._wait_for_session_exit(session, int(args.get("kill_wait_ms", 2000)) / 1000.0)
             if exited:
                 killed = True
-                status = "killed" if signum == signal.SIGKILL else "terminated"
+                status = "killed" if signum == FORCE_KILL_SIGNAL else "terminated"
             else:
                 killed = False
                 evict = False
@@ -3761,7 +4204,7 @@ class Runtime:
         if evict:
             with self.sessions_lock:
                 self.sessions.pop(session_id, None)
-        return payload
+        return self._decorate_session_payload(session, payload)
 
     def cancel_session(self, session_id: str) -> None:
         with self.sessions_lock:
@@ -4940,7 +5383,7 @@ def open_landlock_ruleset(workspace: Path, read_roots: list[str], *, write_roots
 
 def add_landlock_path(ruleset_fd: int, path: Path, allowed_access: int, *, required: bool = True) -> None:
     try:
-        fd = os.open(path, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+        fd = os.open(path, getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0))
     except OSError as exc:
         if required:
             raise ToolFailure(
@@ -5522,13 +5965,50 @@ def admin_input_schemas() -> dict[str, dict[str, Any]]:
                 "write_file": {**boolean, "default": True},
             }
         ),
-        "mcp_chat_conversations": object_schema({"limit": {**integer, "minimum": 1, "maximum": 500, "default": 100}}),
+        "mcp_chat_conversations": object_schema(
+            {"limit": {**integer, "minimum": 1, "maximum": 500, "default": 100}, "query": string}
+        ),
         "mcp_chat_messages": object_schema(
             {"conversation_id": {**string, "minLength": 1}, "limit": {**integer, "minimum": 1, "maximum": 5000, "default": 500}},
             required=["conversation_id"],
         ),
         "mcp_chat_context": object_schema(
             {"conversation_id": {**string, "minLength": 1}, "limit": {**integer, "minimum": 1, "maximum": 5000, "default": 200}},
+            required=["conversation_id"],
+        ),
+        "mcp_chat_record_context": object_schema(
+            {
+                "conversation_id": {**string, "minLength": 1},
+                "conversation_title": string,
+                "conversation_uid": string,
+                "entry_id": string,
+                "kind": string,
+                "timestamp": string,
+                "content": string,
+                "source": string,
+                "metadata": config,
+            },
+            required=["conversation_id", "content"],
+        ),
+        "mcp_chat_update_context": object_schema(
+            {
+                "id": {**integer, "minimum": 1},
+                "entry_id": string,
+                "kind": string,
+                "timestamp": string,
+                "content": string,
+                "source": string,
+                "metadata": config,
+            },
+            required=["id"],
+        ),
+        "mcp_chat_delete_context": object_schema({"id": {**integer, "minimum": 1}}, required=["id"]),
+        "mcp_chat_recall": object_schema(
+            {
+                "conversation_id": {**string, "minLength": 1},
+                "max_messages": {**integer, "minimum": 1, "maximum": 20000, "default": 200},
+                "max_context_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 200},
+            },
             required=["conversation_id"],
         ),
         "mcp_chat_export": object_schema(
@@ -5589,6 +6069,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     boolean = {"type": "boolean"}
     string_array = {"type": "array", "items": {"type": "string"}}
     metadata = {"type": "object", "additionalProperties": True}
+    version_expectations = {"type": "object", "additionalProperties": True}
     chat_message = {
         "type": "object",
         "properties": {
@@ -5605,6 +6086,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     }
     return {
         "server_info": object_schema(),
+        "workspace_identity": object_schema(),
         "check_exec_environment": object_schema(),
         "record_chat_transcript": object_schema(
             {
@@ -5654,6 +6136,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["path"],
         ),
+        "file_stat": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+            },
+            ["path"],
+        ),
         "list_dir": object_schema(
             {
                 "path": {**string, "default": "."},
@@ -5692,7 +6180,23 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["query"],
         ),
-        "apply_patch": object_schema({"patch": {**string, "minLength": 1}, "dry_run": {**boolean, "default": False}}, ["patch"]),
+        "apply_patch": object_schema(
+            {
+                "patch": {**string, "minLength": 1},
+                "dry_run": {**boolean, "default": False},
+                "operation_id": string,
+                "create_checkpoint": {**boolean, "default": True},
+                "expected_hashes": version_expectations,
+                "expected_mtimes": version_expectations,
+            },
+            ["patch"],
+        ),
+        "restore_patch_checkpoint": object_schema(
+            {
+                "checkpoint_id": {**string, "minLength": 1},
+            },
+            ["checkpoint_id"],
+        ),
         "exec_command": object_schema(
             {
                 "cmd": {**string, "minLength": 1},
@@ -5712,6 +6216,16 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "chars": {**string, "default": ""},
                 "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 1000},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
+            },
+            ["session_id"],
+        ),
+        "command_status": object_schema(
+            {
+                "session_id": {**string, "minLength": 1},
+                "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 0},
+                "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
+                "consume": {**boolean, "default": False},
+                "from_start": {**boolean, "default": True},
             },
             ["session_id"],
         ),

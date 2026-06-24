@@ -203,10 +203,10 @@ class TranscriptStore:
             ).fetchall()
         return {"ok": True, "sessions": [dict(row) for row in rows], "session_count": len(rows)}
 
-    def list_chat_conversations(self, *, limit: int = 100) -> dict[str, Any]:
+    def list_chat_conversations(self, *, limit: int = 100, query: str | None = None) -> dict[str, Any]:
         limit = max(1, min(int(limit), 500))
         self._ensure_schema()
-        rows = self._load_chat_conversations(limit=limit)
+        rows = self._load_chat_conversations(limit=limit, query=query)
         return {"ok": True, "conversations": rows, "conversation_count": len(rows)}
 
     def list_chat_messages(self, *, conversation_id: str, limit: int = 500) -> dict[str, Any]:
@@ -258,6 +258,47 @@ class TranscriptStore:
             with closing(self._connect()) as conn, conn:
                 cursor = conn.execute("DELETE FROM chat_messages WHERE id = ?", (int(row_id),))
         return {"ok": True, "deleted_count": int(cursor.rowcount or 0), "message_id": int(row_id)}
+
+    def update_context_entry(self, *, row_id: int, updates: dict[str, Any]) -> dict[str, Any]:
+        self._ensure_schema()
+        assignments: list[str] = []
+        values: list[Any] = []
+        if "entry_id" in updates:
+            assignments.append("entry_id = ?")
+            values.append(normalized_optional_text(updates.get("entry_id"), limit=192))
+        if "kind" in updates:
+            assignments.append("kind = ?")
+            values.append(normalized_context_kind(updates.get("kind")))
+        if "timestamp" in updates:
+            assignments.append("timestamp = ?")
+            values.append(sanitized_text(updates.get("timestamp") or utc_now()))
+        if "content" in updates:
+            assignments.append("content = ?")
+            values.append(sanitized_text(updates.get("content") or ""))
+        if "source" in updates:
+            assignments.append("source = ?")
+            values.append(normalized_optional_text(updates.get("source"), limit=128))
+        if "metadata" in updates:
+            assignments.append("metadata_json = ?")
+            metadata = updates.get("metadata")
+            values.append(None if metadata is None else safe_json_dumps(metadata))
+        if not assignments:
+            raise ValueError("No context entry fields were provided to update.")
+        values.append(int(row_id))
+        with self._lock:
+            with closing(self._connect()) as conn, conn:
+                cursor = conn.execute(f"UPDATE chat_context_entries SET {', '.join(assignments)} WHERE id = ?", values)
+                if cursor.rowcount == 0:
+                    raise ValueError(f"Context entry not found: {row_id}")
+                row = conn.execute("SELECT * FROM chat_context_entries WHERE id = ?", (int(row_id),)).fetchone()
+        return {"ok": True, "updated": True, "entry": dict(row) if row else None}
+
+    def delete_context_entry(self, *, row_id: int) -> dict[str, Any]:
+        self._ensure_schema()
+        with self._lock:
+            with closing(self._connect()) as conn, conn:
+                cursor = conn.execute("DELETE FROM chat_context_entries WHERE id = ?", (int(row_id),))
+        return {"ok": True, "deleted_count": int(cursor.rowcount or 0), "entry_id": int(row_id)}
 
     def delete_chat_conversation(self, *, conversation_id: str) -> dict[str, Any]:
         self._ensure_schema()
@@ -585,11 +626,23 @@ class TranscriptStore:
                 rows = conn.execute("SELECT * FROM events ORDER BY id ASC LIMIT ?", (max_events,)).fetchall()
         return [dict(row) for row in rows]
 
-    def _load_chat_conversations(self, *, limit: int) -> list[dict[str, Any]]:
+    def _load_chat_conversations(self, *, limit: int, query: str | None = None) -> list[dict[str, Any]]:
         self._ensure_schema()
+        normalized_query = sanitized_text(query or "").strip().lower()
+        where_clause = ""
+        params: list[Any] = []
+        if normalized_query:
+            like_query = f"%{normalized_query}%"
+            where_clause = """
+                WHERE LOWER(all_ids.conversation_id) LIKE ?
+                   OR LOWER(COALESCE(c.title, '')) LIKE ?
+                   OR LOWER(COALESCE(c.unique_id, '')) LIKE ?
+                """
+            params.extend([like_query, like_query, like_query])
+        params.append(limit)
         with closing(self._connect()) as conn, conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT all_ids.conversation_id,
                        c.title,
                        c.unique_id,
@@ -608,11 +661,12 @@ class TranscriptStore:
                 LEFT JOIN chat_messages m ON m.conversation_id = all_ids.conversation_id
                 LEFT JOIN chat_context_entries ctx ON ctx.conversation_id = all_ids.conversation_id
                 LEFT JOIN chat_conversations c ON c.conversation_id = all_ids.conversation_id
+                {where_clause}
                 GROUP BY all_ids.conversation_id
                 ORDER BY last_seen DESC
                 LIMIT ?
                 """,
-                (limit,),
+                tuple(params),
             ).fetchall()
         conversations = [dict(row) for row in rows]
         for conversation in conversations:
@@ -719,28 +773,28 @@ class TranscriptStore:
         conversation_id: str | None,
         max_messages: int,
     ) -> str:
-        title = f"Chat Conversation Transcript: {conversation_id}" if conversation_id else "Chat Conversation Transcripts"
+        title = f"聊天备份记录：{conversation_id}" if conversation_id else "聊天备份记录"
         lines = [f"# {title}", ""]
-        lines.append(f"Generated: {utc_now()}")
-        lines.append(f"Database: `{self.db_path}`")
+        lines.append(f"生成时间：{utc_now()}")
+        lines.append(f"数据库：`{self.db_path}`")
         lines.append("")
-        lines.append("## Conversations")
+        lines.append("## 会话")
         if conversations:
             for conversation in conversations:
                 lines.extend(render_chat_conversation_summary(conversation))
         else:
-            lines.append("No chat conversations recorded.")
+            lines.append("暂无聊天会话记录。")
         lines.append("")
-        lines.append(f"## Messages ({len(messages)} shown, max {max_messages})")
+        lines.append(f"## 消息（显示 {len(messages)} 条，最多 {max_messages} 条）")
         if not messages:
-            lines.append("No chat messages recorded.")
+            lines.append("暂无聊天消息记录。")
             lines.append("")
             return "\n".join(lines)
         current_conversation = None
         for message in messages:
             if not conversation_id and message.get("conversation_id") != current_conversation:
                 current_conversation = str(message.get("conversation_id") or "")
-                lines.extend(["", f"## Conversation `{current_conversation}`"])
+                lines.extend(["", f"## 会话 `{current_conversation}`"])
             lines.extend(render_chat_message(message))
         return "\n".join(lines).rstrip() + "\n"
 
@@ -752,28 +806,28 @@ class TranscriptStore:
         conversation_id: str | None,
         max_entries: int,
     ) -> str:
-        title = f"Chat Context: {conversation_id}" if conversation_id else "Chat Context Entries"
+        title = f"恢复上下文：{conversation_id}" if conversation_id else "恢复上下文记录"
         lines = [f"# {title}", ""]
-        lines.append(f"Generated: {utc_now()}")
-        lines.append(f"Database: `{self.db_path}`")
+        lines.append(f"生成时间：{utc_now()}")
+        lines.append(f"数据库：`{self.db_path}`")
         lines.append("")
-        lines.append("## Conversations")
+        lines.append("## 会话")
         if conversations:
             for conversation in conversations:
                 lines.extend(render_chat_conversation_summary(conversation))
         else:
-            lines.append("No chat conversations recorded.")
+            lines.append("暂无聊天会话记录。")
         lines.append("")
-        lines.append(f"## Context Entries ({len(entries)} shown, max {max_entries})")
+        lines.append(f"## 上下文条目（显示 {len(entries)} 条，最多 {max_entries} 条）")
         if not entries:
-            lines.append("No context entries recorded.")
+            lines.append("暂无恢复上下文条目。")
             lines.append("")
             return "\n".join(lines)
         current_conversation = None
         for entry in entries:
             if not conversation_id and entry.get("conversation_id") != current_conversation:
                 current_conversation = str(entry.get("conversation_id") or "")
-                lines.extend(["", f"## Conversation `{current_conversation}`"])
+                lines.extend(["", f"## 会话 `{current_conversation}`"])
             lines.extend(render_context_entry(entry))
         return "\n".join(lines).rstrip() + "\n"
 
@@ -856,20 +910,41 @@ def render_session_summary(session: dict[str, Any]) -> list[str]:
 
 def render_chat_conversation_summary(conversation: dict[str, Any]) -> list[str]:
     lines = [
-        f"- Conversation `{conversation.get('conversation_id')}`",
+        f"- 会话 `{conversation.get('conversation_id')}`",
     ]
     if conversation.get("title"):
-        lines.append(f"  - Title: {conversation.get('title')}")
+        lines.append(f"  - 标题：{conversation.get('title')}")
     if conversation.get("unique_id"):
-        lines.append(f"  - Unique ID: `{conversation.get('unique_id')}`")
+        lines.append(f"  - UID：`{conversation.get('unique_id')}`")
     lines.extend([
-        f"  - First seen: {conversation.get('first_seen')}",
-        f"  - Last seen: {conversation.get('last_seen')}",
-        f"  - Messages: {conversation.get('message_count')}",
-        f"  - Context entries: {conversation.get('context_entry_count', 0)}",
-        f"  - Source: `{conversation.get('source') or ''}`",
+        f"  - 开始时间：{conversation.get('first_seen')}",
+        f"  - 最近时间：{conversation.get('last_seen')}",
+        f"  - 聊天消息：{conversation.get('message_count')}",
+        f"  - 恢复上下文：{conversation.get('context_entry_count', 0)}",
+        f"  - 来源：`{conversation.get('source') or ''}`",
     ])
     return lines
+
+
+def localized_role(value: Any) -> str:
+    role = str(value or "message").strip()
+    return {
+        "user": "用户",
+        "assistant": "助手",
+        "system": "系统",
+        "tool": "工具",
+        "message": "消息",
+    }.get(role.lower(), role)
+
+
+def localized_context_kind(value: Any) -> str:
+    kind = str(value or "checkpoint").strip()
+    return {
+        "checkpoint": "检查点",
+        "summary": "摘要",
+        "note": "备注",
+        "context": "上下文",
+    }.get(kind.lower(), kind)
 
 
 def render_event(row: dict[str, Any], payload: dict[str, Any]) -> list[str]:
@@ -906,19 +981,19 @@ def render_event(row: dict[str, Any], payload: dict[str, Any]) -> list[str]:
 
 def render_chat_message(message: dict[str, Any]) -> list[str]:
     timestamp = str(message.get("timestamp") or "")
-    role = str(message.get("role") or "message")
+    role = localized_role(message.get("role"))
     lines = ["", f"### {timestamp} - {role}"]
     if message.get("message_id"):
-        lines.append(f"- Message ID: `{message.get('message_id')}`")
+        lines.append(f"- 消息 ID：`{message.get('message_id')}`")
     if message.get("source"):
-        lines.append(f"- Source: `{message.get('source')}`")
+        lines.append(f"- 来源：`{message.get('source')}`")
     metadata = load_payload(message.get("metadata_json"))
     if metadata:
-        lines.append("- Metadata:")
+        lines.append("- 元数据：")
         lines.append(json_block(metadata))
     content = str(message.get("content") or "")
     lines.append("")
-    lines.append(content.rstrip() if content else "(empty)")
+    lines.append(content.rstrip() if content else "（空）")
     lines.append("")
     lines.append("---")
     return lines
@@ -926,19 +1001,19 @@ def render_chat_message(message: dict[str, Any]) -> list[str]:
 
 def render_context_entry(entry: dict[str, Any]) -> list[str]:
     timestamp = str(entry.get("timestamp") or "")
-    kind = str(entry.get("kind") or "checkpoint")
+    kind = localized_context_kind(entry.get("kind"))
     lines = ["", f"### {timestamp} - {kind}"]
     if entry.get("entry_id"):
-        lines.append(f"- Entry ID: `{entry.get('entry_id')}`")
+        lines.append(f"- 条目 ID：`{entry.get('entry_id')}`")
     if entry.get("source"):
-        lines.append(f"- Source: `{entry.get('source')}`")
+        lines.append(f"- 来源：`{entry.get('source')}`")
     metadata = load_payload(entry.get("metadata_json"))
     if metadata:
-        lines.append("- Metadata:")
+        lines.append("- 元数据：")
         lines.append(json_block(metadata))
     content = str(entry.get("content") or "")
     lines.append("")
-    lines.append(content.rstrip() if content else "(empty)")
+    lines.append(content.rstrip() if content else "（空）")
     lines.append("")
     lines.append("---")
     return lines

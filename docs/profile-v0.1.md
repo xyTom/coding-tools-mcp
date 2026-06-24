@@ -164,6 +164,8 @@ Shared error object:
             "SANDBOX_UNAVAILABLE",
             "ELICITATION_UNSUPPORTED",
             "PATCH_FAILED",
+            "PATCH_CONFLICT",
+            "CHECKPOINT_NOT_FOUND",
             "RUNTIME_DIR_UNWRITABLE",
             "GIT_ERROR",
             "INTERNAL_ERROR"
@@ -202,16 +204,20 @@ Protocol-level errors:
 P0 tools:
 
 - `server_info`
+- `workspace_identity`
 - `check_exec_environment`
 - `get_default_cwd`
 - `set_default_cwd`
 - `read_file`
+- `file_stat`
 - `list_dir`
 - `list_files`
 - `search_text`
 - `apply_patch`
+- `restore_patch_checkpoint`
 - `exec_command`
 - `write_stdin`
+- `command_status`
 - `kill_session`
 - `git_status`
 - `git_diff`
@@ -227,7 +233,7 @@ P1 tool:
 Tool profiles:
 
 - `full`: expose all tools with truthful annotations.
-- `read-only`: expose only `server_info`, `check_exec_environment`, `get_default_cwd`, `set_default_cwd`, file read/list/search tools, git inspection tools, and `view_image`.
+- `read-only`: expose only `server_info`, `workspace_identity`, `check_exec_environment`, `get_default_cwd`, `set_default_cwd`, file read/list/search/stat tools, `command_status`, git inspection tools, and `view_image`.
 - `compat-readonly-all`: expose all tools, but advertise `readOnlyHint: true`, `destructiveHint: false`, and `openWorldHint: false` for every tool. This profile is a compatibility escape hatch only; mutation-capable tools still mutate local state.
 
 Forbidden tools and equivalent aliases:
@@ -274,6 +280,35 @@ Input schema:
 ```
 
 Output fields include `permission_mode`, `workspace`, `default_cwd`, `network_allowed`, `runtime_dir`, `home`, `tmpdir`, `cache_dir`, `landlock`, and `exec_policy`. `runtime_dir` is an external server-owned directory outside the Git worktree; `home`, `tmpdir`, and `cache_dir` describe the default `exec_command` environment directories under it. `landlock` reports availability and ABI when known. `exec_policy` reports shell expansion, inline script, global tmp write, and secret env filter policy.
+
+### workspace_identity
+
+Description: Return stable workspace identity, host, platform, and git state for remote editing confirmation.
+
+Annotations:
+
+```json
+{
+  "title": "Workspace identity",
+  "readOnlyHint": true,
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "openWorldHint": false
+}
+```
+
+Input schema:
+
+```json
+{
+  "type": "object",
+  "properties": {},
+  "required": [],
+  "additionalProperties": false
+}
+```
+
+Output fields include `workspace`, `workspace_id`, `root`, `default_cwd`, `host`, `platform`, `server_instance_id`, and `git`. Clients should use this before remote edits to confirm they are operating on the intended machine and workspace.
 
 ### check_exec_environment
 
@@ -386,7 +421,38 @@ Output schema:
 }
 ```
 
-Failure cases include `NOT_FOUND`, `IS_DIRECTORY`, `BINARY_FILE`, `ABSOLUTE_PATH_DENIED`, `PATH_OUTSIDE_WORKSPACE`, `SYMLINK_ESCAPE`, `UNSUPPORTED_ENCODING`, and `OUTPUT_TOO_LARGE`.
+Failure cases include `NOT_FOUND`, `IS_DIRECTORY`, `BINARY_FILE`, `ABSOLUTE_PATH_DENIED`, `PATH_OUTSIDE_WORKSPACE`, `SYMLINK_ESCAPE`, `UNSUPPORTED_ENCODING`, and `OUTPUT_TOO_LARGE`. Successful results include `version` metadata with `size_bytes`, `mtime_ns`, `mtime`, and `sha256` so clients can make later optimistic-concurrency checks.
+
+### file_stat
+
+Description: Return path identity, existence, size, mtime, and sha256 version metadata.
+
+Annotations:
+
+```json
+{
+  "title": "File stat",
+  "readOnlyHint": true,
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "openWorldHint": false
+}
+```
+
+Input schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "path": { "type": "string", "minLength": 1 }
+  },
+  "required": ["path"],
+  "additionalProperties": false
+}
+```
+
+Output fields include `ok`, `path`, `workspace`, and `version`. `version.sha256` is present for regular files and `null` for missing paths or directories.
 
 ### list_dir
 
@@ -639,7 +705,11 @@ Input schema:
       "minLength": 1,
       "description": "Patch envelope beginning with *** Begin Patch and ending with *** End Patch."
     },
-    "dry_run": { "type": "boolean", "default": false }
+    "dry_run": { "type": "boolean", "default": false },
+    "operation_id": { "type": "string" },
+    "create_checkpoint": { "type": "boolean", "default": true },
+    "expected_hashes": { "type": "object", "additionalProperties": true },
+    "expected_mtimes": { "type": "object", "additionalProperties": true }
   },
   "required": ["patch"],
   "additionalProperties": false
@@ -665,7 +735,7 @@ Patch envelope operations:
 *** End Patch
 ```
 
-Paths in patch headers must be workspace-relative. Absolute paths, `..`, and symlink escapes are rejected. Patch application must be transactionally safe: either all file changes are committed, or no workspace files are changed. If full transactionality is not technically possible in the first implementation, the tool must reject the patch rather than leave partial edits.
+Paths in patch headers must be workspace-relative. Absolute paths, `..`, and symlink escapes are rejected. Patch application must be transactionally safe: either all file changes are committed, or no workspace files are changed. If full transactionality is not technically possible in the first implementation, the tool must reject the patch rather than leave partial edits. `expected_hashes` and `expected_mtimes` provide optimistic concurrency checks; mismatches fail with `PATCH_CONFLICT`. When `create_checkpoint` is true, the server keeps an in-memory before-image checkpoint for `restore_patch_checkpoint`.
 
 Output schema:
 
@@ -676,7 +746,13 @@ Output schema:
     "ok": { "type": "boolean" },
     "dry_run": { "type": "boolean" },
     "clean": { "type": "boolean" },
+    "operation_id": { "type": "string" },
+    "checkpoint_id": { "type": ["string", "null"] },
+    "checkpoint_created": { "type": "boolean" },
     "summary": { "type": "string" },
+    "workspace": { "type": "object", "additionalProperties": true },
+    "pre_versions": { "type": "object", "additionalProperties": true },
+    "post_versions": { "type": "object", "additionalProperties": true },
     "affected_files": {
       "type": "array",
       "items": {
@@ -696,6 +772,37 @@ Output schema:
   "required": ["ok"]
 }
 ```
+
+### restore_patch_checkpoint
+
+Description: Restore the before-image captured by a previous `apply_patch` checkpoint.
+
+Annotations:
+
+```json
+{
+  "title": "Restore patch checkpoint",
+  "readOnlyHint": false,
+  "destructiveHint": true,
+  "idempotentHint": false,
+  "openWorldHint": false
+}
+```
+
+Input schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "checkpoint_id": { "type": "string", "minLength": 1 }
+  },
+  "required": ["checkpoint_id"],
+  "additionalProperties": false
+}
+```
+
+Output fields include `ok`, `checkpoint_id`, `operation_id`, `restored_files`, `restored_versions`, and `workspace`. Unknown or expired checkpoints fail with `CHECKPOINT_NOT_FOUND`.
 
 ### exec_command
 
@@ -863,6 +970,41 @@ Output schema:
 ```
 
 Writing to an unknown or closed session returns `SESSION_NOT_FOUND` or `SESSION_CLOSED`.
+
+### command_status
+
+Description: Return status and retained output for a server-managed command session without writing stdin.
+
+Annotations:
+
+```json
+{
+  "title": "Command status",
+  "readOnlyHint": true,
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "openWorldHint": false
+}
+```
+
+Input schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "session_id": { "type": "string", "minLength": 1 },
+    "yield_time_ms": { "type": "integer", "minimum": 0, "maximum": 30000, "default": 0 },
+    "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "default": 65536 },
+    "consume": { "type": "boolean", "default": false },
+    "from_start": { "type": "boolean", "default": true }
+  },
+  "required": ["session_id"],
+  "additionalProperties": false
+}
+```
+
+Output fields mirror `write_stdin` session status and include retained output metadata such as `command`, `workdir`, `started_at`, `heartbeat_at`, `timeout_at`, and `elapsed_ms`. Unknown sessions return `SESSION_NOT_FOUND`.
 
 ### kill_session
 
