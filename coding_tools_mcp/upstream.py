@@ -112,6 +112,12 @@ class UpstreamStatus:
         return result
 
 
+@dataclass(frozen=True)
+class LoadedUpstreamConfigs:
+    configs: list[UpstreamServerConfig]
+    invalid_statuses: list[UpstreamStatus] = field(default_factory=list)
+
+
 class BaseUpstreamClient:
     def __init__(
         self,
@@ -410,25 +416,32 @@ class UpstreamManager:
         *,
         protocol_version: str = DEFAULT_PROTOCOL_VERSION,
         secret_resolver: Callable[[str], str] | None = None,
+        invalid_statuses: list[UpstreamStatus] | None = None,
     ) -> None:
         self.protocol_version = protocol_version
         self.secret_resolver = secret_resolver
         self.configs = configs
         self.clients: dict[str, BaseUpstreamClient] = {}
         self.tools: dict[str, UpstreamTool] = {}
-        self.statuses: dict[str, UpstreamStatus] = {}
+        self.statuses: dict[str, UpstreamStatus] = {status.alias: status for status in invalid_statuses or []}
         self._tool_lock = threading.Lock()
         self._initialize_configs()
 
     @classmethod
-    def empty(cls, protocol_version: str = DEFAULT_PROTOCOL_VERSION) -> "UpstreamManager":
+    def empty(
+        cls,
+        protocol_version: str = DEFAULT_PROTOCOL_VERSION,
+        *,
+        secret_resolver: Callable[[str], str] | None = None,
+        invalid_statuses: list[UpstreamStatus] | None = None,
+    ) -> "UpstreamManager":
         instance = cls.__new__(cls)
         instance.protocol_version = protocol_version
-        instance.secret_resolver = None
+        instance.secret_resolver = secret_resolver
         instance.configs = []
         instance.clients = {}
         instance.tools = {}
-        instance.statuses = {}
+        instance.statuses = {status.alias: status for status in invalid_statuses or []}
         instance._tool_lock = threading.Lock()
         return instance
 
@@ -441,8 +454,14 @@ class UpstreamManager:
         secret_resolver: Callable[[str], str] | None = None,
     ) -> "UpstreamManager":
         if not path:
-            return cls.empty(protocol_version)
-        return cls(load_upstream_configs(path), protocol_version=protocol_version, secret_resolver=secret_resolver)
+            return cls.empty(protocol_version, secret_resolver=secret_resolver)
+        loaded = load_upstream_configs_tolerant(path)
+        return cls(
+            loaded.configs,
+            protocol_version=protocol_version,
+            secret_resolver=secret_resolver,
+            invalid_statuses=loaded.invalid_statuses,
+        )
 
     def tool_definitions(self, *, tool_profile: str) -> list[dict[str, Any]]:
         with self._tool_lock:
@@ -478,8 +497,8 @@ class UpstreamManager:
     def status_payload(self) -> dict[str, Any]:
         statuses = [status.payload() for status in self.statuses.values()]
         return {
-            "enabled": bool(self.configs),
-            "server_count": len(self.configs),
+            "enabled": bool(self.statuses),
+            "server_count": len(self.statuses),
             "initialized_count": sum(1 for status in self.statuses.values() if status.initialized),
             "tool_count": len(self.tools),
             "servers": statuses,
@@ -612,6 +631,38 @@ class UpstreamManager:
 
 
 def load_upstream_configs(path: str) -> list[UpstreamServerConfig]:
+    servers = _read_upstream_servers(path)
+    return [parse_server_config(alias, value) for alias, value in servers.items()]
+
+
+def load_upstream_configs_tolerant(path: str) -> LoadedUpstreamConfigs:
+    try:
+        servers = _read_upstream_servers(path)
+    except UpstreamConfigError as exc:
+        return LoadedUpstreamConfigs(
+            configs=[],
+            invalid_statuses=[
+                UpstreamStatus(
+                    alias="__config__",
+                    transport="configuration",
+                    enabled=False,
+                    error=error_payload(exc),
+                    target=str(Path(path).expanduser()),
+                )
+            ],
+        )
+    configs: list[UpstreamServerConfig] = []
+    invalid_statuses: list[UpstreamStatus] = []
+    for index, (alias, value) in enumerate(servers.items(), start=1):
+        try:
+            configs.append(parse_server_config(alias, value))
+        except UpstreamConfigError as exc:
+            status_alias = alias if isinstance(alias, str) and alias else f"__invalid_{index}"
+            invalid_statuses.append(invalid_config_status(status_alias, value, exc))
+    return LoadedUpstreamConfigs(configs=configs, invalid_statuses=invalid_statuses)
+
+
+def _read_upstream_servers(path: str) -> dict[str, Any]:
     config_path = Path(path).expanduser()
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -624,7 +675,7 @@ def load_upstream_configs(path: str) -> list[UpstreamServerConfig]:
     servers = raw.get("servers", raw)
     if not isinstance(servers, dict):
         raise UpstreamConfigError("Upstream config must contain a servers object.")
-    return [parse_server_config(alias, value) for alias, value in servers.items()]
+    return servers
 
 
 def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
@@ -639,7 +690,10 @@ def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
         transport = "streamable_http"
     if transport not in {"streamable_http", "stdio"}:
         raise UpstreamConfigError(f"Upstream {alias!r} transport must be streamable_http or stdio.")
-    timeout_ms = int(value.get("timeout_ms") or DEFAULT_TIMEOUT_MS)
+    try:
+        timeout_ms = int(value.get("timeout_ms") or DEFAULT_TIMEOUT_MS)
+    except (TypeError, ValueError) as exc:
+        raise UpstreamConfigError(f"Upstream {alias!r} timeout_ms must be positive.") from exc
     if timeout_ms <= 0:
         raise UpstreamConfigError(f"Upstream {alias!r} timeout_ms must be positive.")
     command = _optional_str(value.get("command"))
@@ -792,6 +846,50 @@ def safe_target(config: UpstreamServerConfig) -> str | None:
     return urllib.parse.urlunsplit(redacted)
 
 
+def invalid_config_status(alias: str, value: Any, exc: BaseException) -> UpstreamStatus:
+    return UpstreamStatus(
+        alias=alias,
+        transport=best_effort_transport(value),
+        enabled=best_effort_enabled(value),
+        error=error_payload(exc),
+        target=best_effort_target(value),
+    )
+
+
+def best_effort_transport(value: Any) -> str:
+    if isinstance(value, dict):
+        transport = value.get("transport")
+        if isinstance(transport, str) and transport:
+            return "streamable_http" if transport == "http" else transport
+    return "configuration"
+
+
+def best_effort_enabled(value: Any) -> bool:
+    if isinstance(value, dict):
+        return bool(value.get("enabled", True))
+    return False
+
+
+def best_effort_target(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    transport = best_effort_transport(value)
+    if transport == "stdio":
+        command = value.get("command")
+        if not isinstance(command, str):
+            return None
+        args = value.get("args")
+        preview_args = [item for item in args[:3] if isinstance(item, str)] if isinstance(args, list) else []
+        suffix = " ..." if isinstance(args, list) and len(args) > 3 else ""
+        return f"{command} {' '.join(preview_args)}{suffix}".strip()
+    url = value.get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    parsed = urllib.parse.urlsplit(url)
+    redacted = parsed._replace(query="", fragment="")
+    return urllib.parse.urlunsplit(redacted)
+
+
 def validate_stdio_launch(alias: str, command: str | None, args: tuple[str, ...]) -> None:
     if not command or not command.strip():
         raise UpstreamConfigError(f"Upstream {alias!r} requires command for stdio transport.")
@@ -842,6 +940,8 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
         if exc.details:
             payload["details"] = exc.details
         return payload
+    if isinstance(exc, UpstreamConfigError):
+        return {"code": "UPSTREAM_CONFIG_INVALID", "message": str(exc), "category": "configuration", "retryable": False}
     return {"code": "UPSTREAM_INITIALIZATION_FAILED", "message": str(exc), "category": "runtime", "retryable": True}
 
 

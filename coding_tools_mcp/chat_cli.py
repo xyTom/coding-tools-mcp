@@ -45,6 +45,14 @@ def emit_json(payload: dict[str, Any], *, stream: Any = None) -> None:
     print(json.dumps(payload, ensure_ascii=True, sort_keys=True), file=stream)
 
 
+def add_project_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--project-id", default=None)
+    parser.add_argument("--project-name", default=None)
+    parser.add_argument("--project-path", default=None)
+    parser.add_argument("--project-workspace", default=None)
+    parser.add_argument("--project-metadata-json", default=None)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Record and recall coding-tools-mcp chat transcripts.")
     parser.add_argument("--workspace", default=None, help="Workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd.")
@@ -63,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_message.add_argument("--content", default=None)
     record_message.add_argument("--source", default=None)
     record_message.add_argument("--metadata-json", default=None)
+    add_project_args(record_message)
 
     record_transcript = subparsers.add_parser("record-transcript", help="Record multiple chat messages from stdin JSON.")
     record_transcript.add_argument("--stdin-json", action="store_true", help="Read transcript payload from stdin as JSON.")
@@ -70,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_transcript.add_argument("--conversation-title", default=None)
     record_transcript.add_argument("--conversation-uid", default=None)
     record_transcript.add_argument("--source", default=None)
+    add_project_args(record_transcript)
 
     record_context = subparsers.add_parser("record-context", help="Record one context retention entry.")
     record_context.add_argument("--stdin-json", action="store_true", help="Read context payload from stdin as JSON.")
@@ -82,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_context.add_argument("--content", default=None)
     record_context.add_argument("--source", default=None)
     record_context.add_argument("--metadata-json", default=None)
+    add_project_args(record_context)
 
     recall = subparsers.add_parser("recall-context", help="Recall persisted chat context as JSON and Markdown.")
     recall.add_argument("--conversation-id", required=True)
@@ -109,6 +120,25 @@ def transcript_store_from_args(args: argparse.Namespace) -> TranscriptStore:
     workspace = Path(str(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())).expanduser()
     config_dir = Path(str(args.config_dir or os.environ.get(f"{ENV_PREFIX}_CONFIG_DIR") or workspace / DEFAULT_CONFIG_DIR_NAME)).expanduser()
     return TranscriptStore(config_dir / TRANSCRIPT_DB_FILENAME)
+
+
+def project_kwargs_from_inputs(args: argparse.Namespace, payload: dict[str, Any]) -> dict[str, Any]:
+    metadata = payload.get("project_metadata")
+    metadata_json = first_text(args.project_metadata_json, payload.get("project_metadata_json"))
+    if metadata is None and metadata_json:
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError as exc:
+            raise CliError(f"project_metadata_json must be valid JSON: {exc}") from exc
+    if metadata is not None and not isinstance(metadata, dict):
+        raise CliError("project_metadata must be a JSON object.")
+    return {
+        "project_id": first_text(args.project_id, payload.get("project_id")),
+        "project_name": first_text(args.project_name, payload.get("project_name")),
+        "project_path": first_text(args.project_path, payload.get("project_path")),
+        "project_workspace": first_text(args.project_workspace, payload.get("project_workspace")),
+        "project_metadata": metadata if isinstance(metadata, dict) else None,
+    }
 
 
 def record_message(store: TranscriptStore, args: argparse.Namespace) -> dict[str, Any]:
@@ -149,6 +179,7 @@ def record_message(store: TranscriptStore, args: argparse.Namespace) -> dict[str
         source=first_text(args.source, payload.get("source")),
         conversation_title=title,
         conversation_uid=uid,
+        **project_kwargs_from_inputs(args, payload),
     )
 
 
@@ -170,6 +201,7 @@ def record_transcript(store: TranscriptStore, args: argparse.Namespace) -> dict[
         source=first_text(args.source, payload.get("source")),
         conversation_title=title,
         conversation_uid=uid,
+        **project_kwargs_from_inputs(args, payload),
     )
 
 
@@ -211,6 +243,7 @@ def record_context(store: TranscriptStore, args: argparse.Namespace) -> dict[str
         source=first_text(args.source, payload.get("source")),
         conversation_title=title,
         conversation_uid=uid,
+        **project_kwargs_from_inputs(args, payload),
     )
 
 

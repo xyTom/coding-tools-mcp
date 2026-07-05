@@ -5,6 +5,12 @@ from pathlib import Path
 
 WEBUI_DIST = Path(__file__).with_name("webui_dist")
 ADMIN_HTML = WEBUI_DIST / "admin.html"
+ADMIN_CSS = WEBUI_DIST / "admin.css"
+ADMIN_JS = WEBUI_DIST / "admin.js"
+ADMIN_ASSET_TYPES = {
+    "admin.css": "text/css; charset=utf-8",
+    "admin.js": "application/javascript; charset=utf-8",
+}
 
 
 def admin_console_html() -> str:
@@ -28,4 +34,13 @@ def admin_console_html() -> str:
 </html>"""
 
 
-__all__ = ["ADMIN_HTML", "WEBUI_DIST", "admin_console_html"]
+def admin_asset_response(asset_name: str) -> tuple[bytes, str] | None:
+    if asset_name not in ADMIN_ASSET_TYPES:
+        return None
+    try:
+        return (WEBUI_DIST / asset_name).read_bytes(), ADMIN_ASSET_TYPES[asset_name]
+    except OSError:
+        return None
+
+
+__all__ = ["ADMIN_CSS", "ADMIN_HTML", "ADMIN_JS", "WEBUI_DIST", "admin_asset_response", "admin_console_html"]

@@ -36,9 +36,10 @@ import jwt
 
 from . import __version__
 from .admin import ADMIN_TOOL_NAMES, McpAdminManager, McpManagementError
+from .codex_sessions import import_codex_session_candidates, scan_codex_session_candidates
 from .transcript import TranscriptStore
 from .upstream import UpstreamManager
-from .webui import admin_console_html
+from .webui import admin_asset_response, admin_console_html
 
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -241,7 +242,9 @@ STARTUP_SETTING_KEYS = {
     "oauth_server_url",
     "oauth_token_secret",
     "permission_mode",
+    "tool_profile",
     "shell_env_inherit",
+    "allowed_origins",
 }
 SPECIAL_DEVICE_PATHS = ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
 DNS_RESOLVER_READ_ROOTS = (
@@ -571,6 +574,8 @@ def resolve_config_paths(args: argparse.Namespace, workspace: Path) -> tuple[Pat
 def apply_startup_settings(args: argparse.Namespace, settings: dict[str, Any]) -> None:
     if getattr(args, "permission_mode", None) is None and _settings_text(settings, "permission_mode"):
         args.permission_mode = _settings_text(settings, "permission_mode")
+    if getattr(args, "tool_profile", None) is None and _settings_text(settings, "tool_profile"):
+        args.tool_profile = _settings_text(settings, "tool_profile")
     if getattr(args, "shell_env_inherit", None) is None and _settings_text(settings, "shell_env_inherit"):
         args.shell_env_inherit = _settings_text(settings, "shell_env_inherit")
 
@@ -863,6 +868,33 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotent=True,
         in_read_only_profile=True,
     ),
+    "list_chat_projects": ToolSpec(
+        title="List chat projects",
+        description="List persisted chat projects for quick WebUI grouping and agent indexing.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+        idempotent=True,
+        in_read_only_profile=True,
+    ),
+    "list_chat_conversations": ToolSpec(
+        title="List chat conversations",
+        description="List persisted chat conversations so clients can select a conversation before recalling its context.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+        idempotent=True,
+        in_read_only_profile=True,
+    ),
+    "recall_project_context": ToolSpec(
+        title="Recall project context",
+        description="Return persisted conversations and Markdown context for one chat project.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+        idempotent=True,
+        in_read_only_profile=True,
+    ),
 }
 
 FULL_TOOL_NAMES = tuple(TOOL_REGISTRY)
@@ -1002,6 +1034,34 @@ ADMIN_TOOL_REGISTRY: dict[str, ToolSpec] = {
         destructive=False,
         open_world=False,
     ),
+    "mcp_codex_sessions_preview": ToolSpec(
+        title="MCP Codex sessions preview",
+        description="Scan opt-in Codex session roots and return importable conversation candidates without message content.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_codex_sessions_import": ToolSpec(
+        title="MCP Codex sessions import",
+        description="Import selected Codex session candidates into the persistent chat transcript store.",
+        read_only=False,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_codex_sessions_sync": ToolSpec(
+        title="MCP Codex sessions sync",
+        description="Re-read selected or all Codex session candidates and append any new messages to persisted chat transcripts.",
+        read_only=False,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_projects": ToolSpec(
+        title="MCP chat projects",
+        description="List persisted chat projects submitted by MCP clients or agents.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
     "mcp_chat_conversations": ToolSpec(
         title="MCP chat conversations",
         description="List persisted chat conversations submitted by MCP clients or agents.",
@@ -1047,6 +1107,13 @@ ADMIN_TOOL_REGISTRY: dict[str, ToolSpec] = {
     "mcp_chat_recall": ToolSpec(
         title="MCP chat recall",
         description="Build a recovery payload from persisted chat messages and restore-context entries.",
+        read_only=True,
+        destructive=False,
+        open_world=False,
+    ),
+    "mcp_chat_project_recall": ToolSpec(
+        title="MCP chat project recall",
+        description="Build a recovery payload from persisted project-scoped chat records.",
         read_only=True,
         destructive=False,
         open_world=False,
@@ -1152,7 +1219,60 @@ def json_response_payload(payload: Any) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def is_allowed_origin(origin: str, *, auth_enabled: bool = False) -> bool:
+def normalize_allowed_origin(origin: Any) -> str | None:
+    text = str(origin or "").strip().rstrip("/")
+    if not text or text == "*" or text == "null":
+        return None
+    try:
+        parsed = urllib.parse.urlparse(text)
+    except ValueError:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    if parsed.path or parsed.params or parsed.query or parsed.fragment:
+        return None
+    if parsed.username or parsed.password or parsed.hostname is None:
+        return None
+    host = parsed.hostname.lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    netloc = f"{host}:{port}" if port is not None else host
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), netloc, "", "", ""))
+
+
+def parse_allowed_origins(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raw_items: list[Any] = re.split(r"[\s,]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    origins: list[str] = []
+    for item in raw_items:
+        origin = normalize_allowed_origin(item)
+        if origin and origin not in origins:
+            origins.append(origin)
+    return tuple(origins)
+
+
+def combine_allowed_origins(*values: Any) -> tuple[str, ...]:
+    origins: list[str] = []
+    for value in values:
+        for origin in parse_allowed_origins(value):
+            if origin not in origins:
+                origins.append(origin)
+    return tuple(origins)
+
+
+def is_allowed_origin(origin: str, *, auth_enabled: bool = False, allowed_origins: tuple[str, ...] = ()) -> bool:
+    if normalize_allowed_origin(origin) in allowed_origins:
+        return True
     try:
         parsed = urllib.parse.urlparse(origin)
     except ValueError:
@@ -2055,6 +2175,7 @@ class Runtime:
         server_host: str | None = None,
         server_port: int | None = None,
         admin_ui_enabled: bool = False,
+        allowed_origins: tuple[str, ...] = (),
     ) -> None:
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
@@ -2101,6 +2222,7 @@ class Runtime:
         self.server_host = server_host
         self.server_port = server_port
         self.admin_ui_enabled = admin_ui_enabled
+        self.allowed_origins = allowed_origins
         self.server_instance_id = secrets.token_urlsafe(12)
         self._set_runtime_dir(runtime_dir_for_workspace(self.workspace.root, self.server_instance_id))
         self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(self.workspace.root, self.server_instance_id)
@@ -2493,6 +2615,8 @@ class Runtime:
             parts.extend(["--config-dir", str(self.config_dir)])
         if self.oauth_config is not None:
             parts.append("--oauth-mode")
+        for origin in self.allowed_origins:
+            parts.extend(["--allowed-origin", origin])
         return " ".join(shlex.quote(part) for part in parts)
 
     def admin_status_payload(self, *, base_url: str | None = None) -> dict[str, Any]:
@@ -2508,9 +2632,11 @@ class Runtime:
             templates = {"ok": False, "error": str(exc), "templates": [], "template_count": 0}
         try:
             transcripts = self.transcript_store.status()
+            chat_projects = self.transcript_store.list_chat_projects(limit=100)
             chat_conversations = self.transcript_store.list_chat_conversations(limit=100)
         except Exception as exc:  # noqa: BLE001
             transcripts = {"ok": False, "error": str(exc)}
+            chat_projects = {"ok": False, "error": str(exc), "projects": [], "project_count": 0}
             chat_conversations = {"ok": False, "error": str(exc), "conversations": [], "conversation_count": 0}
         http_sessions = self.http_sessions_payload()
         with self.session_default_cwds_lock:
@@ -2541,6 +2667,7 @@ class Runtime:
             "catalog": catalog,
             "templates": templates,
             "transcripts": transcripts,
+            "chat_projects": chat_projects,
             "chat_conversations": chat_conversations,
             "tool_counts": {
                 "local": len(local_names),
@@ -2555,6 +2682,7 @@ class Runtime:
                 "auth_token_configured": self.auth_token is not None,
                 "admin_token_configured": self.admin_token is not None,
                 "oauth_admin_scope": self.oauth_config.admin_scope if self.oauth_config else None,
+                "allowed_origins": list(self.allowed_origins),
             },
             "runtime": {
                 "workspace": str(self.workspace.root),
@@ -2567,6 +2695,7 @@ class Runtime:
                 "http_session_count": len(http_sessions),
                 "session_default_cwds": session_cwds,
                 "permission_mode": self.permission_mode,
+                "tool_profile": self.tool_profile,
                 "shell_env_inherit": self.shell_env_policy.inherit,
             },
             "http_sessions": http_sessions,
@@ -2787,11 +2916,32 @@ class Runtime:
                     max_events=int(args.get("max_events", 1000)),
                     write_file=bool(args.get("write_file", True)),
                 )
+            if name == "mcp_codex_sessions_preview":
+                return scan_codex_session_candidates(**codex_session_scan_kwargs(args))
+            if name == "mcp_codex_sessions_import":
+                return import_codex_session_candidates(
+                    self.transcript_store,
+                    **codex_session_import_kwargs(args),
+                    mode="import",
+                )
+            if name == "mcp_codex_sessions_sync":
+                return import_codex_session_candidates(
+                    self.transcript_store,
+                    **codex_session_import_kwargs(args),
+                    mode="sync",
+                )
+            if name == "mcp_chat_projects":
+                query = args.get("query")
+                return self.transcript_store.list_chat_projects(
+                    limit=int(args.get("limit", 100)),
+                    query=str(query) if isinstance(query, str) and query else None,
+                )
             if name == "mcp_chat_conversations":
                 query = args.get("query")
                 return self.transcript_store.list_chat_conversations(
                     limit=int(args.get("limit", 100)),
                     query=str(query) if isinstance(query, str) and query else None,
+                    project_id=optional_text_arg(args, "project_id"),
                 )
             if name == "mcp_chat_messages":
                 return self.transcript_store.list_chat_messages(
@@ -2820,6 +2970,7 @@ class Runtime:
                     source=str(args.get("source")) if isinstance(args.get("source"), str) and args.get("source") else None,
                     conversation_title=str(args.get("conversation_title")) if isinstance(args.get("conversation_title"), str) else None,
                     conversation_uid=str(args.get("conversation_uid")) if isinstance(args.get("conversation_uid"), str) else None,
+                    **project_kwargs_from_args(args),
                 )
             if name == "mcp_chat_update_context":
                 return self.transcript_store.update_context_entry(
@@ -2836,10 +2987,20 @@ class Runtime:
                         "max_context_entries": args.get("max_context_entries", 200),
                     }
                 )
+            if name == "mcp_chat_project_recall":
+                return self.recall_project_context(
+                    {
+                        "project_id": args.get("project_id"),
+                        "max_conversations": args.get("max_conversations", 50),
+                        "max_messages": args.get("max_messages", 200),
+                        "max_context_entries": args.get("max_context_entries", 200),
+                    }
+                )
             if name == "mcp_chat_export":
                 conversation_id = args.get("conversation_id")
                 return self.transcript_store.export_chat_markdown(
                     conversation_id=str(conversation_id) if isinstance(conversation_id, str) and conversation_id else None,
+                    project_id=optional_text_arg(args, "project_id"),
                     max_messages=int(args.get("max_messages", 5000)),
                     write_file=bool(args.get("write_file", True)),
                 )
@@ -2847,6 +3008,7 @@ class Runtime:
                 conversation_id = args.get("conversation_id")
                 return self.transcript_store.export_context_markdown(
                     conversation_id=str(conversation_id) if isinstance(conversation_id, str) and conversation_id else None,
+                    project_id=optional_text_arg(args, "project_id"),
                     max_entries=int(args.get("max_entries", 5000)),
                     write_file=bool(args.get("write_file", True)),
                 )
@@ -2901,6 +3063,7 @@ class Runtime:
             source=str(source) if isinstance(source, str) and source else None,
             conversation_title=str(args.get("conversation_title")) if isinstance(args.get("conversation_title"), str) else None,
             conversation_uid=str(args.get("conversation_uid")) if isinstance(args.get("conversation_uid"), str) else None,
+            **project_kwargs_from_args(args),
         )
 
     def record_chat_message(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2937,6 +3100,22 @@ class Runtime:
             source=str(source) if isinstance(source, str) and source else None,
             conversation_title=str(args.get("conversation_title")) if isinstance(args.get("conversation_title"), str) else None,
             conversation_uid=str(args.get("conversation_uid")) if isinstance(args.get("conversation_uid"), str) else None,
+            **project_kwargs_from_args(args),
+        )
+
+    def list_chat_projects(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = args.get("query")
+        return self.transcript_store.list_chat_projects(
+            limit=int(args.get("limit", 100)),
+            query=str(query) if isinstance(query, str) and query else None,
+        )
+
+    def list_chat_conversations(self, args: dict[str, Any]) -> dict[str, Any]:
+        query = args.get("query")
+        return self.transcript_store.list_chat_conversations(
+            limit=int(args.get("limit", 100)),
+            query=str(query) if isinstance(query, str) and query else None,
+            project_id=optional_text_arg(args, "project_id"),
         )
 
     def recall_chat_context(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -3002,6 +3181,61 @@ class Runtime:
             "messages": messages_payload.get("messages", []),
             "context_entries": context_payload.get("entries", []),
             "conversations": context_export.get("conversations") or chat_export.get("conversations", []),
+            "markdown": context_text,
+            "context_text": context_text,
+            "context_markdown": context_markdown,
+            "chat_markdown": chat_markdown,
+        }
+
+    def recall_project_context(self, args: dict[str, Any]) -> dict[str, Any]:
+        project_id = str(args.get("project_id") or "").strip()
+        if not project_id:
+            raise ToolFailure("INVALID_ARGUMENT", "project_id is required.", category="validation")
+        try:
+            max_conversations = int(args.get("max_conversations", 50))
+            max_messages = int(args.get("max_messages", 200))
+            max_context_entries = int(args.get("max_context_entries", 200))
+        except (TypeError, ValueError) as exc:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "max_conversations, max_messages, and max_context_entries must be integers.",
+                category="validation",
+            ) from exc
+        max_conversations = max(1, min(max_conversations, 500))
+        max_messages = max(1, min(max_messages, 20000))
+        max_context_entries = max(1, min(max_context_entries, 5000))
+        projects_payload = self.transcript_store.list_chat_projects(limit=500, query=project_id)
+        projects = projects_payload.get("projects", [])
+        exact_project = next((project for project in projects if project.get("project_id") == project_id), None)
+        conversations_payload = self.transcript_store.list_chat_conversations(
+            limit=max_conversations,
+            project_id=project_id,
+        )
+        context_export = self.transcript_store.export_context_markdown(
+            project_id=project_id,
+            max_entries=max_context_entries,
+            write_file=False,
+        )
+        chat_export = self.transcript_store.export_chat_markdown(
+            project_id=project_id,
+            max_messages=max_messages,
+            write_file=False,
+        )
+        context_markdown = str(context_export.get("markdown") or "")
+        chat_markdown = str(chat_export.get("markdown") or "")
+        context_text = context_markdown if context_export.get("entry_count", 0) else chat_markdown
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "project": exact_project,
+            "projects": projects,
+            "conversation_count": conversations_payload.get("conversation_count", 0),
+            "message_count": chat_export.get("message_count", 0),
+            "context_entry_count": context_export.get("entry_count", 0),
+            "max_conversations": max_conversations,
+            "max_messages": max_messages,
+            "max_context_entries": max_context_entries,
+            "conversations": conversations_payload.get("conversations", []),
             "markdown": context_text,
             "context_text": context_text,
             "context_markdown": context_markdown,
@@ -5933,6 +6167,13 @@ def admin_input_schemas() -> dict[str, dict[str, Any]]:
     integer = {"type": "integer"}
     config = {"type": "object", "additionalProperties": True}
     string_array = {"type": "array", "items": {"type": "string"}}
+    project_fields = {
+        "project_id": string,
+        "project_name": string,
+        "project_path": string,
+        "project_workspace": string,
+        "project_metadata": config,
+    }
     return {
         "mcp_catalog_list": object_schema(),
         "mcp_template_list": object_schema(),
@@ -5965,8 +6206,42 @@ def admin_input_schemas() -> dict[str, dict[str, Any]]:
                 "write_file": {**boolean, "default": True},
             }
         ),
-        "mcp_chat_conversations": object_schema(
+        "mcp_codex_sessions_preview": object_schema(
+            {
+                "roots": string_array,
+                "limit": {**integer, "minimum": 1, "maximum": 500, "default": 200},
+                "max_depth": {**integer, "minimum": 0, "maximum": 16, "default": 8},
+                "max_file_bytes": {**integer, "minimum": 1024, "maximum": 104857600, "default": 26214400},
+                "max_messages": {**integer, "minimum": 1, "maximum": 100000, "default": 20000},
+            }
+        ),
+        "mcp_codex_sessions_import": object_schema(
+            {
+                "roots": string_array,
+                "candidate_ids": string_array,
+                "import_all": {**boolean, "default": False},
+                "limit": {**integer, "minimum": 1, "maximum": 500, "default": 200},
+                "max_depth": {**integer, "minimum": 0, "maximum": 16, "default": 8},
+                "max_file_bytes": {**integer, "minimum": 1024, "maximum": 104857600, "default": 26214400},
+                "max_messages": {**integer, "minimum": 1, "maximum": 100000, "default": 20000},
+            }
+        ),
+        "mcp_codex_sessions_sync": object_schema(
+            {
+                "roots": string_array,
+                "candidate_ids": string_array,
+                "import_all": {**boolean, "default": False},
+                "limit": {**integer, "minimum": 1, "maximum": 500, "default": 200},
+                "max_depth": {**integer, "minimum": 0, "maximum": 16, "default": 8},
+                "max_file_bytes": {**integer, "minimum": 1024, "maximum": 104857600, "default": 26214400},
+                "max_messages": {**integer, "minimum": 1, "maximum": 100000, "default": 20000},
+            }
+        ),
+        "mcp_chat_projects": object_schema(
             {"limit": {**integer, "minimum": 1, "maximum": 500, "default": 100}, "query": string}
+        ),
+        "mcp_chat_conversations": object_schema(
+            {"limit": {**integer, "minimum": 1, "maximum": 500, "default": 100}, "query": string, "project_id": string}
         ),
         "mcp_chat_messages": object_schema(
             {"conversation_id": {**string, "minLength": 1}, "limit": {**integer, "minimum": 1, "maximum": 5000, "default": 500}},
@@ -5987,6 +6262,7 @@ def admin_input_schemas() -> dict[str, dict[str, Any]]:
                 "content": string,
                 "source": string,
                 "metadata": config,
+                **project_fields,
             },
             required=["conversation_id", "content"],
         ),
@@ -6011,9 +6287,19 @@ def admin_input_schemas() -> dict[str, dict[str, Any]]:
             },
             required=["conversation_id"],
         ),
+        "mcp_chat_project_recall": object_schema(
+            {
+                "project_id": {**string, "minLength": 1},
+                "max_conversations": {**integer, "minimum": 1, "maximum": 500, "default": 50},
+                "max_messages": {**integer, "minimum": 1, "maximum": 20000, "default": 200},
+                "max_context_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 200},
+            },
+            required=["project_id"],
+        ),
         "mcp_chat_export": object_schema(
             {
                 "conversation_id": string,
+                "project_id": string,
                 "max_messages": {**integer, "minimum": 1, "maximum": 20000, "default": 5000},
                 "write_file": {**boolean, "default": True},
             }
@@ -6021,6 +6307,7 @@ def admin_input_schemas() -> dict[str, dict[str, Any]]:
         "mcp_chat_context_export": object_schema(
             {
                 "conversation_id": string,
+                "project_id": string,
                 "max_entries": {**integer, "minimum": 1, "maximum": 20000, "default": 5000},
                 "write_file": {**boolean, "default": True},
             }
@@ -6063,6 +6350,42 @@ def admin_error_payload(code: str, message: str) -> dict[str, Any]:
     }
 
 
+def optional_text_arg(args: dict[str, Any], key: str) -> str | None:
+    value = args.get(key)
+    return str(value) if isinstance(value, str) and value else None
+
+
+def project_kwargs_from_args(args: dict[str, Any]) -> dict[str, Any]:
+    metadata = args.get("project_metadata")
+    return {
+        "project_id": optional_text_arg(args, "project_id"),
+        "project_name": optional_text_arg(args, "project_name"),
+        "project_path": optional_text_arg(args, "project_path"),
+        "project_workspace": optional_text_arg(args, "project_workspace"),
+        "project_metadata": metadata if isinstance(metadata, dict) else None,
+    }
+
+
+def codex_session_scan_kwargs(args: dict[str, Any]) -> dict[str, Any]:
+    roots = args.get("roots")
+    return {
+        "roots": [str(item) for item in roots] if isinstance(roots, list) else None,
+        "limit": int(args.get("limit", 200)),
+        "max_depth": int(args.get("max_depth", 8)),
+        "max_file_bytes": int(args.get("max_file_bytes", 25 * 1024 * 1024)),
+        "max_messages": int(args.get("max_messages", 20_000)),
+    }
+
+
+def codex_session_import_kwargs(args: dict[str, Any]) -> dict[str, Any]:
+    candidate_ids = args.get("candidate_ids")
+    return {
+        **codex_session_scan_kwargs(args),
+        "candidate_ids": [str(item) for item in candidate_ids] if isinstance(candidate_ids, list) else None,
+        "import_all": bool(args.get("import_all", False)),
+    }
+
+
 def input_schemas() -> dict[str, dict[str, Any]]:
     string = {"type": "string"}
     integer = {"type": "integer"}
@@ -6070,6 +6393,13 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     string_array = {"type": "array", "items": {"type": "string"}}
     metadata = {"type": "object", "additionalProperties": True}
     version_expectations = {"type": "object", "additionalProperties": True}
+    project_fields = {
+        "project_id": string,
+        "project_name": string,
+        "project_path": string,
+        "project_workspace": string,
+        "project_metadata": metadata,
+    }
     chat_message = {
         "type": "object",
         "properties": {
@@ -6095,6 +6425,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "conversation_uid": string,
                 "messages": {"type": "array", "items": chat_message},
                 "source": string,
+                **project_fields,
             },
             ["conversation_id", "messages"],
         ),
@@ -6109,6 +6440,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "content": string,
                 "source": string,
                 "metadata_json": string,
+                **project_fields,
             },
             ["conversation_id", "role", "content"],
         ),
@@ -6119,6 +6451,21 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "max_context_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 200},
             },
             ["conversation_id"],
+        ),
+        "list_chat_projects": object_schema(
+            {"limit": {**integer, "minimum": 1, "maximum": 500, "default": 100}, "query": string}
+        ),
+        "list_chat_conversations": object_schema(
+            {"limit": {**integer, "minimum": 1, "maximum": 500, "default": 100}, "query": string, "project_id": string}
+        ),
+        "recall_project_context": object_schema(
+            {
+                "project_id": {**string, "minLength": 1},
+                "max_conversations": {**integer, "minimum": 1, "maximum": 500, "default": 50},
+                "max_messages": {**integer, "minimum": 1, "maximum": 20000, "default": 200},
+                "max_context_entries": {**integer, "minimum": 1, "maximum": 5000, "default": 200},
+            },
+            ["project_id"],
         ),
         "get_default_cwd": object_schema(),
         "set_default_cwd": object_schema(
@@ -6451,6 +6798,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._send_html(admin_console_html())
             return
+        if normalized.startswith("/admin/assets/"):
+            if not self.runtime.admin_ui_enabled:
+                self.send_json({"error": "Admin console disabled"}, status=404)
+                return
+            self._send_admin_asset(normalized.removeprefix("/admin/assets/"))
+            return
         if normalized == "/admin/health":
             self.send_json(
                 {
@@ -6494,7 +6847,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
         origin = self.headers.get("Origin")
-        if origin and not is_allowed_origin(origin, auth_enabled=self.runtime.auth_enabled()):
+        if origin and not is_allowed_origin(
+            origin,
+            auth_enabled=self.runtime.auth_enabled(),
+            allowed_origins=self.runtime.allowed_origins,
+        ):
             self.send_json({"error": "Origin denied"}, status=403)
             return
         self.send_response(204)
@@ -6516,7 +6873,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         if normalized == "/mcp":
             origin = self.headers.get("Origin")
-            if origin and not is_allowed_origin(origin, auth_enabled=self.runtime.auth_enabled()):
+            if origin and not is_allowed_origin(
+                origin,
+                auth_enabled=self.runtime.auth_enabled(),
+                allowed_origins=self.runtime.allowed_origins,
+            ):
                 self.send_json({"error": "Origin denied"}, status=403, head_only=head_only)
                 return
             if not self.is_authorized():
@@ -6555,7 +6916,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32601, "message": "Unknown endpoint"}}, status=404)
             return
         origin = self.headers.get("Origin")
-        if origin and not is_allowed_origin(origin, auth_enabled=self.runtime.auth_enabled()):
+        if origin and not is_allowed_origin(
+            origin,
+            auth_enabled=self.runtime.auth_enabled(),
+            allowed_origins=self.runtime.allowed_origins,
+        ):
             self.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Origin denied"}}, status=403)
             return
         if not self.is_authorized():
@@ -6947,6 +7312,19 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_admin_asset(self, asset_name: str) -> None:
+        asset = admin_asset_response(asset_name)
+        if asset is None:
+            self.send_json({"error": "Unknown admin asset"}, status=404)
+            return
+        data, content_type = asset
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     def _oauth_login_page(self, *, client_id: str, redirect_uri: str, code_challenge: str,
                           code_challenge_method: str, state: str, scope: str, error: str = "") -> str:
         def esc(v: str) -> str:
@@ -7183,7 +7561,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def send_cors_headers(self) -> None:
         origin = self.headers.get("Origin")
-        if origin and is_allowed_origin(origin, auth_enabled=self.runtime.auth_enabled()):
+        if origin and is_allowed_origin(
+            origin,
+            auth_enabled=self.runtime.auth_enabled(),
+            allowed_origins=self.runtime.allowed_origins,
+        ):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
             self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
@@ -7234,6 +7616,9 @@ class AdminUIHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path.startswith("/admin/assets/"):
+            self._send_admin_asset(path.removeprefix("/admin/assets/"))
+            return
         if path == "/api/admin/status":
             if not self.is_admin_request():
                 self.send_json({"error": "Admin token required"}, status=401)
@@ -7241,6 +7626,19 @@ class AdminUIHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(self.runtime.admin_status_payload(base_url=self.oauth_base_url()))
             return
         self.send_json({"error": "Unknown endpoint"}, status=404)
+
+    def _send_admin_asset(self, asset_name: str) -> None:
+        asset = admin_asset_response(asset_name)
+        if asset is None:
+            self.send_json({"error": "Unknown admin asset"}, status=404)
+            return
+        data, content_type = asset
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _read_json_body(self) -> dict[str, Any] | None:
         raw_len = self.headers.get("Content-Length")
@@ -7377,7 +7775,7 @@ def build_runtime(
         permission_mode=runtime_policy.permission_mode,
         shell_env_policy=runtime_policy.shell_env_policy,
         allow_network=runtime_policy.allow_network,
-        tool_profile=args.tool_profile,
+        tool_profile=getattr(args, "tool_profile", None) or "full",
         auth_token=auth_token,
         admin_token=args.admin_token or os.environ.get(f"{ENV_PREFIX}_ADMIN_TOKEN") or _settings_text(settings, "admin_token"),
         oauth_config=oauth_config,
@@ -7390,6 +7788,11 @@ def build_runtime(
         server_host=server_host,
         server_port=server_port,
         admin_ui_enabled=admin_ui_enabled,
+        allowed_origins=combine_allowed_origins(
+            os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS"),
+            settings.get("allowed_origins"),
+            getattr(args, "allowed_origin", None),
+        ),
     )
     if runtime.capabilities.skip_all_permissions:
         print(
@@ -7410,6 +7813,8 @@ def run_http(args: argparse.Namespace) -> int:
     config_dir, upstream_config_path, settings_path = resolve_config_paths(args, workspace)
     startup_settings = read_server_settings(settings_path)
     apply_startup_settings(args, startup_settings)
+    if getattr(args, "tool_profile", None) is None:
+        args.tool_profile = "full"
     args.workspace = str(workspace)
     args.host = effective_host(args, startup_settings)
     args.port = effective_port(args, startup_settings)
@@ -7539,6 +7944,8 @@ def run_http(args: argparse.Namespace) -> int:
 
 
 def run_stdio(args: argparse.Namespace) -> int:
+    if getattr(args, "tool_profile", None) is None:
+        args.tool_profile = "full"
     try:
         runtime_policy = runtime_policy_from_args(args)
     except ValueError as exc:
@@ -7641,6 +8048,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
     )
     parser.add_argument(
+        "--allowed-origin",
+        action="append",
+        default=None,
+        help=(
+            "extra exact Origin allowed for browser MCP clients; repeatable; "
+            f"can also be set with comma-separated {ENV_PREFIX}_ALLOWED_ORIGINS"
+        ),
+    )
+    parser.add_argument(
         "--admin-token",
         default=None,
         help=f"enable admin MCP management tools for this separate bearer token; defaults to {ENV_PREFIX}_ADMIN_TOKEN",
@@ -7681,7 +8097,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool-profile",
         choices=TOOL_PROFILE_CHOICES,
-        default=os.environ.get(f"{ENV_PREFIX}_TOOL_PROFILE", "full"),
+        default=os.environ.get(f"{ENV_PREFIX}_TOOL_PROFILE") or None,
         help="tool exposure profile",
     )
     parser.add_argument(

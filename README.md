@@ -14,6 +14,7 @@ It is not a prompt wrapper. It does not expose external agent accounts, memory, 
 - [中文版 README](README.zh-CN.md)
 - [Quickstart](docs/quickstart.md)
 - [MCP client configuration](docs/mcp-client-config.md)
+- [Browser chat clients](docs/browser-clients.md)
 - [Remote MCP](docs/remote-mcp.md)
 - [Tools and schemas](docs/tools-and-schemas.md)
 - [Permission modes](docs/permission-modes.md)
@@ -112,6 +113,12 @@ Admin-managed MCP servers are stored in `mcp-servers.json`. Path priority is `--
 
 Token values can be edited for personal use from the admin console. If you persist tokens in `server-settings.json`, treat that file as sensitive plaintext. MCP server secrets should use `CODING_TOOLS_MCP_SECRETS_KEY` and `secret_ref`. Skills installation is intentionally not part of this admin console.
 
+## Chat Transcript Sync
+
+Clients can sync Codex or ChatGPT conversation text into the local transcript store by calling `record_chat_transcript` or `record_chat_message` with stable `conversation_id` and `message_id` values. Use `list_chat_projects` and `list_chat_conversations` to find persisted records, then `recall_chat_context` or `recall_project_context` to load messages and Markdown context back into a client session.
+
+This is an explicit client-submitted transcript store. It does not read external agent accounts or native Codex session files automatically.
+
 Install the optional image extra when you want `view_image` auto-resize support:
 
 ```bash
@@ -183,6 +190,8 @@ Cursor:
 ```
 
 Generic Streamable HTTP clients should use MCP protocol version `2025-06-18` and point at `http://127.0.0.1:8765/mcp`.
+
+Browser chat clients such as MCP SuperAssistant can connect through the MCP SuperAssistant proxy, or directly with an explicit browser extension origin allowlist. See [Browser chat clients](docs/browser-clients.md).
 
 ## Remote MCP
 

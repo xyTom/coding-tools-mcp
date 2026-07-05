@@ -25,12 +25,13 @@ from coding_tools_mcp.server import (
     _decode_oauth_token,
     _resolve_oauth_token_secret,
     admin_console_html,
+    apply_startup_settings,
     build_parser,
     build_runtime,
     read_server_settings,
 )
-from coding_tools_mcp.upstream import parse_server_config, resolve_env_config
-from coding_tools_mcp.webui import ADMIN_HTML, WEBUI_DIST
+from coding_tools_mcp.upstream import UpstreamManager, parse_server_config, resolve_env_config
+from coding_tools_mcp.webui import ADMIN_CSS, ADMIN_HTML, ADMIN_JS, WEBUI_DIST, admin_asset_response
 
 
 class McpAdminConfigTests(unittest.TestCase):
@@ -96,6 +97,8 @@ class McpAdminConfigTests(unittest.TestCase):
             manager.set_server_enabled("filesystem", False, apply_changes=True)
             catalog = manager.catalog_list()
             self.assertFalse(catalog["servers"][0]["config"]["enabled"])
+            self.assertFalse(catalog["servers"][0]["config_raw"]["enabled"])
+            self.assertEqual(catalog["servers"][0]["config_raw"]["alias"], "filesystem")
 
             remove_plan = manager.remove_server("filesystem")
             self.assertEqual(remove_plan["action"], "remove")
@@ -153,6 +156,45 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertEqual(status["server_count"], 1)
             self.assertEqual(status["initialized_count"], 0)
 
+    def test_invalid_upstream_config_does_not_prevent_manager_startup(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "mcp.json"
+            document = {
+                "servers": {
+                    "codegraph": {
+                        "transport": "stdio",
+                        "command": "cmd.exe",
+                        "args": ["/c", "codegraph", "serve", "--mcp"],
+                    },
+                    "filesystem": {**filesystem_spec(), "enabled": False},
+                }
+            }
+            config_path.write_text(json.dumps(document), encoding="utf-8")
+
+            upstream = UpstreamManager.from_config_file(str(config_path))
+            status = upstream.status_payload()
+            by_alias = {item["alias"]: item for item in status["servers"]}
+
+            self.assertEqual(status["server_count"], 2)
+            self.assertIn("codegraph", by_alias)
+            self.assertIn("filesystem", by_alias)
+            self.assertEqual(by_alias["codegraph"]["error"]["category"], "configuration")
+            self.assertFalse(by_alias["codegraph"]["error"]["retryable"])
+            self.assertEqual(by_alias["filesystem"]["tool_count"], 0)
+
+    def test_malformed_upstream_config_is_reported_as_config_status(self) -> None:
+        with TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "mcp.json"
+            config_path.write_text("{", encoding="utf-8")
+
+            upstream = UpstreamManager.from_config_file(str(config_path))
+            status = upstream.status_payload()
+
+            self.assertEqual(status["server_count"], 1)
+            self.assertEqual(status["servers"][0]["alias"], "__config__")
+            self.assertEqual(status["servers"][0]["error"]["category"], "configuration")
+            self.assertFalse(status["servers"][0]["error"]["retryable"])
+
     def test_secret_vault_requires_key_and_stores_encrypted_values(self) -> None:
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "mcp.json"
@@ -186,12 +228,20 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertIn("record_chat_transcript", normal_tools)
             self.assertIn("record_chat_message", normal_tools)
             self.assertIn("recall_chat_context", normal_tools)
+            self.assertIn("list_chat_projects", normal_tools)
+            self.assertIn("list_chat_conversations", normal_tools)
+            self.assertIn("recall_project_context", normal_tools)
             self.assertIn("mcp_chat_context", admin_tools)
+            self.assertIn("mcp_chat_projects", admin_tools)
             self.assertIn("mcp_chat_record_context", admin_tools)
             self.assertIn("mcp_chat_update_context", admin_tools)
             self.assertIn("mcp_chat_delete_context", admin_tools)
             self.assertIn("mcp_chat_recall", admin_tools)
+            self.assertIn("mcp_chat_project_recall", admin_tools)
             self.assertIn("mcp_chat_context_export", admin_tools)
+            self.assertIn("mcp_codex_sessions_preview", admin_tools)
+            self.assertIn("mcp_codex_sessions_import", admin_tools)
+            self.assertIn("mcp_codex_sessions_sync", admin_tools)
             self.assertIn("mcp_chat_clear", admin_tools)
             with self.assertRaises(Exception):
                 runtime.call_tool("mcp_catalog_list", {})
@@ -236,6 +286,13 @@ class McpAdminConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             manager = McpAdminManager(Path(tmp) / "mcp.json", protocol_version="2025-06-18")
             runtime = Runtime(Path(tmp), admin_token="admin-token", admin_manager=manager, config_dir=Path(tmp))
+            project_id = "coding-tools-mcp"
+            project_fields = {
+                "project_id": project_id,
+                "project_name": "Coding Tools MCP",
+                "project_path": "G:/LLM/coding-tools-mcp",
+                "project_workspace": "G:/LLM",
+            }
 
             recorded = runtime.call_tool(
                 "record_chat_transcript",
@@ -243,6 +300,8 @@ class McpAdminConfigTests(unittest.TestCase):
                     "conversation_id": "chat-2026-06-18",
                     "conversation_title": "备份测试会话",
                     "conversation_uid": "uid-chat-2026",
+                    **project_fields,
+                    "project_metadata": {"repo": "coding-tools-mcp"},
                     "source": "codex-test",
                     "messages": [
                         {"message_id": "u1", "role": "user", "timestamp": "2026-06-18T08:00:00Z", "content": "请记录完整聊天"},
@@ -251,11 +310,13 @@ class McpAdminConfigTests(unittest.TestCase):
                 },
             )["structuredContent"]
             self.assertEqual(recorded["inserted_count"], 2)
+            self.assertEqual(recorded["project_id"], project_id)
 
             context_recorded = runtime.call_tool(
                 "mcp_chat_record_context",
                 {
                     "conversation_id": "chat-2026-06-18",
+                    **project_fields,
                     "entry_id": "checkpoint-1",
                     "kind": "checkpoint",
                     "timestamp": "2026-06-18T08:00:03Z",
@@ -265,14 +326,52 @@ class McpAdminConfigTests(unittest.TestCase):
                 admin=True,
             )["structuredContent"]
             self.assertEqual(context_recorded["inserted_count"], 1)
+            self.assertEqual(context_recorded["project_id"], project_id)
 
             conversations = runtime.call_tool("mcp_chat_conversations", {"limit": 10}, admin=True)["structuredContent"]
             self.assertEqual(conversations["conversation_count"], 1)
-            self.assertEqual(conversations["conversations"][0]["conversation_id"], "chat-2026-06-18")
-            self.assertEqual(conversations["conversations"][0]["title"], "备份测试会话")
-            self.assertEqual(conversations["conversations"][0]["unique_id"], "uid-chat-2026")
-            self.assertEqual(conversations["conversations"][0]["date"], "2026-06-18")
-            self.assertEqual(conversations["conversations"][0]["context_entry_count"], 1)
+            conversation = conversations["conversations"][0]
+            self.assertEqual(conversation["conversation_id"], "chat-2026-06-18")
+            self.assertEqual(conversation["title"], "备份测试会话")
+            self.assertEqual(conversation["unique_id"], "uid-chat-2026")
+            self.assertEqual(conversation["date"], "2026-06-18")
+            self.assertEqual(conversation["project_id"], project_id)
+            self.assertEqual(conversation["project_name"], "Coding Tools MCP")
+            self.assertEqual(conversation["project_path"], "G:/LLM/coding-tools-mcp")
+            self.assertEqual(conversation["project_workspace"], "G:/LLM")
+            self.assertEqual(conversation["context_entry_count"], 1)
+            projects = runtime.call_tool("mcp_chat_projects", {"limit": 10}, admin=True)["structuredContent"]
+            self.assertEqual(projects["project_count"], 1)
+            project = projects["projects"][0]
+            self.assertEqual(project["project_id"], project_id)
+            self.assertEqual(project["name"], "Coding Tools MCP")
+            self.assertEqual(project["path"], "G:/LLM/coding-tools-mcp")
+            self.assertEqual(project["workspace"], "G:/LLM")
+            self.assertEqual(project["conversation_count"], 1)
+            self.assertEqual(project["message_count"], 2)
+            self.assertEqual(project["context_entry_count"], 1)
+            normal_projects = runtime.call_tool("list_chat_projects", {"limit": 10})["structuredContent"]
+            self.assertEqual(normal_projects["projects"][0]["project_id"], project_id)
+            normal_conversations = runtime.call_tool(
+                "list_chat_conversations",
+                {"limit": 10, "project_id": project_id},
+            )["structuredContent"]
+            self.assertEqual(normal_conversations["conversation_count"], 1)
+            self.assertEqual(normal_conversations["conversations"][0]["conversation_id"], "chat-2026-06-18")
+            status = runtime.admin_status_payload()
+            self.assertEqual(status["chat_projects"]["projects"][0]["project_id"], project_id)
+            filtered_by_project = runtime.call_tool(
+                "mcp_chat_conversations",
+                {"limit": 10, "project_id": project_id},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(filtered_by_project["conversation_count"], 1)
+            filtered_by_project_query = runtime.call_tool(
+                "mcp_chat_conversations",
+                {"limit": 10, "query": "coding-tools-mcp"},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(filtered_by_project_query["conversation_count"], 1)
             filtered_by_uid = runtime.call_tool("mcp_chat_conversations", {"limit": 10, "query": "uid-chat-2026"}, admin=True)[
                 "structuredContent"
             ]
@@ -307,6 +406,7 @@ class McpAdminConfigTests(unittest.TestCase):
                 "mcp_chat_record_context",
                 {
                     "conversation_id": "chat-2026-06-18",
+                    **project_fields,
                     "entry_id": "webui-note-1",
                     "kind": "note",
                     "timestamp": "2026-06-18T08:00:04Z",
@@ -316,6 +416,7 @@ class McpAdminConfigTests(unittest.TestCase):
                 admin=True,
             )["structuredContent"]
             self.assertEqual(manual_context["inserted_count"], 1)
+            self.assertEqual(manual_context["project_id"], project_id)
 
             updated_context = runtime.call_tool(
                 "mcp_chat_update_context",
@@ -340,6 +441,7 @@ class McpAdminConfigTests(unittest.TestCase):
                 "record_chat_message",
                 {
                     "conversation_id": "chat-2026-06-18",
+                    **project_fields,
                     "message_id": "flat-a1",
                     "role": "assistant",
                     "timestamp": "2026-06-18T08:00:02Z",
@@ -349,6 +451,7 @@ class McpAdminConfigTests(unittest.TestCase):
                 },
             )["structuredContent"]
             self.assertEqual(flat_recorded["inserted_count"], 1)
+            self.assertEqual(flat_recorded["project_id"], project_id)
 
             recalled = runtime.call_tool(
                 "recall_chat_context",
@@ -370,6 +473,26 @@ class McpAdminConfigTests(unittest.TestCase):
             )["structuredContent"]
             self.assertEqual(admin_recalled["context_entry_count"], 2)
             self.assertIn("Manual WebUI note", admin_recalled["context_text"])
+
+            project_recalled = runtime.call_tool(
+                "recall_project_context",
+                {"project_id": project_id, "max_conversations": 10, "max_messages": 10, "max_context_entries": 10},
+            )["structuredContent"]
+            self.assertEqual(project_recalled["project_id"], project_id)
+            self.assertEqual(project_recalled["project"]["name"], "Coding Tools MCP")
+            self.assertEqual(project_recalled["conversation_count"], 1)
+            self.assertEqual(project_recalled["message_count"], 3)
+            self.assertEqual(project_recalled["context_entry_count"], 2)
+            self.assertIn("Manual WebUI note", project_recalled["context_text"])
+            self.assertIn("扁平入口也能同步。", project_recalled["chat_markdown"])
+
+            admin_project_recalled = runtime.call_tool(
+                "mcp_chat_project_recall",
+                {"project_id": project_id, "max_conversations": 10, "max_messages": 10, "max_context_entries": 10},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(admin_project_recalled["project_id"], project_id)
+            self.assertEqual(admin_project_recalled["context_entry_count"], 2)
 
             runtime.call_tool(
                 "record_chat_transcript",
@@ -398,6 +521,18 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertIn("需要合并", export["markdown"])
             self.assertTrue(Path(export["path"]).exists())
 
+            project_export = runtime.call_tool(
+                "mcp_chat_export",
+                {"project_id": project_id, "max_messages": 20, "write_file": False},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(project_export["project_id"], project_id)
+            self.assertEqual(project_export["message_count"], 4)
+            self.assertIn("聊天备份记录：项目 coding-tools-mcp", project_export["markdown"])
+            self.assertIn("- 项目：`coding-tools-mcp`", project_export["markdown"])
+            self.assertIn("- 项目路径：`G:/LLM/coding-tools-mcp`", project_export["markdown"])
+            self.assertIn("需要合并", project_export["markdown"])
+
             context_export = runtime.call_tool(
                 "mcp_chat_context_export",
                 {"conversation_id": "chat-2026-06-18", "max_entries": 20, "write_file": True},
@@ -407,6 +542,16 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertIn("Updated durable restore context", context_export["markdown"])
             self.assertIn("Manual WebUI note", context_export["markdown"])
             self.assertTrue(Path(context_export["path"]).exists())
+
+            project_context_export = runtime.call_tool(
+                "mcp_chat_context_export",
+                {"project_id": project_id, "max_entries": 20, "write_file": False},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(project_context_export["project_id"], project_id)
+            self.assertEqual(project_context_export["entry_count"], 2)
+            self.assertIn("恢复上下文：项目 coding-tools-mcp", project_context_export["markdown"])
+            self.assertIn("Manual WebUI note", project_context_export["markdown"])
 
             latest_context = runtime.call_tool(
                 "mcp_chat_context",
@@ -428,6 +573,102 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertGreaterEqual(deleted_conversation["deleted_count"], 1)
             cleared = runtime.call_tool("mcp_chat_clear", {}, admin=True)["structuredContent"]
             self.assertEqual(cleared["deleted_count"], 0)
+            cleared_projects = runtime.call_tool("mcp_chat_projects", {"limit": 10}, admin=True)["structuredContent"]
+            self.assertEqual(cleared_projects["project_count"], 0)
+
+    def test_runtime_imports_codex_session_candidates(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = McpAdminManager(Path(tmp) / "mcp.json", protocol_version="2025-06-18")
+            runtime = Runtime(Path(tmp), admin_token="admin-token", admin_manager=manager, config_dir=Path(tmp))
+            session_root = Path(tmp) / "codex" / "sessions"
+            session_root.mkdir(parents=True)
+            session_path = session_root / "rollout-2026-06-25.jsonl"
+            records = [
+                {
+                    "type": "session_meta",
+                    "timestamp": "2026-06-25T04:00:00Z",
+                    "payload": {
+                        "id": "codex-session-1",
+                        "cwd": "G:/LLM/coding-tools-mcp",
+                        "originator": "codex_desktop",
+                    },
+                },
+                {"type": "user_message", "timestamp": "2026-06-25T04:00:01Z", "message": "请同步私有会话"},
+                {
+                    "type": "response_item",
+                    "timestamp": "2026-06-25T04:00:02Z",
+                    "payload": {
+                        "type": "message",
+                        "id": "assistant-1",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "已经导入。"}],
+                    },
+                },
+            ]
+            session_path.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in records), encoding="utf-8")
+
+            preview = runtime.call_tool(
+                "mcp_codex_sessions_preview",
+                {"roots": [str(session_root)], "limit": 10},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(preview["candidate_count"], 1)
+            preview_text = json.dumps(preview, ensure_ascii=False)
+            self.assertNotIn("请同步私有会话", preview_text)
+            self.assertNotIn("已经导入", preview_text)
+            candidate = preview["candidates"][0]
+            self.assertEqual(candidate["message_count"], 2)
+            self.assertEqual(candidate["project_id"], "coding-tools-mcp")
+            self.assertEqual(candidate["source"], "codex-desktop")
+
+            imported = runtime.call_tool(
+                "mcp_codex_sessions_import",
+                {"roots": [str(session_root)], "candidate_ids": [candidate["candidate_id"]]},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(imported["inserted_count"], 2)
+            self.assertEqual(imported["duplicate_count"], 0)
+
+            messages = runtime.call_tool(
+                "mcp_chat_messages",
+                {"conversation_id": candidate["conversation_id"], "limit": 10},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(messages["message_count"], 2)
+            self.assertIn("请同步私有会话", {item["content"] for item in messages["messages"]})
+
+            repeated = runtime.call_tool(
+                "mcp_codex_sessions_sync",
+                {"roots": [str(session_root)], "candidate_ids": [candidate["candidate_id"]]},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(repeated["inserted_count"], 0)
+            self.assertEqual(repeated["duplicate_count"], 2)
+
+            with session_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    "\n"
+                    + json.dumps(
+                        {
+                            "type": "response_item",
+                            "timestamp": "2026-06-25T04:00:03Z",
+                            "payload": {
+                                "type": "message",
+                                "id": "assistant-2",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "最新内容也已同步。"}],
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            synced = runtime.call_tool(
+                "mcp_codex_sessions_sync",
+                {"roots": [str(session_root)], "candidate_ids": [candidate["candidate_id"]]},
+                admin=True,
+            )["structuredContent"]
+            self.assertEqual(synced["inserted_count"], 1)
+            self.assertEqual(synced["duplicate_count"], 2)
 
     def test_chat_cli_records_and_recalls_context(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -443,6 +684,11 @@ class McpAdminConfigTests(unittest.TestCase):
             payload = {
                 "conversation_title": "Chat Backup Test",
                 "conversation_uid": "uid-001",
+                "project_id": "cli-project",
+                "project_name": "CLI Project",
+                "project_path": "G:/LLM/cli-project",
+                "project_workspace": "G:/LLM",
+                "project_metadata": {"origin": "stdin-json"},
                 "message_id": "assistant-1",
                 "role": "assistant",
                 "timestamp": "2026-06-18T10:00:00Z",
@@ -457,6 +703,7 @@ class McpAdminConfigTests(unittest.TestCase):
             recorded = json.loads(stdout.getvalue())
             self.assertEqual(recorded["inserted_count"], 1)
             self.assertEqual(recorded["conversation_id"], "Chat-Backup-Test--uid-001")
+            self.assertEqual(recorded["project_id"], "cli-project")
 
             surrogate_payload = {
                 "conversation_title": "Chat Backup Test",
@@ -477,6 +724,10 @@ class McpAdminConfigTests(unittest.TestCase):
             context_payload = {
                 "conversation_title": "Chat Backup Test",
                 "conversation_uid": "uid-001",
+                "project_id": "cli-project",
+                "project_name": "CLI Project",
+                "project_path": "G:/LLM/cli-project",
+                "project_workspace": "G:/LLM",
                 "entry_id": "checkpoint-1",
                 "kind": "checkpoint",
                 "timestamp": "2026-06-18T10:00:01Z",
@@ -489,6 +740,7 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             context_recorded = json.loads(stdout.getvalue())
             self.assertEqual(context_recorded["inserted_count"], 1)
+            self.assertEqual(context_recorded["project_id"], "cli-project")
 
             stdout = io.StringIO()
             with redirect_stdout(stdout):
@@ -528,37 +780,32 @@ class McpAdminConfigTests(unittest.TestCase):
 
     def test_admin_console_html_uses_admin_api(self) -> None:
         html = admin_console_html()
+        css = ADMIN_CSS.read_text(encoding="utf-8")
+        js = ADMIN_JS.read_text(encoding="utf-8")
 
         self.assertTrue(WEBUI_DIST.is_dir())
         self.assertTrue(ADMIN_HTML.exists())
+        self.assertTrue(ADMIN_CSS.exists())
+        self.assertTrue(ADMIN_JS.exists())
         self.assertEqual(html, ADMIN_HTML.read_text(encoding="utf-8"))
+        self.assertIn("/admin/assets/admin.css", html)
+        self.assertIn("/admin/assets/admin.js", html)
+        self.assertNotIn("<script>\n", html)
+        self.assertNotIn("mcp_server_install", html)
         self.assertIn("MCP 管理台", html)
         self.assertIn("总览", html)
-        self.assertIn("/api/admin/tool", html)
-        self.assertIn("mcp_server_install", html)
-        self.assertIn("mcp_template_list", html)
-        self.assertIn("mcp_server_health", html)
-        self.assertIn("mcp_transcript_export", html)
-        self.assertIn("mcp_chat_export", html)
-        self.assertIn("mcp_chat_messages", html)
-        self.assertIn("mcp_chat_context", html)
-        self.assertIn("mcp_chat_record_context", html)
-        self.assertIn("mcp_chat_update_context", html)
-        self.assertIn("mcp_chat_delete_context", html)
-        self.assertIn("mcp_chat_recall", html)
-        self.assertIn("mcp_chat_context_export", html)
-        self.assertIn("mcp_secret_set", html)
         self.assertIn("authGate", html)
         self.assertIn("result-surface", html)
         self.assertIn("result-block", html)
-        self.assertIn(".auth-panel { display:grid; grid-template-columns:1fr;", html)
-        self.assertIn(".split.wide { grid-template-columns:1fr;", html)
         self.assertIn("navToggle", html)
         self.assertIn("closeOutput", html)
         self.assertIn("outputBackdrop", html)
         self.assertIn("output-dialog", html)
         self.assertIn("见输出弹窗", html)
         self.assertIn("templateSelect", html)
+        self.assertIn("validateServer", html)
+        self.assertIn("校验格式", html)
+        self.assertIn("serverEditorTitle", html)
         self.assertIn("exportAllTranscripts", html)
         self.assertIn("exportAllChatTranscripts", html)
         self.assertIn("exportAllChatContexts", html)
@@ -572,33 +819,77 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("chatReadLimit", html)
         self.assertIn("reloadSelectedConversation", html)
         self.assertIn("deleteSelectedConversation", html)
-        self.assertIn("confirmDirty", html)
-        self.assertIn("beforeunload", html)
-        self.assertIn("withBusy", html)
         self.assertIn("copyOutput", html)
         self.assertIn("clearChatRecords", html)
         self.assertIn("mergeChatConversations", html)
         self.assertIn("chatSearch", html)
+        self.assertIn("metricProjects", html)
+        self.assertIn("chatProjectBadge", html)
         self.assertIn("chatRecordKind", html)
         self.assertIn("applyChatFilter", html)
         self.assertIn("showChatSource", html)
         self.assertIn("聊天备份", html)
-        self.assertIn("UTC+8", html)
-        self.assertIn("导出 MD", html)
         self.assertIn("syncJson", html)
         self.assertIn("wizardTransport", html)
-        self.assertIn("scope:'admin'", html)
         self.assertIn("httpSessions", html)
         self.assertIn("chatConversations", html)
         self.assertIn("chatMessages", html)
         self.assertIn("chatTrackTabs", html)
         self.assertIn("chatContextEntries", html)
         self.assertIn("chatReaderPanel", html)
-        self.assertIn("chat-reader-inline", html)
-        self.assertIn("conversation-row-selected", html)
+        self.assertIn("chatReaderDialog", html)
+        self.assertIn("codexSessionRoots", html)
+        self.assertIn("previewCodexSessions", html)
+        self.assertIn("syncAllCodexSessions", html)
+
+        self.assertIn(".auth-panel { display:grid; grid-template-columns:1fr;", css)
+        self.assertIn(".split.wide { grid-template-columns:1fr;", css)
+        self.assertIn("conversation-row-selected", css)
+        self.assertIn("codex-import-grid", css)
+
+        self.assertIn("/api/admin/tool", js)
+        self.assertIn("mcp_server_install", js)
+        self.assertIn("mcp_server_update", js)
+        self.assertIn("mcp_template_list", js)
+        self.assertIn("mcp_server_health", js)
+        self.assertIn("mcp_transcript_export", js)
+        self.assertIn("mcp_chat_export", js)
+        self.assertIn("mcp_chat_messages", js)
+        self.assertIn("mcp_chat_context", js)
+        self.assertIn("mcp_chat_record_context", js)
+        self.assertIn("mcp_chat_update_context", js)
+        self.assertIn("mcp_chat_delete_context", js)
+        self.assertIn("mcp_chat_recall", js)
+        self.assertIn("mcp_chat_context_export", js)
+        self.assertIn("mcp_codex_sessions_preview", js)
+        self.assertIn("mcp_codex_sessions_import", js)
+        self.assertIn("mcp_codex_sessions_sync", js)
+        self.assertIn("mcp_secret_set", js)
+        self.assertIn("config_raw", js)
+        self.assertIn("editServer", js)
+        self.assertIn("保存编辑并重载", js)
+        self.assertIn("confirmDirty", js)
+        self.assertIn("beforeunload", js)
+        self.assertIn("withBusy", js)
+        self.assertIn("project-group-row", js)
+        self.assertIn("UTC+8", js)
+        self.assertIn("导出 MD", js)
+        self.assertIn("scope:'admin'", js)
+        self.assertIn("showChatReader", js)
+        self.assertIn("已读取会话正文", js)
+        self.assertIn("startupSettingsPayload", js)
+        self.assertIn("renderCodexCandidates", js)
+
+        css_asset = admin_asset_response("admin.css")
+        js_asset = admin_asset_response("admin.js")
+        self.assertIsNotNone(css_asset)
+        self.assertIsNotNone(js_asset)
+        self.assertIn("text/css", css_asset[1])
+        self.assertIn("javascript", js_asset[1])
+        self.assertIn("chatReaderBackdrop", html)
+        self.assertIn("chat-reader-modal", html)
+        self.assertIn("chat-reader-dialog", html)
         self.assertIn("closeChatReader", html)
-        self.assertIn("showChatReader", html)
-        self.assertIn("已读取会话正文", html)
         self.assertIn("execSessions", html)
         self.assertIn("mcpRequests", html)
         self.assertIn("MCP HTTP 会话", html)
@@ -607,7 +898,6 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("settingsOAuthServerUrl", html)
         self.assertIn("settingsOAuthTokenSecret", html)
         self.assertIn("generateOAuthTokenSecret", html)
-        self.assertIn("startupSettingsPayload", html)
         self.assertIn("httpSessionBadge", html)
         self.assertIn("execSessionBadge", html)
         self.assertIn("会话默认目录", html)
@@ -641,6 +931,13 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertEqual(runtime.config_dir, upstream.parent)
             self.assertEqual(runtime.upstream_config_path, upstream)
 
+    def test_startup_settings_apply_tool_profile_when_cli_omits_it(self) -> None:
+        args = build_parser().parse_args([])
+
+        apply_startup_settings(args, {"tool_profile": "read-only"})
+
+        self.assertEqual(args.tool_profile, "read-only")
+
     def test_runtime_status_and_hot_update_payloads(self) -> None:
         with TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "mcp-servers.json"
@@ -670,6 +967,7 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertTrue(status["startup_settings"]["auth_token_configured"])
             self.assertNotIn("oauth_token_secret", status["startup_settings"])
             self.assertNotIn("auth_token", status["startup_settings"])
+            self.assertEqual(status["runtime"]["tool_profile"], "full")
             self.assertGreater(status["templates"]["template_count"], 0)
 
             runtime.record_mcp_http_access(
@@ -693,9 +991,12 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertEqual(runtime.auth_token, "mcp-token")
             self.assertEqual(runtime.admin_token, "admin-token")
 
-            saved = runtime.save_startup_settings({"host": "0.0.0.0", "port": 8765, "workspace": str(Path(tmp))})
+            saved = runtime.save_startup_settings(
+                {"host": "0.0.0.0", "port": 8765, "workspace": str(Path(tmp)), "tool_profile": "read-only"}
+            )
             self.assertTrue(saved["ok"])
             self.assertTrue(saved["requires_restart"])
+            self.assertEqual(saved["settings"]["tool_profile"], "read-only")
             self.assertIn("uvx coding-tools-mcp", saved["restart_command"])
 
     def test_oauth_tokens_preserve_admin_scope(self) -> None:
@@ -746,6 +1047,15 @@ class McpAdminConfigTests(unittest.TestCase):
             try:
                 html = urllib.request.urlopen(f"{base_url}/admin", timeout=5).read().decode("utf-8")
                 self.assertIn("MCP 管理台", html)
+                self.assertIn("/admin/assets/admin.css", html)
+                self.assertIn("/admin/assets/admin.js", html)
+
+                with urllib.request.urlopen(f"{base_url}/admin/assets/admin.css", timeout=5) as response:
+                    self.assertIn("text/css", response.headers.get("Content-Type", ""))
+                    self.assertIn("app-shell", response.read().decode("utf-8"))
+                with urllib.request.urlopen(f"{base_url}/admin/assets/admin.js", timeout=5) as response:
+                    self.assertIn("javascript", response.headers.get("Content-Type", ""))
+                    self.assertIn("mcp_server_install", response.read().decode("utf-8"))
 
                 req = urllib.request.Request(f"{base_url}/api/admin/status", headers={"Authorization": "Bearer admin-token"})
                 status = json.loads(urllib.request.urlopen(req, timeout=5).read().decode("utf-8"))
@@ -783,11 +1093,23 @@ class McpAdminConfigTests(unittest.TestCase):
             manager = McpAdminManager(Path(tmp) / "mcp.json", protocol_version="2025-06-18")
             runtime = Runtime(Path(tmp), admin_token="admin-token", admin_manager=manager)
             server = RuntimeHTTPServer(("127.0.0.1", 0), AdminUIHandler, runtime)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
             try:
                 self.assertIs(server.runtime, runtime)
                 self.assertNotEqual(server.server_address[1], 0)
+                html = urllib.request.urlopen(f"{base_url}/admin", timeout=5).read().decode("utf-8")
+                self.assertIn("/admin/assets/admin.css", html)
+                self.assertIn("/admin/assets/admin.js", html)
+                with urllib.request.urlopen(f"{base_url}/admin/assets/admin.css", timeout=5) as response:
+                    self.assertIn("text/css", response.headers.get("Content-Type", ""))
+                with urllib.request.urlopen(f"{base_url}/admin/assets/admin.js", timeout=5) as response:
+                    self.assertIn("javascript", response.headers.get("Content-Type", ""))
             finally:
+                server.shutdown()
                 server.server_close()
+                thread.join(timeout=5)
 
 
 def filesystem_spec() -> dict[str, object]:

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "coding-tools": {
+      "command": "uvx",
+      "args": [
+        "coding-tools-mcp",
+        "--stdio",
+        "--workspace",
+        "/path/to/repo",
+        "--tool-profile",
+        "read-only"
+      ]
+    }
+  }
+}

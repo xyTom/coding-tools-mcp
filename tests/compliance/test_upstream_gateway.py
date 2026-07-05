@@ -92,6 +92,32 @@ class UpstreamGatewayTests(unittest.TestCase):
             self.assertEqual(result.get("structuredContent", {}).get("remote_name"), "search")
             self.assertEqual(client.calls, [("search", {"q": "mcp"})])
 
+    def test_runtime_preserves_nested_upstream_tool_names(self) -> None:
+        with TemporaryDirectory() as tmp:
+            manager = UpstreamManager.empty()
+            config = UpstreamServerConfig(alias="outer", transport="streamable_http", url="http://127.0.0.1/mcp")
+            client = FakeUpstreamClient(config, manager.protocol_version)
+            nested_tool = {
+                "name": "inner__search",
+                "description": "Search through a nested upstream gateway.",
+                "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+                "annotations": {"readOnlyHint": True},
+            }
+            public_name = "outer__inner__search"
+            manager.configs = [config]
+            manager.clients["outer"] = client
+            manager.tools[public_name] = manager_tool(config.alias, public_name, "inner__search", nested_tool)
+
+            runtime = Runtime(Path(tmp), upstream_manager=manager)
+            tool_names = {tool["name"] for tool in runtime.list_tools()["tools"]}
+
+            self.assertIn(public_name, tool_names)
+            result = runtime.call_tool(public_name, {"q": "mcp"})
+
+            self.assertFalse(result.get("isError"))
+            self.assertEqual(result.get("structuredContent", {}).get("remote_name"), "inner__search")
+            self.assertEqual(client.calls, [("inner__search", {"q": "mcp"})])
+
     def test_read_only_profile_hides_non_read_only_upstream_tools(self) -> None:
         with TemporaryDirectory() as tmp:
             manager = fake_manager()

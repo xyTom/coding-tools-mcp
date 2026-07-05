@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-TRANSCRIPT_SCHEMA_VERSION = 3
+TRANSCRIPT_SCHEMA_VERSION = 4
 SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
@@ -27,6 +27,7 @@ class TranscriptStore:
             session_count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
             event_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
             chat_conversation_count = conn.execute("SELECT COUNT(DISTINCT conversation_id) FROM chat_messages").fetchone()[0]
+            chat_project_count = conn.execute("SELECT COUNT(*) FROM chat_projects").fetchone()[0]
             chat_message_count = conn.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0]
             chat_context_entry_count = conn.execute("SELECT COUNT(*) FROM chat_context_entries").fetchone()[0]
         return {
@@ -36,6 +37,7 @@ class TranscriptStore:
             "markdown_dir": str(self.markdown_dir),
             "session_count": int(session_count),
             "event_count": int(event_count),
+            "chat_project_count": int(chat_project_count),
             "chat_conversation_count": int(chat_conversation_count),
             "chat_message_count": int(chat_message_count),
             "chat_context_entry_count": int(chat_context_entry_count),
@@ -55,9 +57,20 @@ class TranscriptStore:
         source: str | None = None,
         conversation_title: str | None = None,
         conversation_uid: str | None = None,
+        project_id: str | None = None,
+        project_name: str | None = None,
+        project_path: str | None = None,
+        project_workspace: str | None = None,
+        project_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._ensure_schema()
         conversation_id = normalized_conversation_id(conversation_id)
+        project = normalized_project_fields(
+            project_id=project_id,
+            project_name=project_name,
+            project_path=project_path,
+            project_workspace=project_workspace,
+        )
         now = utc_now()
         rows: list[tuple[str, str | None, str, str, str, str | None, str | None]] = []
         skipped = 0
@@ -95,6 +108,8 @@ class TranscriptStore:
                         unique_id=conversation_uid,
                         source=source,
                         timestamp=now,
+                        project=project,
+                        project_metadata=project_metadata,
                     )
                     for row in rows:
                         cursor = conn.execute(
@@ -109,6 +124,7 @@ class TranscriptStore:
         return {
             "ok": True,
             "conversation_id": conversation_id,
+            "project_id": project.get("project_id"),
             "message_count": len(rows),
             "inserted_count": inserted,
             "duplicate_count": max(0, len(rows) - inserted),
@@ -123,9 +139,20 @@ class TranscriptStore:
         source: str | None = None,
         conversation_title: str | None = None,
         conversation_uid: str | None = None,
+        project_id: str | None = None,
+        project_name: str | None = None,
+        project_path: str | None = None,
+        project_workspace: str | None = None,
+        project_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._ensure_schema()
         conversation_id = normalized_conversation_id(conversation_id)
+        project = normalized_project_fields(
+            project_id=project_id,
+            project_name=project_name,
+            project_path=project_path,
+            project_workspace=project_workspace,
+        )
         now = utc_now()
         rows: list[tuple[str, str | None, str, str, str, str | None, str | None]] = []
         skipped = 0
@@ -163,6 +190,8 @@ class TranscriptStore:
                         unique_id=conversation_uid,
                         source=source,
                         timestamp=now,
+                        project=project,
+                        project_metadata=project_metadata,
                     )
                     for row in rows:
                         cursor = conn.execute(
@@ -177,6 +206,7 @@ class TranscriptStore:
         return {
             "ok": True,
             "conversation_id": conversation_id,
+            "project_id": project.get("project_id"),
             "entry_count": len(rows),
             "inserted_count": inserted,
             "duplicate_count": max(0, len(rows) - inserted),
@@ -203,10 +233,22 @@ class TranscriptStore:
             ).fetchall()
         return {"ok": True, "sessions": [dict(row) for row in rows], "session_count": len(rows)}
 
-    def list_chat_conversations(self, *, limit: int = 100, query: str | None = None) -> dict[str, Any]:
+    def list_chat_projects(self, *, limit: int = 100, query: str | None = None) -> dict[str, Any]:
         limit = max(1, min(int(limit), 500))
         self._ensure_schema()
-        rows = self._load_chat_conversations(limit=limit, query=query)
+        rows = self._load_chat_projects(limit=limit, query=query)
+        return {"ok": True, "projects": rows, "project_count": len(rows)}
+
+    def list_chat_conversations(
+        self,
+        *,
+        limit: int = 100,
+        query: str | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        limit = max(1, min(int(limit), 500))
+        self._ensure_schema()
+        rows = self._load_chat_conversations(limit=limit, query=query, project_id=project_id)
         return {"ok": True, "conversations": rows, "conversation_count": len(rows)}
 
     def list_chat_messages(self, *, conversation_id: str, limit: int = 500) -> dict[str, Any]:
@@ -324,6 +366,7 @@ class TranscriptStore:
                 conn.execute("DELETE FROM chat_messages")
                 conn.execute("DELETE FROM chat_context_entries")
                 conn.execute("DELETE FROM chat_conversations")
+                conn.execute("DELETE FROM chat_projects")
         return {"ok": True, "deleted_count": int(count), "context_deleted_count": int(context_count)}
 
     def merge_chat_conversations(self, *, target_conversation_id: str, source_conversation_ids: list[str]) -> dict[str, Any]:
@@ -389,32 +432,40 @@ class TranscriptStore:
         self,
         *,
         conversation_id: str | None = None,
+        project_id: str | None = None,
         max_messages: int = 5000,
         write_file: bool = True,
     ) -> dict[str, Any]:
         max_messages = max(1, min(int(max_messages), 20000))
         normalized_id = normalized_conversation_id(conversation_id) if conversation_id else None
-        messages = self._load_chat_messages(conversation_id=normalized_id, max_messages=max_messages)
+        normalized_project_id = normalized_optional_project_id(project_id)
+        messages = self._load_chat_messages(
+            conversation_id=normalized_id,
+            project_id=normalized_project_id,
+            max_messages=max_messages,
+        )
         if normalized_id and not messages:
             raise ValueError(f"Chat conversation not found: {normalized_id}")
-        conversations = self._load_chat_conversations(limit=500)
+        conversations = self._load_chat_conversations(limit=500, project_id=normalized_project_id)
         if normalized_id:
             conversations = [item for item in conversations if item.get("conversation_id") == normalized_id]
         markdown = self._render_chat_markdown(
             conversations,
             messages,
             conversation_id=normalized_id,
+            project_id=normalized_project_id,
             max_messages=max_messages,
         )
         output_path: Path | None = None
         if write_file:
             self.markdown_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = safe_filename(normalized_id or "all-chat-conversations")
+            safe_name = safe_filename(normalized_id or normalized_project_id or "all-chat-conversations")
             output_path = self.markdown_dir / f"chat-{safe_name}.md"
             output_path.write_text(markdown, encoding="utf-8")
         return {
             "ok": True,
             "conversation_id": normalized_id,
+            "project_id": normalized_project_id,
             "message_count": len(messages),
             "conversations": conversations,
             "path": str(output_path) if output_path else None,
@@ -425,30 +476,38 @@ class TranscriptStore:
         self,
         *,
         conversation_id: str | None = None,
+        project_id: str | None = None,
         max_entries: int = 200,
         write_file: bool = True,
     ) -> dict[str, Any]:
         max_entries = max(1, min(int(max_entries), 5000))
         normalized_id = normalized_conversation_id(conversation_id) if conversation_id else None
-        entries = self._load_context_entries(conversation_id=normalized_id, max_entries=max_entries)
-        conversations = self._load_chat_conversations(limit=500)
+        normalized_project_id = normalized_optional_project_id(project_id)
+        entries = self._load_context_entries(
+            conversation_id=normalized_id,
+            project_id=normalized_project_id,
+            max_entries=max_entries,
+        )
+        conversations = self._load_chat_conversations(limit=500, project_id=normalized_project_id)
         if normalized_id:
             conversations = [item for item in conversations if item.get("conversation_id") == normalized_id]
         markdown = self._render_context_markdown(
             conversations,
             entries,
             conversation_id=normalized_id,
+            project_id=normalized_project_id,
             max_entries=max_entries,
         )
         output_path: Path | None = None
         if write_file:
             self.markdown_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = safe_filename(normalized_id or "all-chat-context")
+            safe_name = safe_filename(normalized_id or normalized_project_id or "all-chat-context")
             output_path = self.markdown_dir / f"context-{safe_name}.md"
             output_path.write_text(markdown, encoding="utf-8")
         return {
             "ok": True,
             "conversation_id": normalized_id,
+            "project_id": normalized_project_id,
             "entry_count": len(entries),
             "conversations": conversations,
             "path": str(output_path) if output_path else None,
@@ -551,10 +610,25 @@ class TranscriptStore:
                 )
                 conn.execute(
                     """
+                    CREATE TABLE IF NOT EXISTS chat_projects (
+                        project_id TEXT PRIMARY KEY,
+                        name TEXT,
+                        path TEXT,
+                        workspace TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        source TEXT,
+                        metadata_json TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS chat_conversations (
                         conversation_id TEXT PRIMARY KEY,
                         title TEXT,
                         unique_id TEXT,
+                        project_id TEXT,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         source TEXT,
@@ -594,6 +668,9 @@ class TranscriptStore:
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_transcript_events_session ON events(session_id, id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_transcript_events_time ON events(timestamp)")
+                ensure_column(conn, "chat_conversations", "project_id", "project_id TEXT")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_projects_updated ON chat_projects(updated_at)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_conversations_project ON chat_conversations(project_id, updated_at)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_time ON chat_messages(timestamp)")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_context_conversation ON chat_context_entries(conversation_id, id)")
@@ -626,7 +703,7 @@ class TranscriptStore:
                 rows = conn.execute("SELECT * FROM events ORDER BY id ASC LIMIT ?", (max_events,)).fetchall()
         return [dict(row) for row in rows]
 
-    def _load_chat_conversations(self, *, limit: int, query: str | None = None) -> list[dict[str, Any]]:
+    def _load_chat_projects(self, *, limit: int, query: str | None = None) -> list[dict[str, Any]]:
         self._ensure_schema()
         normalized_query = sanitized_text(query or "").strip().lower()
         where_clause = ""
@@ -634,11 +711,74 @@ class TranscriptStore:
         if normalized_query:
             like_query = f"%{normalized_query}%"
             where_clause = """
-                WHERE LOWER(all_ids.conversation_id) LIKE ?
-                   OR LOWER(COALESCE(c.title, '')) LIKE ?
-                   OR LOWER(COALESCE(c.unique_id, '')) LIKE ?
+                WHERE LOWER(p.project_id) LIKE ?
+                   OR LOWER(COALESCE(p.name, '')) LIKE ?
+                   OR LOWER(COALESCE(p.path, '')) LIKE ?
+                   OR LOWER(COALESCE(p.workspace, '')) LIKE ?
                 """
-            params.extend([like_query, like_query, like_query])
+            params.extend([like_query, like_query, like_query, like_query])
+        params.append(limit)
+        with closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                f"""
+                SELECT p.project_id,
+                       p.name,
+                       p.path,
+                       p.workspace,
+                       p.created_at,
+                       p.updated_at,
+                       p.source,
+                       p.metadata_json,
+                       COUNT(DISTINCT c.conversation_id) AS conversation_count,
+                       COUNT(DISTINCT m.id) AS message_count,
+                       COUNT(DISTINCT ctx.id) AS context_entry_count,
+                       COALESCE(MAX(m.timestamp), MAX(ctx.timestamp), MAX(c.updated_at), p.updated_at) AS last_seen
+                FROM chat_projects p
+                LEFT JOIN chat_conversations c ON c.project_id = p.project_id
+                LEFT JOIN chat_messages m ON m.conversation_id = c.conversation_id
+                LEFT JOIN chat_context_entries ctx ON ctx.conversation_id = c.conversation_id
+                {where_clause}
+                GROUP BY p.project_id
+                ORDER BY last_seen DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        projects = [dict(row) for row in rows]
+        for project in projects:
+            project["date"] = str(project.get("last_seen") or project.get("updated_at") or "")[:10]
+        return projects
+
+    def _load_chat_conversations(
+        self,
+        *,
+        limit: int,
+        query: str | None = None,
+        project_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self._ensure_schema()
+        normalized_query = sanitized_text(query or "").strip().lower()
+        normalized_project_id = normalized_optional_project_id(project_id)
+        where_parts: list[str] = []
+        params: list[Any] = []
+        if normalized_project_id:
+            where_parts.append("c.project_id = ?")
+            params.append(normalized_project_id)
+        if normalized_query:
+            like_query = f"%{normalized_query}%"
+            where_parts.append(
+                "(" 
+                "LOWER(all_ids.conversation_id) LIKE ? "
+                "OR LOWER(COALESCE(c.title, '')) LIKE ? "
+                "OR LOWER(COALESCE(c.unique_id, '')) LIKE ? "
+                "OR LOWER(COALESCE(c.project_id, '')) LIKE ? "
+                "OR LOWER(COALESCE(p.name, '')) LIKE ? "
+                "OR LOWER(COALESCE(p.path, '')) LIKE ? "
+                "OR LOWER(COALESCE(p.workspace, '')) LIKE ?"
+                ")"
+            )
+            params.extend([like_query, like_query, like_query, like_query, like_query, like_query, like_query])
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
         params.append(limit)
         with closing(self._connect()) as conn, conn:
             rows = conn.execute(
@@ -646,11 +786,15 @@ class TranscriptStore:
                 SELECT all_ids.conversation_id,
                        c.title,
                        c.unique_id,
+                       c.project_id,
+                       p.name AS project_name,
+                       p.path AS project_path,
+                       p.workspace AS project_workspace,
                        COALESCE(MIN(m.timestamp), MIN(ctx.timestamp), c.created_at) AS first_seen,
                        COALESCE(MAX(m.timestamp), MAX(ctx.timestamp), c.updated_at) AS last_seen,
                        COUNT(DISTINCT m.id) AS message_count,
                        COUNT(DISTINCT ctx.id) AS context_entry_count,
-                       COALESCE(MAX(m.source), MAX(ctx.source), c.source) AS source
+                       COALESCE(MAX(m.source), MAX(ctx.source), c.source, p.source) AS source
                 FROM (
                     SELECT conversation_id FROM chat_messages
                     UNION
@@ -661,6 +805,7 @@ class TranscriptStore:
                 LEFT JOIN chat_messages m ON m.conversation_id = all_ids.conversation_id
                 LEFT JOIN chat_context_entries ctx ON ctx.conversation_id = all_ids.conversation_id
                 LEFT JOIN chat_conversations c ON c.conversation_id = all_ids.conversation_id
+                LEFT JOIN chat_projects p ON p.project_id = c.project_id
                 {where_clause}
                 GROUP BY all_ids.conversation_id
                 ORDER BY last_seen DESC
@@ -673,25 +818,63 @@ class TranscriptStore:
             conversation["date"] = str(conversation.get("last_seen") or "")[:10]
         return conversations
 
-    def _load_chat_messages(self, *, conversation_id: str | None, max_messages: int) -> list[dict[str, Any]]:
+    def _load_chat_messages(
+        self,
+        *,
+        conversation_id: str | None,
+        max_messages: int,
+        project_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         self._ensure_schema()
+        normalized_project_id = normalized_optional_project_id(project_id)
         with closing(self._connect()) as conn, conn:
             if conversation_id:
                 rows = conn.execute(
                     "SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY id ASC LIMIT ?",
                     (conversation_id, max_messages),
                 ).fetchall()
+            elif normalized_project_id:
+                rows = conn.execute(
+                    """
+                    SELECT m.*
+                    FROM chat_messages m
+                    INNER JOIN chat_conversations c ON c.conversation_id = m.conversation_id
+                    WHERE c.project_id = ?
+                    ORDER BY c.updated_at DESC, m.conversation_id ASC, m.id ASC
+                    LIMIT ?
+                    """,
+                    (normalized_project_id, max_messages),
+                ).fetchall()
             else:
                 rows = conn.execute("SELECT * FROM chat_messages ORDER BY conversation_id ASC, id ASC LIMIT ?", (max_messages,)).fetchall()
         return [dict(row) for row in rows]
 
-    def _load_context_entries(self, *, conversation_id: str | None, max_entries: int) -> list[dict[str, Any]]:
+    def _load_context_entries(
+        self,
+        *,
+        conversation_id: str | None,
+        max_entries: int,
+        project_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         self._ensure_schema()
+        normalized_project_id = normalized_optional_project_id(project_id)
         with closing(self._connect()) as conn, conn:
             if conversation_id:
                 rows = conn.execute(
                     "SELECT * FROM chat_context_entries WHERE conversation_id = ? ORDER BY id ASC LIMIT ?",
                     (conversation_id, max_entries),
+                ).fetchall()
+            elif normalized_project_id:
+                rows = conn.execute(
+                    """
+                    SELECT ctx.*
+                    FROM chat_context_entries ctx
+                    INNER JOIN chat_conversations c ON c.conversation_id = ctx.conversation_id
+                    WHERE c.project_id = ?
+                    ORDER BY c.updated_at DESC, ctx.conversation_id ASC, ctx.id ASC
+                    LIMIT ?
+                    """,
+                    (normalized_project_id, max_entries),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -710,16 +893,28 @@ class TranscriptStore:
         source: str | None,
         timestamp: str,
         metadata: dict[str, Any] | None = None,
+        project: dict[str, str | None] | None = None,
+        project_metadata: dict[str, Any] | None = None,
     ) -> None:
         metadata_json = None if metadata is None else json.dumps(metadata, ensure_ascii=False, sort_keys=True, default=str)
+        project_id = project.get("project_id") if project else None
+        if project_id and project:
+            self._upsert_chat_project(
+                conn,
+                project=project,
+                source=source,
+                timestamp=timestamp,
+                metadata=project_metadata,
+            )
         conn.execute(
             """
             INSERT INTO chat_conversations (
-                conversation_id, title, unique_id, created_at, updated_at, source, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                conversation_id, title, unique_id, project_id, created_at, updated_at, source, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(conversation_id) DO UPDATE SET
                 title=COALESCE(excluded.title, chat_conversations.title),
                 unique_id=COALESCE(excluded.unique_id, chat_conversations.unique_id),
+                project_id=COALESCE(excluded.project_id, chat_conversations.project_id),
                 updated_at=excluded.updated_at,
                 source=COALESCE(excluded.source, chat_conversations.source),
                 metadata_json=COALESCE(excluded.metadata_json, chat_conversations.metadata_json)
@@ -728,6 +923,45 @@ class TranscriptStore:
                 conversation_id,
                 normalized_optional_text(title, limit=192),
                 normalized_optional_text(unique_id, limit=96),
+                project_id,
+                timestamp,
+                timestamp,
+                normalized_optional_text(source, limit=128),
+                metadata_json,
+            ),
+        )
+
+    def _upsert_chat_project(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        project: dict[str, str | None],
+        source: str | None,
+        timestamp: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        project_id = project.get("project_id")
+        if not project_id:
+            return
+        metadata_json = None if metadata is None else safe_json_dumps(metadata)
+        conn.execute(
+            """
+            INSERT INTO chat_projects (
+                project_id, name, path, workspace, created_at, updated_at, source, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                name=COALESCE(excluded.name, chat_projects.name),
+                path=COALESCE(excluded.path, chat_projects.path),
+                workspace=COALESCE(excluded.workspace, chat_projects.workspace),
+                updated_at=excluded.updated_at,
+                source=COALESCE(excluded.source, chat_projects.source),
+                metadata_json=COALESCE(excluded.metadata_json, chat_projects.metadata_json)
+            """,
+            (
+                project_id,
+                project.get("project_name"),
+                project.get("project_path"),
+                project.get("project_workspace"),
                 timestamp,
                 timestamp,
                 normalized_optional_text(source, limit=128),
@@ -771,9 +1005,15 @@ class TranscriptStore:
         messages: list[dict[str, Any]],
         *,
         conversation_id: str | None,
+        project_id: str | None,
         max_messages: int,
     ) -> str:
-        title = f"聊天备份记录：{conversation_id}" if conversation_id else "聊天备份记录"
+        if conversation_id:
+            title = f"聊天备份记录：{conversation_id}"
+        elif project_id:
+            title = f"聊天备份记录：项目 {project_id}"
+        else:
+            title = "聊天备份记录"
         lines = [f"# {title}", ""]
         lines.append(f"生成时间：{utc_now()}")
         lines.append(f"数据库：`{self.db_path}`")
@@ -804,9 +1044,15 @@ class TranscriptStore:
         entries: list[dict[str, Any]],
         *,
         conversation_id: str | None,
+        project_id: str | None,
         max_entries: int,
     ) -> str:
-        title = f"恢复上下文：{conversation_id}" if conversation_id else "恢复上下文记录"
+        if conversation_id:
+            title = f"恢复上下文：{conversation_id}"
+        elif project_id:
+            title = f"恢复上下文：项目 {project_id}"
+        else:
+            title = "恢复上下文记录"
         lines = [f"# {title}", ""]
         lines.append(f"生成时间：{utc_now()}")
         lines.append(f"数据库：`{self.db_path}`")
@@ -916,6 +1162,12 @@ def render_chat_conversation_summary(conversation: dict[str, Any]) -> list[str]:
         lines.append(f"  - 标题：{conversation.get('title')}")
     if conversation.get("unique_id"):
         lines.append(f"  - UID：`{conversation.get('unique_id')}`")
+    if conversation.get("project_id"):
+        lines.append(f"  - 项目：`{conversation.get('project_id')}`")
+    if conversation.get("project_name"):
+        lines.append(f"  - 项目名称：{conversation.get('project_name')}")
+    if conversation.get("project_path"):
+        lines.append(f"  - 项目路径：`{conversation.get('project_path')}`")
     lines.extend([
         f"  - 开始时间：{conversation.get('first_seen')}",
         f"  - 最近时间：{conversation.get('last_seen')}",
@@ -1023,3 +1275,47 @@ def json_block(value: Any) -> str:
     text = sanitized_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str))
     text = text.replace("```", "` ` `")
     return f"```json\n{text}\n```"
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if column not in {str(row["name"]) for row in rows}:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def normalized_optional_project_id(value: Any) -> str | None:
+    return normalized_optional_text(value, limit=192)
+
+
+def normalized_project_path(value: Any) -> str | None:
+    text = normalized_optional_text(value, limit=512)
+    return text.replace("\\", "/") if text else None
+
+
+def normalized_project_fields(
+    *,
+    project_id: Any = None,
+    project_name: Any = None,
+    project_path: Any = None,
+    project_workspace: Any = None,
+) -> dict[str, str | None]:
+    path = normalized_project_path(project_path)
+    workspace = normalized_project_path(project_workspace)
+    name = normalized_optional_text(project_name, limit=192)
+    normalized_id = normalized_optional_project_id(project_id) or path or name or workspace
+    normalized_id = normalized_optional_project_id(normalized_id)
+    if not normalized_id:
+        return {"project_id": None, "project_name": None, "project_path": path, "project_workspace": workspace}
+    return {
+        "project_id": normalized_id,
+        "project_name": name or inferred_project_name(normalized_id, path),
+        "project_path": path,
+        "project_workspace": workspace,
+    }
+
+
+def inferred_project_name(project_id: str, path: str | None) -> str:
+    candidate = (path or project_id).replace("\\", "/").rstrip("/")
+    if candidate:
+        return candidate.rsplit("/", 1)[-1] or project_id
+    return project_id

@@ -261,6 +261,7 @@ class MCPContractTests(ComplianceTestCase):
             "http://localhost.evil.example",
             "http://127.0.0.1.evil.example",
             "https://example.com",
+            "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef",
             "null",
         )
         for origin in denied_origins:
@@ -270,6 +271,31 @@ class MCPContractTests(ComplianceTestCase):
                 self.assertIsNone(response.get("id"))
                 self.assertEqual(response.get("error", {}).get("code"), -32600)
                 self.assertIn("Origin denied", response.get("error", {}).get("message", ""))
+
+    def test_http_allows_configured_browser_extension_origin(self) -> None:
+        origin = "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef"
+        process, url = self.start_raw_http_server(extra_env={"CODING_TOOLS_MCP_ALLOWED_ORIGINS": origin})
+        try:
+            self.wait_for_ping(url)
+            body = b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}'
+            status, headers, response_body = self.raw_base_http_request(
+                url,
+                "POST",
+                "/mcp",
+                body=body,
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                    "MCP-Protocol-Version": "2025-06-18",
+                    "Origin": origin,
+                },
+            )
+            response = json.loads(response_body)
+            self.assertEqual(status, 200)
+            self.assertEqual(response.get("result"), {})
+            self.assertEqual(headers.get("access-control-allow-origin"), origin)
+        finally:
+            self.stop_process(process)
 
     def test_http_rejects_unknown_session_id_header(self) -> None:
         self.assertIsNotNone(self.client.session_id)
@@ -1047,15 +1073,18 @@ class MCPContractTests(ComplianceTestCase):
         finally:
             connection.close()
 
-    def start_raw_http_server(self) -> tuple[subprocess.Popen[str], str]:
+    def start_raw_http_server(self, *, extra_env: dict[str, str] | None = None) -> tuple[subprocess.Popen[str], str]:
         port = free_port()
         cmd = default_server_command(self.workspace.root, port)
+        env = self.server_process_env()
+        if extra_env:
+            env.update(extra_env)
         process = subprocess.Popen(
             cmd,
             cwd=str(self.workspace.root),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=self.server_process_env(),
+            env=env,
             text=True,
             start_new_session=True,
         )

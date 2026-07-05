@@ -32,6 +32,10 @@ ADMIN_TOOL_NAMES = (
     "mcp_secret_delete",
     "mcp_transcript_sessions",
     "mcp_transcript_export",
+    "mcp_codex_sessions_preview",
+    "mcp_codex_sessions_import",
+    "mcp_codex_sessions_sync",
+    "mcp_chat_projects",
     "mcp_chat_conversations",
     "mcp_chat_messages",
     "mcp_chat_context",
@@ -39,6 +43,7 @@ ADMIN_TOOL_NAMES = (
     "mcp_chat_update_context",
     "mcp_chat_delete_context",
     "mcp_chat_recall",
+    "mcp_chat_project_recall",
     "mcp_chat_export",
     "mcp_chat_context_export",
     "mcp_chat_update_message",
@@ -282,6 +287,7 @@ class McpAdminManager:
                     {
                         "alias": alias,
                         "config": redact_config(config),
+                        "config_raw": json_safe_copy({**config, "alias": alias}),
                         "status": status_by_alias.get(alias),
                     }
                 )

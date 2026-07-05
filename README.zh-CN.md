@@ -529,6 +529,12 @@ http://127.0.0.1:8765/admin
 
 Web 管理台适合个人管理。非 loopback 绑定必须配置 bearer token 或 OAuth；远程打开建议使用 `--oauth-mode`，管理台会申请 `scope=admin`。
 
+## 聊天会话同步
+
+客户端可以通过 `record_chat_transcript` 或 `record_chat_message` 把 Codex / ChatGPT 会话文本同步到本地 transcript 库。写入时应使用稳定的 `conversation_id` 和 `message_id`，这样重复上传会去重。之后可用 `list_chat_projects` 和 `list_chat_conversations` 查找已保存的项目与会话，再用 `recall_chat_context` 或 `recall_project_context` 把消息和 Markdown 上下文取回到新的客户端会话里。
+
+这个机制是“客户端主动提交的会话库”，不会自动读取外部账号或 Codex 原生私有会话文件。
+
 ## 权限和安全边界
 
 默认安全策略：
@@ -591,6 +597,7 @@ python -m py_compile \
 
 - [Quickstart](docs/quickstart.md)
 - [MCP client configuration](docs/mcp-client-config.md)
+- [Browser chat clients](docs/browser-clients.md)
 - [Remote MCP](docs/remote-mcp.md)
 - [Tools and schemas](docs/tools-and-schemas.md)
 - [Permission modes](docs/permission-modes.md)

@@ -10,6 +10,7 @@ This summary captures the external tool patterns considered while shaping the pu
 | Gemini CLI | Root-directory model, filesystem tools, shell confirmation, sandbox options, MCP servers | Model-assisted edits inside deterministic patch application |
 | OpenHands | Agent-computer interface, sandboxed dev environments, issue-fixing loops | Browser/product orchestration as P0 runtime tools |
 | Cline | MCP client usage, explicit tool approval, file editing loops | UI-centric approval as the server security boundary |
+| MCP SuperAssistant | Browser chat client bridge, local proxy, Streamable HTTP/SSE compatibility patterns | Browser extension product maintenance or DOM adapters inside the server runtime |
 | SWE-agent and mini-SWE-agent | Benchmark discipline, Docker/Singularity environments, patch submission through diffs | A single unrestricted bash interface as the public P0 surface |
 
 Project decisions:

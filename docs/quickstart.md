@@ -50,6 +50,8 @@ Endpoint:
 http://127.0.0.1:8765/mcp
 ```
 
+For browser chat clients such as MCP SuperAssistant, see [Browser chat clients](browser-clients.md).
+
 The same HTTP process also serves the Chinese Web Admin Console by default:
 
 ```text

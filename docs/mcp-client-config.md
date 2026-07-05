@@ -46,6 +46,12 @@ http://127.0.0.1:8765/mcp
 
 The server is designed for local loopback use. Do not bind it to a public interface without external authentication and sandboxing.
 
+## Browser Chat Clients
+
+Browser chat clients such as MCP SuperAssistant can use the MCP SuperAssistant local proxy, or connect directly to `/mcp` with `streamable-http` when the browser extension `Origin` is explicitly allowlisted.
+
+See [Browser chat clients](browser-clients.md) for the proxy config, direct `--allowed-origin` setup, and security notes.
+
 ## Remote MCP
 
 For remote MCP clients, keep the server on loopback and expose it through an HTTPS tunnel. Anonymous tunnel testing should use `read-only` mode:

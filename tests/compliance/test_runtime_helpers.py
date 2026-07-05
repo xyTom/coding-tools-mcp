@@ -22,6 +22,8 @@ from coding_tools_mcp.server import (
     exec_output_diagnostics,
     guard_allow_roots,
     identify_image,
+    is_allowed_origin,
+    parse_allowed_origins,
     permission_failure_diagnostics,
     runtime_parent_root,
     truncate_text_head,
@@ -73,6 +75,22 @@ def fake_landlock_exec() -> Iterator[dict[str, object]]:
 
 
 class RuntimeHelperTests(unittest.TestCase):
+    def test_allowed_origins_are_exact_and_support_browser_extensions(self) -> None:
+        allowed = parse_allowed_origins(
+            "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef, https://chatgpt.com"
+        )
+
+        self.assertIn("chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef", allowed)
+        self.assertIn("https://chatgpt.com", allowed)
+        self.assertTrue(
+            is_allowed_origin(
+                "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef",
+                allowed_origins=allowed,
+            )
+        )
+        self.assertFalse(is_allowed_origin("chrome-extension://other-extension"))
+        self.assertFalse(is_allowed_origin("chrome-extension://other-extension", allowed_origins=allowed))
+
     def test_image_identification_reads_jpeg_and_webp_dimensions(self) -> None:
         jpeg = (
             b"\xff\xd8"
@@ -137,6 +155,7 @@ class RuntimeHelperTests(unittest.TestCase):
         self.assertIn("--shell-env-inherit", result.stdout)
         self.assertIn("--permission-mode", result.stdout)
         self.assertIn("--allow-network", result.stdout)
+        self.assertIn("--allowed-origin", result.stdout)
 
     def test_workspace_init_tolerates_missing_home_lookup(self) -> None:
         with TemporaryDirectory() as tmp:
