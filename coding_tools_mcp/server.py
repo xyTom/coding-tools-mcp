@@ -2601,21 +2601,30 @@ class Runtime:
             print(f"transcript persistence failed: {exc}", file=sys.stderr, flush=True)
 
     def restart_command(self) -> str:
+        settings = self.startup_settings or {}
+        workspace = _settings_text(settings, "workspace") or str(self.workspace.root)
+        host = _settings_text(settings, "host") or str(self.server_host or "127.0.0.1")
+        setting_port = _coerce_optional_int(settings.get("port"))
+        port = setting_port if setting_port is not None else self.server_port or 8000
+        if "allowed_origins" in settings:
+            allowed_origins = parse_allowed_origins(settings.get("allowed_origins"))
+        else:
+            allowed_origins = self.allowed_origins
         parts = [
             "uvx",
             SERVER_NAME,
             "--host",
-            str(self.server_host or "127.0.0.1"),
+            host,
             "--port",
-            str(self.server_port or 8000),
+            str(port),
             "--workspace",
-            str(self.workspace.root),
+            workspace,
         ]
         if self.config_dir is not None:
             parts.extend(["--config-dir", str(self.config_dir)])
         if self.oauth_config is not None:
             parts.append("--oauth-mode")
-        for origin in self.allowed_origins:
+        for origin in allowed_origins:
             parts.extend(["--allowed-origin", origin])
         return " ".join(shlex.quote(part) for part in parts)
 
@@ -2710,6 +2719,12 @@ class Runtime:
         current = dict(self.startup_settings)
         for key, value in updates.items():
             if key not in STARTUP_SETTING_KEYS:
+                continue
+            if key == "allowed_origins":
+                if value is None:
+                    current.pop(key, None)
+                else:
+                    current[key] = list(parse_allowed_origins(value))
                 continue
             if value is None or value == "":
                 current.pop(key, None)

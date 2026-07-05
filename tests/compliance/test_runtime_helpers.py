@@ -488,12 +488,12 @@ class RuntimeHelperTests(unittest.TestCase):
 
             server_module.open_landlock_ruleset = unavailable
             try:
-                result = runtime.exec_command({"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 1000})
+                result = runtime.exec_command({"cmd": "echo ok", "timeout_ms": 5000, "yield_time_ms": 1000})
             finally:
                 server_module.open_landlock_ruleset = original
 
             self.assertTrue(result["ok"])
-            self.assertEqual(result["stdout"], "ok")
+            self.assertEqual(result["stdout"].strip(), "ok")
             self.assertTrue(any("Landlock" in warning for warning in result.get("warnings", [])))
 
     def test_exec_command_uses_landlock_wrapper_without_preexec_fn(self) -> None:

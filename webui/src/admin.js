@@ -480,6 +480,7 @@ const $ = (id) => document.getElementById(id);
         workspace:$('settingsWorkspace').value,
         host:$('settingsHost').value,
         port:$('settingsPort').value,
+        allowed_origins:parseList($('settingsAllowedOrigins').value),
         oauth_server_url:$('settingsOAuthServerUrl').value,
         permission_mode:$('settingsPermission').value,
         tool_profile:$('settingsToolProfile').value,
@@ -539,6 +540,10 @@ const $ = (id) => document.getElementById(id);
       setValue('settingsWorkspace', data.runtime?.workspace || '');
       setValue('settingsHost', data.server?.host || '');
       setValue('settingsPort', data.server?.port || '');
+      const allowedOrigins = Object.prototype.hasOwnProperty.call(startup, 'allowed_origins')
+        ? (Array.isArray(startup.allowed_origins) ? startup.allowed_origins : parseList(startup.allowed_origins))
+        : (Array.isArray(data.auth?.allowed_origins) ? data.auth.allowed_origins : []);
+      setValue('settingsAllowedOrigins', allowedOrigins.join('\n'));
       setValue('settingsOAuthServerUrl', startup.oauth_server_url || '');
       const tokenSecret = $('settingsOAuthTokenSecret');
       if (tokenSecret) tokenSecret.placeholder = startup.oauth_token_secret_configured ? '已保存，留空不变' : '留空时首次 OAuth 启动会自动生成';

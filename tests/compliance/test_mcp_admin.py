@@ -878,6 +878,7 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("showChatReader", js)
         self.assertIn("已读取会话正文", js)
         self.assertIn("startupSettingsPayload", js)
+        self.assertIn("allowed_origins:parseList", js)
         self.assertIn("renderCodexCandidates", js)
 
         css_asset = admin_asset_response("admin.css")
@@ -895,6 +896,7 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("MCP HTTP 会话", html)
         self.assertIn("sessionWorkspace", html)
         self.assertIn("sessionDefaultCwd", html)
+        self.assertIn("settingsAllowedOrigins", html)
         self.assertIn("settingsOAuthServerUrl", html)
         self.assertIn("settingsOAuthTokenSecret", html)
         self.assertIn("generateOAuthTokenSecret", html)
@@ -956,6 +958,7 @@ class McpAdminConfigTests(unittest.TestCase):
                 server_host="127.0.0.1",
                 server_port=8765,
                 admin_ui_enabled=True,
+                allowed_origins=("chrome-extension://currentextension",),
             )
 
             status = runtime.admin_status_payload(base_url="http://127.0.0.1:8765")
@@ -968,6 +971,7 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertNotIn("oauth_token_secret", status["startup_settings"])
             self.assertNotIn("auth_token", status["startup_settings"])
             self.assertEqual(status["runtime"]["tool_profile"], "full")
+            self.assertEqual(status["auth"]["allowed_origins"], ["chrome-extension://currentextension"])
             self.assertGreater(status["templates"]["template_count"], 0)
 
             runtime.record_mcp_http_access(
@@ -992,12 +996,33 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertEqual(runtime.admin_token, "admin-token")
 
             saved = runtime.save_startup_settings(
-                {"host": "0.0.0.0", "port": 8765, "workspace": str(Path(tmp)), "tool_profile": "read-only"}
+                {
+                    "host": "0.0.0.0",
+                    "port": 9123,
+                    "workspace": str(Path(tmp)),
+                    "tool_profile": "read-only",
+                    "allowed_origins": [
+                        "chrome-extension://KNGIAFGKDNLKGMEFDAFAIBKIBEGKCAEF",
+                        "http://LOCALHOST:8181/",
+                        "not-an-origin",
+                    ],
+                }
             )
             self.assertTrue(saved["ok"])
             self.assertTrue(saved["requires_restart"])
             self.assertEqual(saved["settings"]["tool_profile"], "read-only")
+            self.assertEqual(
+                saved["settings"]["allowed_origins"],
+                [
+                    "chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef",
+                    "http://localhost:8181",
+                ],
+            )
             self.assertIn("uvx coding-tools-mcp", saved["restart_command"])
+            self.assertIn("--host 0.0.0.0", saved["restart_command"])
+            self.assertIn("--port 9123", saved["restart_command"])
+            self.assertIn("--allowed-origin chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef", saved["restart_command"])
+            self.assertNotIn("currentextension", saved["restart_command"])
 
     def test_oauth_tokens_preserve_admin_scope(self) -> None:
         cfg = OAuthConfig(None, None, "password", "http://127.0.0.1:8765", b"1" * 32)
