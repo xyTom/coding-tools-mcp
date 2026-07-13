@@ -1,5 +1,7 @@
 # Coding Tools MCP
 
+[![Beacon Verified](https://registry-ruby.vercel.app/api/v1/agents/xyTom%2Fcoding-tools-mcp/badge.svg)](https://portal-five-phi-54.vercel.app/?q=coding+tools+mcp)
+
 Coding Tools MCP is a model-neutral coding-agent runtime MCP server. It exposes local coding primitives to any MCP client:
 
 ```text

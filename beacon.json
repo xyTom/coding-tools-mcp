@@ -1,0 +1,12 @@
+{
+  "beacon_manifest": "0.1",
+  "id": "xyTom/coding-tools-mcp",
+  "name": "Coding Tools MCP",
+  "description": "Model-neutral coding-agent runtime MCP — local coding primitives for any MCP client.",
+  "capabilities": ["mcp-server", "coding-agent", "developer-tools", "automation", "cli"],
+  "interfaces": [
+    { "type": "mcp", "endpoint": "https://github.com/xyTom/coding-tools-mcp" }
+  ],
+  "source": "https://github.com/xyTom/coding-tools-mcp",
+  "homepage": "https://github.com/xyTom/coding-tools-mcp"
+}
