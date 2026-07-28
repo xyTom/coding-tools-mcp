@@ -148,6 +148,8 @@ Shared error object:
             "INVALID_ARGUMENT",
             "INVALID_WORKSPACE",
             "INVALID_WORKSPACE_CATALOG",
+            "OAUTH_KEY_ROTATION_FAILED",
+            "OAUTH_KEY_ROTATION_UNAVAILABLE",
             "PATH_OUTSIDE_WORKSPACE",
             "ABSOLUTE_PATH_DENIED",
             "SYMLINK_ESCAPE",

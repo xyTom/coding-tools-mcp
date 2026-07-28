@@ -286,6 +286,17 @@ const $ = (id) => document.getElementById(id);
       }
     }
 
+    async function refreshSigningKeys() {
+      try {
+        const res = await fetch('/api/admin/oauth/signing-keys', { headers:headers() });
+        const data = await res.json();
+        if (!res.ok) throw data.error || 'Signing key API unavailable';
+        setHtml('signingKeys', (data.keys || []).map((key) => `<tr><td><code>${esc(key.kid)}</code></td><td>${esc(key.algorithm || '')}</td><td><code>${esc(key.fingerprint || '')}</code></td><td>${esc(key.status || '')}</td><td>${timeCell(key.created_at ? new Date(key.created_at * 1000).toISOString() : '')}</td><td><button class="secondary" onclick="activateSigningKey('${esc(jsArg(key.kid))}')">激活</button><button class="danger" onclick="revokeSigningKey('${esc(jsArg(key.kid))}')">紧急撤销</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无密钥记录</td></tr>');
+      } catch (err) {
+        setHtml('signingKeys', '<tr><td colspan="6" class="muted">无法读取密钥环。</td></tr>');
+      }
+    }
+
     async function callTool(name, args = {}) {
       return withBusy(name, async () => {
         const data = await api('/api/admin/tool', { name, arguments: args });
@@ -501,6 +512,7 @@ const $ = (id) => document.getElementById(id);
         port:$('settingsPort').value,
         allowed_origins:parseList($('settingsAllowedOrigins').value),
         oauth_server_url:$('settingsOAuthServerUrl').value,
+        oauth_compatibility_mode:$('settingsOauthCompatibility').checked,
         permission_mode:$('settingsPermission').value,
         tool_profile:$('settingsToolProfile').value,
         shell_env_inherit:$('settingsShellEnv').value,
@@ -562,6 +574,7 @@ const $ = (id) => document.getElementById(id);
       renderMcpRequests(data.recent_mcp_requests || []);
       renderCalls(data.recent_tool_calls || []);
       refreshOAuthAgents();
+      refreshSigningKeys();
       setValue('defaultCwd', data.runtime?.default_cwd_display || '.');
       renderSessionOverview(data, contextCount, projectCount);
       const startup = data.startup_settings || {};
@@ -576,6 +589,7 @@ const $ = (id) => document.getElementById(id);
       setValue('settingsOAuthServerUrl', startup.oauth_server_url || '');
       const tokenSecret = $('settingsOAuthTokenSecret');
       if (tokenSecret) tokenSecret.placeholder = startup.oauth_token_secret_configured ? '已保存，留空不变' : '留空时首次 OAuth 启动会自动生成';
+      $('settingsOauthCompatibility').checked = Boolean(startup.oauth_compatibility_mode || data.auth?.oauth_compatibility_mode);
       setValue('settingsPermission', data.runtime?.permission_mode || 'safe');
       setValue('settingsToolProfile', data.runtime?.tool_profile || startup.tool_profile || 'full');
       setValue('settingsShellEnv', data.runtime?.shell_env_inherit || 'core');
@@ -657,7 +671,9 @@ const $ = (id) => document.getElementById(id);
     }
 
     function renderSessions(httpSessions, execSessions) {
-      setHtml('httpSessions', httpSessions.map((s) => `<tr><td><code>${esc(s.session_id)}</code><div class="muted">请求 ${esc(s.request_count || 0)} 次</div></td><td><span class="mini-label">最近 RPC</span><code>${esc(s.last_rpc_method || s.last_method || '')}</code><div class="time-cell">${timeCell(s.last_seen)}</div></td><td class="path-cell"><span class="mini-label">会话默认目录</span><code>${esc(s.default_cwd_display || s.default_cwd || '')}</code></td><td class="path-cell"><span class="mini-label">工作区</span><code>${esc(s.workspace || '')}</code></td><td><span class="mini-label">来源</span>${esc(s.remote_addr || '')}<div class="muted">${esc(s.user_agent || '')}</div></td><td><button class="secondary" onclick="exportTranscript('${esc(jsArg(s.session_id))}')">导出 MD</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无 MCP HTTP 会话。访问 /mcp 后会显示在这里。</td></tr>');
+      const workspaces = state.status?.runtime?.workspace_catalog?.workspaces || [];
+      const workspaceOptions = (selected) => workspaces.map((item) => `<option value="${esc(item.id)}" ${item.id === selected ? 'selected' : ''} ${item.enabled ? '' : 'disabled'}>${esc(item.name || item.id)}</option>`).join('');
+      setHtml('httpSessions', httpSessions.map((s) => `<tr><td><code>${esc(s.session_id)}</code><div class="muted">请求 ${esc(s.request_count || 0)} 次</div></td><td><span class="mini-label">最近 RPC</span><code>${esc(s.last_rpc_method || s.last_method || '')}</code><div class="time-cell">${timeCell(s.last_seen)}</div></td><td class="path-cell"><span class="mini-label">会话默认目录</span><code>${esc(s.default_cwd_display || s.default_cwd || '')}</code></td><td class="path-cell"><span class="mini-label">工作区</span><select onchange="setSessionWorkspace('${esc(jsArg(s.session_id))}', this.value)">${workspaceOptions(s.workspace_id)}</select><code>${esc(s.workspace || '')}</code></td><td><span class="mini-label">来源</span>${esc(s.remote_addr || '')}<div class="muted">${esc(s.user_agent || '')}</div></td><td><button class="secondary" onclick="exportTranscript('${esc(jsArg(s.session_id))}')">导出 MD</button></td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无 MCP HTTP 会话。访问 /mcp 后会显示在这里。</td></tr>');
       setHtml('execSessions', execSessions.map((s) => `<tr><td><code>${esc(s.session_id)}</code><div class="time-cell">${timeCell(s.started_at)}</div></td><td>${esc(s.status)}</td><td class="path-cell"><span class="mini-label">命令执行目录</span><code>${esc(s.workdir)}</code></td><td><span class="mini-label">命令</span>${esc(s.command)}</td><td><button class="danger" onclick="terminateSession('${esc(jsArg(s.session_id))}')">终止</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">暂无运行命令会话。</td></tr>');
     }
 
@@ -907,7 +923,10 @@ const $ = (id) => document.getElementById(id);
     window.serverLogs = async (alias) => { out(await callTool('mcp_server_logs', { alias, max_lines:80 })); };
     window.restartServer = async (alias) => { await callTool('mcp_server_stop', { alias }); out(await callTool('mcp_server_start', { alias })); await refreshStatus(); };
     window.removeServer = async (alias) => { if (!confirm('确认删除这个 MCP 配置？')) return; out(await callTool('mcp_server_remove', { alias, apply:true })); await refreshStatus(); };
+    window.activateSigningKey = async (kid) => { if (!confirm(`激活 ${kid}？`)) return; out(await api('/api/admin/oauth/actions', { action:'activate_signing_key', id:kid })); await refreshStatus(); };
+    window.revokeSigningKey = async (kid) => { if (!confirm(`紧急撤销 ${kid} 会立即使相关 Agent token 失效。继续？`)) return; out(await api('/api/admin/oauth/actions', { action:'revoke_signing_key', id:kid })); await refreshStatus(); };
     window.terminateSession = async (sessionId) => { if (!confirm('确认终止这个会话？')) return; out(await api('/api/admin/runtime', { terminate_session: sessionId })); await refreshStatus(); };
+    window.setSessionWorkspace = async (sessionId, workspaceId) => { if (!confirm('切换工作区会重置该会话的默认目录。继续？')) return; out(await api('/api/admin/workspaces/session', { session_id:sessionId, workspace_id:workspaceId })); await refreshStatus(); };
     window.exportTranscript = async (sessionId) => exportTranscriptPayload(sessionId);
     window.importCodexCandidate = async (candidateId) => importCodexSessions({ candidateIds:[candidateId] });
     window.syncCodexCandidate = async (candidateId) => importCodexSessions({ sync:true, candidateIds:[candidateId] });
@@ -1146,6 +1165,8 @@ const $ = (id) => document.getElementById(id);
       };
       $('reloadUpstream').onclick = async () => { out(await api('/api/admin/runtime', { reload_upstream:true })); await refreshStatus(); };
       $('refreshOAuthAgents').onclick = () => { refreshOAuthAgents(); };
+      $('refreshSigningKeys').onclick = () => { refreshSigningKeys(); };
+      $('rotateSigningKey').onclick = async () => { if (!confirm('生成并激活新的 OAuth signing key？旧 key 将保留用于验证未过期 token。')) return; out(await api('/api/admin/oauth/actions', { action:'rotate_signing_key', id:'active' })); await refreshStatus(); };
       $('setDefaultCwd').onclick = async () => { out(await api('/api/admin/runtime', { default_cwd:$('defaultCwd').value })); await refreshStatus(); };
       $('exportAllTranscripts').onclick = async () => exportTranscriptPayload();
       $('exportAllChatTranscripts').onclick = async () => exportChatPayload();

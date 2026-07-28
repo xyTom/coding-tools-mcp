@@ -39,6 +39,7 @@ from . import __version__
 from .admin import ADMIN_TOOL_NAMES, McpAdminManager, McpManagementError
 from .codex_sessions import import_codex_session_candidates, scan_codex_session_candidates
 from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from .secret_vault import SecretVault, SecretVaultError
 from .settings_store import ServerSettingsStore, SettingsStoreError, default_settings_dir, sanitize_settings
 from .transcript import TranscriptStore
 from .upstream import UpstreamManager
@@ -235,6 +236,7 @@ DEFAULT_CONFIG_DIR_NAME = ".coding-tools-mcp"
 UPSTREAM_CONFIG_FILENAME = "mcp-servers.json"
 SERVER_SETTINGS_FILENAME = "server-settings.json"
 OAUTH_DB_FILENAME = "oauth.sqlite3"
+OAUTH_SECRET_VAULT_FILENAME = "oauth-secrets.json"
 TRANSCRIPT_DB_FILENAME = "transcripts.sqlite3"
 RECENT_TOOL_TRACE_LIMIT = 100
 STARTUP_SETTING_KEYS = {
@@ -248,6 +250,7 @@ STARTUP_SETTING_KEYS = {
     "oauth_password",
     "oauth_server_url",
     "oauth_token_secret",
+    "oauth_compatibility_mode",
     "permission_mode",
     "tool_profile",
     "shell_env_inherit",
@@ -334,7 +337,11 @@ class OAuthConfig:
     admin_scope: str = "admin"
     store: OAuthAuthorizationStore | None = None
     signing_kid: str | None = None
+    signing_keys: dict[str, bytes] = field(default_factory=dict)
+    secret_vault: SecretVault | None = None
     refresh_token_ttl: int = 60 * 60 * 24 * 90
+    compatibility_mode: bool = False
+    compatibility_token_ttl: int = 60 * 60 * 24 * 90
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
@@ -347,6 +354,12 @@ def _oauth_signing_kid(cfg: OAuthConfig) -> str:
     return cfg.signing_kid or f"legacy-{hashlib.sha256(cfg.token_secret).hexdigest()[:16]}"
 
 
+def _oauth_signing_key(cfg: OAuthConfig, kid: str) -> bytes | None:
+    if kid in cfg.signing_keys:
+        return cfg.signing_keys[kid]
+    return cfg.token_secret if secrets.compare_digest(kid, _oauth_signing_kid(cfg)) else None
+
+
 def _create_oauth_token(
     cfg: OAuthConfig,
     server_url: str,
@@ -355,14 +368,16 @@ def _create_oauth_token(
     client_id: str | None = None,
     grant_id: str | None = None,
     token_mode: str = "standard",
+    ttl: int | None = None,
 ) -> str:
     now = int(time.time())
+    ttl = cfg.token_ttl if ttl is None else ttl
     jti = str(uuid.uuid4())
     claims: dict[str, Any] = {
         "iss": server_url,
         "aud": server_url,
         "iat": now,
-        "exp": now + cfg.token_ttl,
+        "exp": now + ttl,
         "scope": scope,
         "jti": jti,
     }
@@ -370,7 +385,7 @@ def _create_oauth_token(
         claims.update({"client_id": client_id, "grant_id": grant_id, "sub": grant_id})
     token = jwt.encode(
         claims,
-        cfg.token_secret,
+        _oauth_signing_key(cfg, _oauth_signing_kid(cfg)) or cfg.token_secret,
         algorithm="HS256",
         headers={"kid": _oauth_signing_kid(cfg)},
     )
@@ -382,7 +397,7 @@ def _create_oauth_token(
             _oauth_signing_kid(cfg),
             scope,
             issued_at=now,
-            expires_at=now + cfg.token_ttl,
+            expires_at=now + ttl,
             token_mode=token_mode,
         )
     return token
@@ -392,9 +407,12 @@ def _decode_oauth_token(token: str, cfg: OAuthConfig, server_url: str) -> dict[s
     try:
         header = jwt.get_unverified_header(token)
         kid = header.get("kid")
-        if kid is not None and (not isinstance(kid, str) or not secrets.compare_digest(kid, _oauth_signing_kid(cfg))):
+        if kid is not None and not isinstance(kid, str):
             return None
-        decoded = jwt.decode(token, cfg.token_secret, algorithms=["HS256"], audience=server_url, issuer=server_url)
+        key = _oauth_signing_key(cfg, kid) if isinstance(kid, str) else cfg.token_secret
+        if key is None:
+            return None
+        decoded = jwt.decode(token, key, algorithms=["HS256"], audience=server_url, issuer=server_url)
     except jwt.PyJWTError:
         return None
     if not isinstance(decoded, dict):
@@ -545,22 +563,50 @@ def write_server_settings(path: Path, settings: dict[str, Any]) -> None:
     ServerSettingsStore(path).write(settings)
 
 
-def _resolve_oauth_token_secret(startup_settings: dict[str, Any], settings_path: Path | None) -> bytes:
-    raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or _settings_text(
-        startup_settings, "oauth_token_secret"
-    ) or ""
+def _oauth_key_secret_ref(kid: str) -> str:
+    return f"oauth-signing/{kid}"
+
+
+def _resolve_oauth_token_secret(
+    startup_settings: dict[str, Any],
+    settings_path: Path | None,
+    *,
+    secret_vault: SecretVault | None = None,
+) -> bytes:
+    env_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or ""
+    raw_secret = env_secret or _settings_text(startup_settings, "oauth_token_secret") or ""
+    secret_ref = _settings_text(startup_settings, "oauth_active_key_secret_ref")
+    if not raw_secret and secret_ref and secret_vault is not None and secret_vault.enabled():
+        try:
+            raw_secret = secret_vault.get_secret(secret_ref)
+        except SecretVaultError as exc:
+            raise ValueError("Configured OAuth signing key cannot be read from the secret vault.") from exc
     if raw_secret:
         try:
-            return bytes.fromhex(raw_secret)
+            token_secret = bytes.fromhex(raw_secret)
         except ValueError as exc:
             raise ValueError(
                 f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET or oauth_token_secret setting must be hex-encoded bytes."
             ) from exc
-    token_secret = secrets.token_bytes(32)
+        if env_secret:
+            return token_secret
+    else:
+        token_secret = secrets.token_bytes(32)
     if settings_path is None:
         return token_secret
     updated_settings = dict(startup_settings)
-    updated_settings["oauth_token_secret"] = token_secret.hex()
+    if secret_vault is not None and secret_vault.enabled():
+        kid = _settings_text(updated_settings, "oauth_active_key_id") or f"key-{hashlib.sha256(token_secret).hexdigest()[:16]}"
+        secret_ref = _oauth_key_secret_ref(kid)
+        try:
+            secret_vault.set_secret(secret_ref, token_secret.hex())
+        except SecretVaultError as exc:
+            raise ValueError("OAuth signing key could not be saved to the secret vault.") from exc
+        updated_settings["oauth_active_key_id"] = kid
+        updated_settings["oauth_active_key_secret_ref"] = secret_ref
+        updated_settings.pop("oauth_token_secret", None)
+    elif not raw_secret:
+        updated_settings["oauth_token_secret"] = token_secret.hex()
     try:
         write_server_settings(settings_path, updated_settings)
     except (OSError, SettingsStoreError) as exc:
@@ -572,10 +618,52 @@ def _resolve_oauth_token_secret(startup_settings: dict[str, Any], settings_path:
         startup_settings.clear()
         startup_settings.update(updated_settings)
         print(
-            f"Generated and saved OAuth token secret to {settings_path}; OAuth tokens can survive restarts.",
+            f"Saved OAuth signing-key configuration to {settings_path}; OAuth tokens can survive restarts.",
             file=sys.stderr,
         )
     return token_secret
+
+
+def _resolve_oauth_refresh_pepper(
+    startup_settings: dict[str, Any],
+    settings_path: Path | None,
+    *,
+    secret_vault: SecretVault | None = None,
+    legacy_seed: bytes | None = None,
+) -> bytes:
+    raw = os.environ.get(f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_PEPPER") or _settings_text(startup_settings, "oauth_refresh_token_pepper") or ""
+    secret_ref = _settings_text(startup_settings, "oauth_refresh_token_pepper_secret_ref")
+    if not raw and secret_ref and secret_vault is not None and secret_vault.enabled():
+        try:
+            raw = secret_vault.get_secret(secret_ref)
+        except SecretVaultError as exc:
+            raise ValueError("Configured OAuth refresh-token pepper cannot be read from the secret vault.") from exc
+    if raw:
+        try:
+            return bytes.fromhex(raw)
+        except ValueError as exc:
+            raise ValueError(f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_PEPPER must be hex-encoded bytes.") from exc
+    pepper = legacy_seed or secrets.token_bytes(32)
+    if settings_path is None:
+        return pepper
+    updated_settings = dict(startup_settings)
+    if secret_vault is not None and secret_vault.enabled():
+        secret_ref = "oauth-refresh/pepper"
+        try:
+            secret_vault.set_secret(secret_ref, pepper.hex())
+        except SecretVaultError as exc:
+            raise ValueError("OAuth refresh-token pepper could not be saved to the secret vault.") from exc
+        updated_settings["oauth_refresh_token_pepper_secret_ref"] = secret_ref
+        updated_settings.pop("oauth_refresh_token_pepper", None)
+    else:
+        updated_settings["oauth_refresh_token_pepper"] = pepper.hex()
+    try:
+        write_server_settings(settings_path, updated_settings)
+    except (OSError, SettingsStoreError) as exc:
+        raise ValueError("OAuth refresh-token pepper could not be persisted.") from exc
+    startup_settings.clear()
+    startup_settings.update(updated_settings)
+    return pepper
 
 
 def effective_workspace_path(args: argparse.Namespace, settings: dict[str, Any] | None = None) -> Path:
@@ -2199,6 +2287,7 @@ class ExecSession:
 @dataclass(frozen=True)
 class PatchCheckpoint:
     checkpoint_id: str
+    workspace_id: str
     operation_id: str
     created_at: float
     summary: str
@@ -2448,6 +2537,71 @@ class Runtime:
 
     def oauth_enabled(self) -> bool:
         return self.oauth_config is not None
+
+    def rotate_oauth_signing_key(self) -> dict[str, Any]:
+        cfg = self.oauth_config
+        if cfg is None or cfg.store is None or cfg.secret_vault is None or not cfg.secret_vault.enabled():
+            raise ToolFailure("OAUTH_KEY_ROTATION_UNAVAILABLE", "OAuth signing-key rotation requires an enabled secret vault.", category="configuration")
+        key_material = secrets.token_bytes(32)
+        kid = f"key-{secrets.token_hex(8)}"
+        secret_ref = _oauth_key_secret_ref(kid)
+        try:
+            cfg.secret_vault.set_secret(secret_ref, key_material.hex())
+            cfg.store.register_signing_key(kid, hashlib.sha256(key_material).hexdigest()[:16], secret_ref=secret_ref, active=True)
+            updated_settings = dict(self.startup_settings)
+            updated_settings["oauth_active_key_id"] = kid
+            updated_settings["oauth_active_key_secret_ref"] = secret_ref
+            updated_settings.pop("oauth_token_secret", None)
+            if self.settings_path is not None:
+                write_server_settings(self.settings_path, updated_settings)
+            self.startup_settings = updated_settings
+        except (OAuthStoreError, SecretVaultError, SettingsStoreError, OSError) as exc:
+            raise ToolFailure("OAUTH_KEY_ROTATION_FAILED", "OAuth signing-key rotation failed.", category="runtime") from exc
+        self.oauth_config = replace(
+            cfg,
+            token_secret=key_material,
+            signing_kid=kid,
+            signing_keys={**cfg.signing_keys, kid: key_material},
+        )
+        return {"kid": kid, "fingerprint": hashlib.sha256(key_material).hexdigest()[:16], "status": "active"}
+
+    def activate_oauth_signing_key(self, kid: str) -> bool:
+        cfg = self.oauth_config
+        if cfg is None or cfg.store is None or kid not in cfg.signing_keys:
+            return False
+        try:
+            if not cfg.store.activate_signing_key(kid):
+                return False
+            updated_settings = dict(self.startup_settings)
+            updated_settings["oauth_active_key_id"] = kid
+            if self.settings_path is not None:
+                write_server_settings(self.settings_path, updated_settings)
+            self.startup_settings = updated_settings
+        except (OAuthStoreError, SettingsStoreError, OSError):
+            return False
+        self.oauth_config = replace(cfg, token_secret=cfg.signing_keys[kid], signing_kid=kid)
+        return True
+
+    def retire_oauth_signing_key(self, kid: str) -> bool:
+        cfg = self.oauth_config
+        if cfg is None or cfg.store is None or secrets.compare_digest(kid, _oauth_signing_kid(cfg)):
+            return False
+        try:
+            return cfg.store.retire_signing_key(kid)
+        except OAuthStoreError:
+            return False
+
+    def revoke_oauth_signing_key(self, kid: str) -> bool:
+        cfg = self.oauth_config
+        if cfg is None or cfg.store is None or secrets.compare_digest(kid, _oauth_signing_kid(cfg)):
+            return False
+        try:
+            changed = cfg.store.revoke_signing_key(kid)
+        except OAuthStoreError:
+            return False
+        if changed:
+            self.oauth_config = replace(cfg, signing_keys={key_id: value for key_id, value in cfg.signing_keys.items() if key_id != kid})
+        return changed
 
     def create_http_session(self) -> str:
         with self.http_session_ids_lock:
@@ -2795,6 +2949,8 @@ class Runtime:
                 "auth_token_configured": self.auth_token is not None,
                 "admin_token_configured": self.admin_token is not None,
                 "oauth_admin_scope": self.oauth_config.admin_scope if self.oauth_config else None,
+                "oauth_compatibility_mode": self.oauth_config.compatibility_mode if self.oauth_config else False,
+                "oauth_secret_vault": self.oauth_config.secret_vault.status_payload() if self.oauth_config and self.oauth_config.secret_vault else {"enabled": False},
                 "allowed_origins": list(self.allowed_origins),
                 "oauth_store": oauth_store_status,
             },
@@ -2823,6 +2979,16 @@ class Runtime:
     def save_startup_settings(self, updates: dict[str, Any]) -> dict[str, Any]:
         if self.settings_path is None:
             return {"ok": False, "error": "Settings path is not configured."}
+        if _settings_text(updates, "oauth_token_secret") and self.oauth_config is not None:
+            if self.oauth_config.secret_vault is None or not self.oauth_config.secret_vault.enabled():
+                return {
+                    "ok": False,
+                    "error": "Refusing to persist an OAuth signing secret without an enabled secret vault. Configure CODING_TOOLS_MCP_SECRETS_KEY or use an environment secret.",
+                }
+            return {
+                "ok": False,
+                "error": "Use Signing Keys to rotate OAuth signing material; direct secret replacement is disabled.",
+            }
         current = dict(self.startup_settings)
         for key, value in updates.items():
             if key not in STARTUP_SETTING_KEYS:
@@ -3960,6 +4126,7 @@ class Runtime:
     ) -> None:
         checkpoint = PatchCheckpoint(
             checkpoint_id=checkpoint_id,
+            workspace_id=self.workspace_id_for_session(),
             operation_id=operation_id,
             created_at=time.time(),
             summary=summary,
@@ -4067,12 +4234,13 @@ class Runtime:
             for rel, content in staged.items():
                 path = self.workspace.resolve_for_write(rel).path
                 backups[rel] = path.read_bytes() if path.exists() and not path.is_dir() else None
-                if rel not in self.patch_baselines:
+                baseline_key = f"{self.workspace_id_for_session()}:{rel}"
+                if baseline_key not in self.patch_baselines:
                     baseline = backups[rel]
                     if baseline is None:
-                        self.patch_baselines[rel] = None
+                        self.patch_baselines[baseline_key] = None
                     else:
-                        self.patch_baselines[rel] = baseline.decode("utf-8", errors="replace")
+                        self.patch_baselines[baseline_key] = baseline.decode("utf-8", errors="replace")
                 if content is None:
                     if path.exists():
                         if path.is_dir():
@@ -4131,6 +4299,8 @@ class Runtime:
             checkpoint = self.patch_checkpoints.get(checkpoint_id)
         if checkpoint is None:
             raise ToolFailure("CHECKPOINT_NOT_FOUND", "Patch checkpoint not found.", category="not_found")
+        if checkpoint.workspace_id != self.workspace_id_for_session():
+            raise ToolFailure("CHECKPOINT_NOT_FOUND", "Patch checkpoint does not belong to the active workspace.", category="not_found")
         self._restore_checkpoint_files(checkpoint.files)
         versions = self._collect_file_versions(set(checkpoint.files))
         return {
@@ -4705,7 +4875,11 @@ class Runtime:
         selected = set(path_filters)
         chunks: list[str] = []
         files: list[dict[str, Any]] = []
-        for rel, before in sorted(self.patch_baselines.items()):
+        key_prefix = f"{self.workspace_id_for_session()}:"
+        for baseline_key, before in sorted(self.patch_baselines.items()):
+            if not baseline_key.startswith(key_prefix):
+                continue
+            rel = baseline_key.removeprefix(key_prefix)
             if selected and rel not in selected:
                 continue
             current_path = self.workspace.resolve_for_write(rel).path
@@ -7462,6 +7636,18 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 changed = store.set_client_enabled(identifier, False)
             elif action == "enable_agent":
                 changed = store.set_client_enabled(identifier, True)
+            elif action == "rotate_signing_key":
+                if identifier != "active":
+                    self.send_json({"ok": False, "error": "rotate_signing_key requires id=active"}, status=400)
+                    return
+                self.send_json({"ok": True, "action": action, "key": self.runtime.rotate_oauth_signing_key()})
+                return
+            elif action == "activate_signing_key":
+                changed = self.runtime.activate_oauth_signing_key(identifier)
+            elif action == "retire_signing_key":
+                changed = self.runtime.retire_oauth_signing_key(identifier)
+            elif action == "revoke_signing_key":
+                changed = self.runtime.revoke_oauth_signing_key(identifier)
             else:
                 self.send_json({"ok": False, "error": "Unsupported OAuth management action"}, status=400)
                 return
@@ -7850,15 +8036,19 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         server_url = str(code_data.get("server_url") or self.oauth_base_url()).rstrip("/")
         scope = str(code_data.get("scope") or "mcp")
         grant_id = code_data.get("grant_id")
+        token_mode = "compatibility" if cfg.compatibility_mode else "standard"
+        access_ttl = cfg.compatibility_token_ttl if cfg.compatibility_mode else cfg.token_ttl
         access_token = _create_oauth_token(
             cfg,
             server_url,
             scope=scope,
             client_id=client_id if isinstance(grant_id, str) else None,
             grant_id=grant_id if isinstance(grant_id, str) else None,
+            token_mode=token_mode,
+            ttl=access_ttl,
         )
-        response: dict[str, Any] = {"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl, "scope": scope}
-        if cfg.store is not None and isinstance(grant_id, str):
+        response: dict[str, Any] = {"access_token": access_token, "token_type": "Bearer", "expires_in": access_ttl, "scope": scope}
+        if cfg.store is not None and isinstance(grant_id, str) and not cfg.compatibility_mode:
             try:
                 _family_id, refresh_token = cfg.store.issue_refresh_token(
                     grant_id,
@@ -8187,19 +8377,35 @@ def run_http(args: argparse.Namespace) -> int:
         ).rstrip("/") or None
         if not env_password:
             print(f"OAuth authorize password: {password}", file=sys.stderr)
+        oauth_vault = SecretVault(config_dir / OAUTH_SECRET_VAULT_FILENAME, os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"))
         try:
-            token_secret = _resolve_oauth_token_secret(startup_settings, settings_path)
+            token_secret = _resolve_oauth_token_secret(startup_settings, settings_path, secret_vault=oauth_vault)
+            refresh_pepper = _resolve_oauth_refresh_pepper(
+                startup_settings,
+                settings_path,
+                secret_vault=oauth_vault,
+                legacy_seed=token_secret,
+            )
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
-        signing_kid = f"legacy-{hashlib.sha256(token_secret).hexdigest()[:16]}"
+        signing_kid = _settings_text(startup_settings, "oauth_active_key_id") or f"key-{hashlib.sha256(token_secret).hexdigest()[:16]}"
+        signing_keys = {signing_kid: token_secret}
         try:
-            oauth_store = OAuthAuthorizationStore(config_dir / OAUTH_DB_FILENAME, pepper=token_secret)
+            oauth_store = OAuthAuthorizationStore(config_dir / OAUTH_DB_FILENAME, pepper=refresh_pepper)
             oauth_store.register_signing_key(
                 signing_kid,
                 hashlib.sha256(token_secret).hexdigest()[:16],
+                secret_ref=_settings_text(startup_settings, "oauth_active_key_secret_ref"),
             )
-        except (OSError, OAuthStoreError) as exc:
+            if oauth_vault.enabled():
+                for key_record in oauth_store.signing_key_refs():
+                    key_id = str(key_record["kid"])
+                    secret_ref = key_record.get("secret_ref")
+                    if key_id == signing_kid or not isinstance(secret_ref, str) or not secret_ref:
+                        continue
+                    signing_keys[key_id] = bytes.fromhex(oauth_vault.get_secret(secret_ref))
+        except (OSError, OAuthStoreError, SecretVaultError, ValueError) as exc:
             print(f"ERROR: OAuth authorization store is unavailable: {exc}", file=sys.stderr)
             return 2
         try:
@@ -8215,6 +8421,11 @@ def run_http(args: argparse.Namespace) -> int:
             token_ttl=token_ttl,
             store=oauth_store,
             signing_kid=signing_kid,
+            signing_keys=signing_keys,
+            secret_vault=oauth_vault if oauth_vault.enabled() else None,
+            compatibility_mode=truthy_env(os.environ.get(f"{ENV_PREFIX}_OAUTH_COMPATIBILITY_MODE"))
+            or bool(startup_settings.get("oauth_compatibility_mode")),
+            compatibility_token_ttl=env_int(f"{ENV_PREFIX}_OAUTH_COMPATIBILITY_TOKEN_TTL", 60 * 60 * 24 * 90),
         )
         if auth_token:
             print(

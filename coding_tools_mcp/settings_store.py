@@ -13,7 +13,7 @@ class SettingsStoreError(RuntimeError):
     pass
 
 
-SECRET_SETTING_KEYS = frozenset({"auth_token", "admin_token", "oauth_password", "oauth_token_secret"})
+SECRET_SETTING_KEYS = frozenset({"auth_token", "admin_token", "oauth_password", "oauth_token_secret", "oauth_refresh_token_pepper"})
 SETTINGS_SCHEMA_VERSION = 1
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
 from coding_tools_mcp.server import OAuthConfig, Runtime, _create_oauth_token, _decode_oauth_token
 from coding_tools_mcp.settings_store import ServerSettingsStore
+from coding_tools_mcp.secret_vault import SecretVault
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 
 
@@ -78,3 +79,34 @@ class OAuthAuthorizationStoreTests(unittest.TestCase):
             self.assertIsNotNone(claims)
             store.revoke_access_token(str(claims["jti"]))
             self.assertIsNone(_decode_oauth_token(token, cfg, "http://127.0.0.1:8765"))
+
+    def test_normal_signing_key_rotation_keeps_old_tokens_verifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            vault = SecretVault(root / "oauth-secrets.json", "test-master-key")
+            vault.set_secret("oauth-signing/key-old", (b"o" * 32).hex())
+            store = OAuthAuthorizationStore(root / "oauth.sqlite3", pepper=b"p" * 32)
+            store.upsert_client("agent-a", display_name="Agent A", redirect_uri="http://127.0.0.1/callback", scopes="mcp")
+            grant_id = store.create_grant("agent-a", "mcp")
+            store.register_signing_key("key-old", "old-fingerprint", secret_ref="oauth-signing/key-old")
+            cfg = OAuthConfig(None, None, "password", "http://127.0.0.1:8765", b"o" * 32, store=store, signing_kid="key-old", signing_keys={"key-old": b"o" * 32}, secret_vault=vault)
+            runtime = Runtime(root, oauth_config=cfg, settings_path=root / "server-settings.json")
+            old_token = _create_oauth_token(runtime.oauth_config, "http://127.0.0.1:8765", client_id="agent-a", grant_id=grant_id)
+
+            rotated = runtime.rotate_oauth_signing_key()
+
+            self.assertEqual(rotated["status"], "active")
+            self.assertIsNotNone(_decode_oauth_token(old_token, runtime.oauth_config, "http://127.0.0.1:8765"))
+            self.assertEqual(store.list_signing_keys()[0]["status"], "active")
+
+    def test_webui_refuses_new_oauth_secret_without_secret_vault(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = Runtime(
+                root,
+                oauth_config=OAuthConfig(None, None, "password", None, b"s" * 32),
+                settings_path=root / "server-settings.json",
+            )
+            response = runtime.save_startup_settings({"oauth_token_secret": "COMPLIANCE_SHOULD_NOT_LEAK"})
+            self.assertFalse(response["ok"])
+            self.assertNotIn("COMPLIANCE_SHOULD_NOT_LEAK", str(response))

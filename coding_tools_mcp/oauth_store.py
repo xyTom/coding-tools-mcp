@@ -56,7 +56,7 @@ class RefreshTokenResult:
 class OAuthAuthorizationStore:
     """SQLite-backed authorization state with fail-closed query helpers."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: str | Path, *, pepper: bytes) -> None:
         if not pepper:
@@ -84,6 +84,10 @@ class OAuthAuthorizationStore:
                 if current > self.SCHEMA_VERSION:
                     raise OAuthStoreError("OAuth authorization database was created by a newer server version.")
                 if current == self.SCHEMA_VERSION:
+                    return
+                if current == 1:
+                    conn.execute("ALTER TABLE oauth_signing_keys ADD COLUMN secret_ref TEXT")
+                    conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
                     return
                 conn.executescript(
                     """
@@ -153,6 +157,7 @@ class OAuthAuthorizationStore:
                     CREATE TABLE oauth_signing_keys (
                         kid TEXT PRIMARY KEY,
                         algorithm TEXT NOT NULL,
+                        secret_ref TEXT,
                         fingerprint TEXT NOT NULL,
                         status TEXT NOT NULL,
                         created_at REAL NOT NULL,
@@ -236,15 +241,58 @@ class OAuthAuthorizationStore:
             self._audit(conn, "grant_created", client_id=client_id, grant_id=grant_id, actor_kind="user", details={"scopes": scopes})
         return grant_id
 
-    def register_signing_key(self, kid: str, fingerprint: str, *, algorithm: str = "HS256", active: bool = True) -> None:
+    def register_signing_key(
+        self,
+        kid: str,
+        fingerprint: str,
+        *,
+        secret_ref: str | None = None,
+        algorithm: str = "HS256",
+        active: bool = True,
+    ) -> None:
         now = time.time()
         with self._connect() as conn:
             if active:
                 conn.execute("UPDATE oauth_signing_keys SET status='retired', retired_at=? WHERE status='active' AND kid <> ?", (now, kid))
             conn.execute(
-                "INSERT INTO oauth_signing_keys(kid, algorithm, fingerprint, status, created_at, activated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(kid) DO UPDATE SET fingerprint=excluded.fingerprint, status=excluded.status, activated_at=excluded.activated_at",
-                (kid, algorithm, fingerprint, "active" if active else "retired", now, now if active else None),
+                "INSERT INTO oauth_signing_keys(kid, algorithm, secret_ref, fingerprint, status, created_at, activated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(kid) DO UPDATE SET secret_ref=COALESCE(excluded.secret_ref, oauth_signing_keys.secret_ref), fingerprint=excluded.fingerprint, status=excluded.status, activated_at=excluded.activated_at",
+                (kid, algorithm, secret_ref, fingerprint, "active" if active else "retired", now, now if active else None),
             )
+
+    def activate_signing_key(self, kid: str) -> bool:
+        now = time.time()
+        with self._connect() as conn:
+            row = conn.execute("SELECT status FROM oauth_signing_keys WHERE kid=?", (kid,)).fetchone()
+            if row is None or row["status"] == "revoked":
+                return False
+            conn.execute("UPDATE oauth_signing_keys SET status='retired', retired_at=? WHERE status='active' AND kid<>?", (now, kid))
+            conn.execute("UPDATE oauth_signing_keys SET status='active', activated_at=?, retired_at=NULL WHERE kid=?", (now, kid))
+            self._audit(conn, "signing_key_activated", key_id=kid, actor_kind="admin", details={})
+            return True
+
+    def retire_signing_key(self, kid: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT status FROM oauth_signing_keys WHERE kid=?", (kid,)).fetchone()
+            if row is None or row["status"] != "active":
+                return False
+            conn.execute("UPDATE oauth_signing_keys SET status='retired', retired_at=? WHERE kid=?", (time.time(), kid))
+            self._audit(conn, "signing_key_retired", key_id=kid, actor_kind="admin", details={})
+            return True
+
+    def revoke_signing_key(self, kid: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT kid FROM oauth_signing_keys WHERE kid=?", (kid,)).fetchone()
+            if row is None:
+                return False
+            now = time.time()
+            conn.execute("UPDATE oauth_signing_keys SET status='revoked', revoked_at=COALESCE(revoked_at,?) WHERE kid=?", (now, kid))
+            conn.execute("UPDATE oauth_access_tokens SET revoked_at=COALESCE(revoked_at,?), revoke_reason=COALESCE(revoke_reason,'signing_key_revoked') WHERE signing_kid=?", (now, kid))
+            self._audit(conn, "signing_key_revoked", key_id=kid, actor_kind="admin", details={"severity": "high"})
+            return True
+
+    def signing_key_refs(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT kid, secret_ref, status FROM oauth_signing_keys WHERE status IN ('active','retired') ORDER BY created_at").fetchall()]
 
     def signing_key_is_usable(self, kid: str) -> bool:
         with self._connect() as conn:
