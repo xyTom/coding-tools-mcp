@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
-from coding_tools_mcp.server import OAuthConfig, Runtime, _create_oauth_token, _decode_oauth_token
+from coding_tools_mcp.server import OAuthConfig, Runtime, _create_oauth_token, _decode_oauth_token, _resolve_oauth_token_secret
 from coding_tools_mcp.settings_store import ServerSettingsStore
 from coding_tools_mcp.secret_vault import SecretVault
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
@@ -110,3 +110,18 @@ class OAuthAuthorizationStoreTests(unittest.TestCase):
             response = runtime.save_startup_settings({"oauth_token_secret": "COMPLIANCE_SHOULD_NOT_LEAK"})
             self.assertFalse(response["ok"])
             self.assertNotIn("COMPLIANCE_SHOULD_NOT_LEAK", str(response))
+
+    def test_secret_vault_migrates_signing_key_without_plaintext_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings_path = root / "server-settings.json"
+            vault = SecretVault(root / "oauth-secrets.json", "test-master-key")
+            settings: dict[str, object] = {}
+            first = _resolve_oauth_token_secret(settings, settings_path, secret_vault=vault)
+            persisted = ServerSettingsStore(settings_path).read()
+
+            self.assertNotIn("oauth_token_secret", persisted)
+            self.assertTrue(persisted["oauth_active_key_secret_ref"])
+            self.assertEqual(vault.get_secret(str(persisted["oauth_active_key_secret_ref"])), first.hex())
+            restarted = _resolve_oauth_token_secret(persisted, settings_path, secret_vault=vault)
+            self.assertEqual(restarted, first)
