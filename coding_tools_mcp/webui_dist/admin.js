@@ -267,6 +267,25 @@ const $ = (id) => document.getElementById(id);
       return data;
     }
 
+    async function refreshOAuthAgents() {
+      try {
+        const authHeaders = headers();
+        const [agentsRes, auditRes] = await Promise.all([
+          fetch('/api/admin/oauth/agents', { headers:authHeaders }),
+          fetch('/api/admin/oauth/audit', { headers:authHeaders }),
+        ]);
+        const agents = await agentsRes.json();
+        const audit = await auditRes.json();
+        if (!agentsRes.ok || !auditRes.ok) throw agents.error || audit.error || 'OAuth API unavailable';
+        const items = agents.agents || [];
+        setHtml('oauthAgents', items.map((agent) => `<tr><td>${esc(agent.display_name || agent.client_id)}</td><td><code>${esc(agent.client_id)}</code></td><td>${esc(agent.allowed_scopes || '')}</td><td>${Number(agent.active_access_tokens || 0)}</td><td>${Number(agent.active_refresh_families || 0)}</td><td>${agent.enabled ? '启用' : '已禁用'}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无已授权 Agent</td></tr>');
+        setText('oauthAudit', JSON.stringify(audit.events || [], null, 2));
+      } catch (err) {
+        setHtml('oauthAgents', '<tr><td colspan="6" class="muted">无法读取 OAuth Agent；请确认管理员凭据。</td></tr>');
+        setText('oauthAudit', String(err));
+      }
+    }
+
     async function callTool(name, args = {}) {
       return withBusy(name, async () => {
         const data = await api('/api/admin/tool', { name, arguments: args });
@@ -488,6 +507,14 @@ const $ = (id) => document.getElementById(id);
       };
       const tokenSecret = $('settingsOAuthTokenSecret').value.trim();
       if (tokenSecret) settings.oauth_token_secret = tokenSecret;
+      const rawCatalog = $('settingsWorkspaceCatalog').value.trim();
+      if (rawCatalog) {
+        const catalog = JSON.parse(rawCatalog);
+        if (!Array.isArray(catalog)) throw new Error('Workspace Catalog 必须是 JSON 数组');
+        settings.workspace_catalog = catalog;
+        const chosen = catalog.find((item) => item && item.default);
+        if (chosen?.id) settings.default_workspace_id = chosen.id;
+      }
       return settings;
     }
 
@@ -534,10 +561,12 @@ const $ = (id) => document.getElementById(id);
       renderChatConversations();
       renderMcpRequests(data.recent_mcp_requests || []);
       renderCalls(data.recent_tool_calls || []);
+      refreshOAuthAgents();
       setValue('defaultCwd', data.runtime?.default_cwd_display || '.');
       renderSessionOverview(data, contextCount, projectCount);
       const startup = data.startup_settings || {};
       setValue('settingsWorkspace', data.runtime?.workspace || '');
+      setValue('settingsWorkspaceCatalog', JSON.stringify(data.runtime?.workspace_catalog?.workspaces || [], null, 2));
       setValue('settingsHost', data.server?.host || '');
       setValue('settingsPort', data.server?.port || '');
       const allowedOrigins = Object.prototype.hasOwnProperty.call(startup, 'allowed_origins')
@@ -1116,6 +1145,7 @@ const $ = (id) => document.getElementById(id);
         await refreshStatus();
       };
       $('reloadUpstream').onclick = async () => { out(await api('/api/admin/runtime', { reload_upstream:true })); await refreshStatus(); };
+      $('refreshOAuthAgents').onclick = () => { refreshOAuthAgents(); };
       $('setDefaultCwd').onclick = async () => { out(await api('/api/admin/runtime', { default_cwd:$('defaultCwd').value })); await refreshStatus(); };
       $('exportAllTranscripts').onclick = async () => exportTranscriptPayload();
       $('exportAllChatTranscripts').onclick = async () => exportChatPayload();

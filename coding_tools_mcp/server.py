@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -37,9 +38,12 @@ import jwt
 from . import __version__
 from .admin import ADMIN_TOOL_NAMES, McpAdminManager, McpManagementError
 from .codex_sessions import import_codex_session_candidates, scan_codex_session_candidates
+from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from .settings_store import ServerSettingsStore, SettingsStoreError, default_settings_dir, sanitize_settings
 from .transcript import TranscriptStore
 from .upstream import UpstreamManager
 from .webui import admin_asset_response, admin_console_html
+from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -230,12 +234,15 @@ RUNTIME_ROOT_DIR_NAME = "coding-tools-mcp"
 DEFAULT_CONFIG_DIR_NAME = ".coding-tools-mcp"
 UPSTREAM_CONFIG_FILENAME = "mcp-servers.json"
 SERVER_SETTINGS_FILENAME = "server-settings.json"
+OAUTH_DB_FILENAME = "oauth.sqlite3"
 TRANSCRIPT_DB_FILENAME = "transcripts.sqlite3"
 RECENT_TOOL_TRACE_LIMIT = 100
 STARTUP_SETTING_KEYS = {
     "host",
     "port",
     "workspace",
+    "workspace_catalog",
+    "default_workspace_id",
     "auth_token",
     "admin_token",
     "oauth_password",
@@ -325,6 +332,9 @@ class OAuthConfig:
     token_secret: bytes
     token_ttl: int = OAUTH_TOKEN_TTL_SECONDS
     admin_scope: str = "admin"
+    store: OAuthAuthorizationStore | None = None
+    signing_kid: str | None = None
+    refresh_token_ttl: int = 60 * 60 * 24 * 90
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
@@ -333,21 +343,71 @@ def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
     return secrets.compare_digest(expected, code_challenge)
 
 
-def _create_oauth_token(cfg: OAuthConfig, server_url: str, *, scope: str = "mcp") -> str:
+def _oauth_signing_kid(cfg: OAuthConfig) -> str:
+    return cfg.signing_kid or f"legacy-{hashlib.sha256(cfg.token_secret).hexdigest()[:16]}"
+
+
+def _create_oauth_token(
+    cfg: OAuthConfig,
+    server_url: str,
+    *,
+    scope: str = "mcp",
+    client_id: str | None = None,
+    grant_id: str | None = None,
+    token_mode: str = "standard",
+) -> str:
     now = int(time.time())
-    return jwt.encode(
-        {"iss": server_url, "aud": server_url, "iat": now, "exp": now + cfg.token_ttl, "scope": scope},
+    jti = str(uuid.uuid4())
+    claims: dict[str, Any] = {
+        "iss": server_url,
+        "aud": server_url,
+        "iat": now,
+        "exp": now + cfg.token_ttl,
+        "scope": scope,
+        "jti": jti,
+    }
+    if client_id and grant_id:
+        claims.update({"client_id": client_id, "grant_id": grant_id, "sub": grant_id})
+    token = jwt.encode(
+        claims,
         cfg.token_secret,
         algorithm="HS256",
+        headers={"kid": _oauth_signing_kid(cfg)},
     )
+    if cfg.store is not None and client_id and grant_id:
+        cfg.store.record_access_token(
+            jti,
+            grant_id,
+            client_id,
+            _oauth_signing_kid(cfg),
+            scope,
+            issued_at=now,
+            expires_at=now + cfg.token_ttl,
+            token_mode=token_mode,
+        )
+    return token
 
 
 def _decode_oauth_token(token: str, cfg: OAuthConfig, server_url: str) -> dict[str, Any] | None:
     try:
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        if kid is not None and (not isinstance(kid, str) or not secrets.compare_digest(kid, _oauth_signing_kid(cfg))):
+            return None
         decoded = jwt.decode(token, cfg.token_secret, algorithms=["HS256"], audience=server_url, issuer=server_url)
     except jwt.PyJWTError:
         return None
-    return decoded if isinstance(decoded, dict) else None
+    if not isinstance(decoded, dict):
+        return None
+    # Tokens minted before the persisted store lack a jti.  They retain the
+    # existing expiry-bound migration path but cannot be individually revoked.
+    if cfg.store is not None and isinstance(decoded.get("jti"), str):
+        try:
+            if not cfg.store.access_token_is_active(decoded["jti"]):
+                return None
+        except OAuthStoreError:
+            return None
+    return decoded
 
 
 def _validate_oauth_token(token: str, cfg: OAuthConfig, server_url: str) -> bool:
@@ -478,18 +538,11 @@ def _settings_text(settings: dict[str, Any], key: str) -> str | None:
 
 
 def read_server_settings(path: Path) -> dict[str, Any]:
-    try:
-        if not path.exists():
-            return {}
-        parsed = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    return ServerSettingsStore(path).read()
 
 
 def write_server_settings(path: Path, settings: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    ServerSettingsStore(path).write(settings)
 
 
 def _resolve_oauth_token_secret(startup_settings: dict[str, Any], settings_path: Path | None) -> bytes:
@@ -510,7 +563,7 @@ def _resolve_oauth_token_secret(startup_settings: dict[str, Any], settings_path:
     updated_settings["oauth_token_secret"] = token_secret.hex()
     try:
         write_server_settings(settings_path, updated_settings)
-    except OSError as exc:
+    except (OSError, SettingsStoreError) as exc:
         print(
             f"WARNING: generated OAuth token secret could not be saved to {settings_path}: {exc}",
             file=sys.stderr,
@@ -566,7 +619,7 @@ def resolve_config_paths(args: argparse.Namespace, workspace: Path) -> tuple[Pat
     elif upstream_config:
         config_dir = Path(str(upstream_config)).expanduser().parent
     else:
-        config_dir = workspace / DEFAULT_CONFIG_DIR_NAME
+        config_dir = default_settings_dir()
     upstream_path = Path(str(upstream_config)).expanduser() if upstream_config else config_dir / UPSTREAM_CONFIG_FILENAME
     return config_dir, upstream_path, config_dir / SERVER_SETTINGS_FILENAME
 
@@ -2176,8 +2229,12 @@ class Runtime:
         server_port: int | None = None,
         admin_ui_enabled: bool = False,
         allowed_origins: tuple[str, ...] = (),
+        workspace_catalog: WorkspaceCatalog | None = None,
     ) -> None:
-        self.workspace = Workspace(workspace)
+        self.workspace_catalog = workspace_catalog or WorkspaceCatalog.single(workspace)
+        self._workspace_adapters = {entry.id: Workspace(entry.root) for entry in self.workspace_catalog.entries}
+        self._default_workspace_id = self.workspace_catalog.default_id
+        self._workspace = self._workspace_adapters[self._default_workspace_id]
         self.enable_view_image = enable_view_image
         if dangerously_skip_all_permissions:
             permission_mode = "dangerous"
@@ -2217,19 +2274,20 @@ class Runtime:
         self.upstream_config_path = upstream_config_path
         self.settings_path = settings_path
         self.startup_settings = dict(startup_settings or {})
-        transcript_dir = self.config_dir or (self.workspace.root / DEFAULT_CONFIG_DIR_NAME)
+        transcript_dir = self.config_dir or (self._workspace.root / DEFAULT_CONFIG_DIR_NAME)
         self.transcript_store = TranscriptStore(transcript_dir / TRANSCRIPT_DB_FILENAME)
         self.server_host = server_host
         self.server_port = server_port
         self.admin_ui_enabled = admin_ui_enabled
         self.allowed_origins = allowed_origins
         self.server_instance_id = secrets.token_urlsafe(12)
-        self._set_runtime_dir(runtime_dir_for_workspace(self.workspace.root, self.server_instance_id))
-        self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(self.workspace.root, self.server_instance_id)
+        self._set_runtime_dir(runtime_dir_for_workspace(self._workspace.root, self.server_instance_id))
+        self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(self._workspace.root, self.server_instance_id)
         self._pending_codes: dict[str, dict[str, Any]] = {}
         self._pending_codes_lock = threading.Lock()
-        self.default_cwd = self.workspace.root
+        self.default_cwd = self._workspace.root
         self.session_default_cwds: dict[str, Path] = {}
+        self.session_workspace_ids: dict[str, str] = {}
         self.session_default_cwds_lock = threading.Lock()
         self._tool_context = threading.local()
         self.sessions: dict[str, ExecSession] = {}
@@ -2249,6 +2307,34 @@ class Runtime:
         self.initialized = False
         self.logging_level = "warning"
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
+
+    @property
+    def workspace(self) -> Workspace:
+        session_id = getattr(self._tool_context, "session_id", None) if hasattr(self, "_tool_context") else None
+        if isinstance(session_id, str):
+            with self.session_default_cwds_lock:
+                workspace_id = self.session_workspace_ids.get(session_id, self._default_workspace_id)
+            return self._workspace_adapters.get(workspace_id, self._workspace)
+        return self._workspace
+
+    def workspace_id_for_session(self, session_id: str | None = None) -> str:
+        session_id = session_id or self.current_tool_session_id()
+        if session_id:
+            with self.session_default_cwds_lock:
+                return self.session_workspace_ids.get(session_id, self._default_workspace_id)
+        return self._default_workspace_id
+
+    def set_http_session_workspace(self, session_id: str, workspace_id: str) -> dict[str, Any]:
+        if not self.has_http_session(session_id):
+            raise ToolFailure("UNKNOWN_SESSION", "Unknown MCP session.", category="validation")
+        try:
+            entry = self.workspace_catalog.get(workspace_id)
+        except WorkspaceCatalogError as exc:
+            raise ToolFailure("INVALID_WORKSPACE", str(exc), category="validation") from exc
+        with self.session_default_cwds_lock:
+            self.session_workspace_ids[session_id] = entry.id
+            self.session_default_cwds[session_id] = entry.root
+        return {"session_id": session_id, "workspace": entry.payload(), "default_cwd": "."}
 
     def _set_runtime_dir(self, runtime_dir: Path) -> None:
         self.runtime_dir = runtime_dir
@@ -2369,6 +2455,9 @@ class Runtime:
             while session_id in self.http_session_ids:
                 session_id = secrets.token_urlsafe(24)
             self.http_session_ids.add(session_id)
+            with self.session_default_cwds_lock:
+                self.session_workspace_ids[session_id] = self._default_workspace_id
+                self.session_default_cwds[session_id] = self._workspace.root
             return session_id
 
     def has_http_session(self, session_id: str) -> bool:
@@ -2382,8 +2471,10 @@ class Runtime:
 
     def http_session_default_cwd(self, session_id: str) -> tuple[Path, str]:
         with self.session_default_cwds_lock:
-            path = self.session_default_cwds.get(session_id, self.default_cwd)
-        return path, normalize_rel_display(path, self.workspace.root)
+            workspace_id = self.session_workspace_ids.get(session_id, self._default_workspace_id)
+            workspace = self._workspace_adapters.get(workspace_id, self._workspace)
+            path = self.session_default_cwds.get(session_id, workspace.root)
+        return path, normalize_rel_display(path, workspace.root)
 
     def record_mcp_http_access(
         self,
@@ -2401,6 +2492,8 @@ class Runtime:
             session_id = self.http_session_id
         now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         cwd, cwd_display = self.http_session_default_cwd(session_id)
+        workspace_id = self.workspace_id_for_session(session_id)
+        workspace = self._workspace_adapters.get(workspace_id, self._workspace)
         with self.http_session_ids_lock:
             self.http_session_ids.add(session_id)
         request_event = {
@@ -2414,7 +2507,8 @@ class Runtime:
             "remote_addr": remote_addr,
             "user_agent": user_agent,
             "protocol_version": protocol_version,
-            "workspace": str(self.workspace.root),
+            "workspace": str(workspace.root),
+            "workspace_id": workspace_id,
             "default_cwd": str(cwd),
             "default_cwd_display": cwd_display,
         }
@@ -2438,7 +2532,8 @@ class Runtime:
             current["protocol_version"] = protocol_version
             current["default_cwd"] = str(cwd)
             current["default_cwd_display"] = cwd_display
-            current["workspace"] = str(self.workspace.root)
+            current["workspace"] = str(workspace.root)
+            current["workspace_id"] = workspace_id
         with self.recent_mcp_requests_lock:
             self.recent_mcp_requests.append(request_event)
             if len(self.recent_mcp_requests) > RECENT_MCP_REQUEST_LIMIT:
@@ -2486,7 +2581,7 @@ class Runtime:
 
     def workspace_ref_payload(self) -> dict[str, Any]:
         return {
-            "workspace_id": workspace_runtime_hash(self.workspace.root),
+            "workspace_id": self.workspace_id_for_session(),
             "root": str(self.workspace.root),
             "server_instance_id": self.server_instance_id,
         }
@@ -2650,11 +2745,20 @@ class Runtime:
         http_sessions = self.http_sessions_payload()
         with self.session_default_cwds_lock:
             session_cwds = {session: str(path) for session, path in self.session_default_cwds.items()}
-        startup_settings = dict(self.startup_settings)
-        for secret_key in ("auth_token", "admin_token", "oauth_password", "oauth_token_secret"):
-            if _settings_text(startup_settings, secret_key):
-                startup_settings[f"{secret_key}_configured"] = True
-                startup_settings.pop(secret_key, None)
+        startup_settings = sanitize_settings(self.startup_settings)
+        oauth_store_status: dict[str, Any] = {"available": False}
+        if self.oauth_config is not None and self.oauth_config.store is not None:
+            try:
+                oauth_store_status = {
+                    "available": True,
+                    "database": str(self.oauth_config.store.path),
+                    "active_key_id": _oauth_signing_kid(self.oauth_config),
+                    "clients": len(self.oauth_config.store.list_clients()),
+                    "grants": len(self.oauth_config.store.list_grants()),
+                    "access_tokens": len(self.oauth_config.store.list_access_tokens()),
+                }
+            except OAuthStoreError as exc:
+                oauth_store_status = {"available": False, "error": str(exc)}
         local_names = self.local_exposed_tool_names()
         upstream_names = self.upstream_manager.tool_names(tool_profile=self.tool_profile)
         admin_names = self.admin_tool_names()
@@ -2692,9 +2796,12 @@ class Runtime:
                 "admin_token_configured": self.admin_token is not None,
                 "oauth_admin_scope": self.oauth_config.admin_scope if self.oauth_config else None,
                 "allowed_origins": list(self.allowed_origins),
+                "oauth_store": oauth_store_status,
             },
             "runtime": {
                 "workspace": str(self.workspace.root),
+                "active_workspace_id": self.workspace_id_for_session(),
+                "workspace_catalog": self.workspace_catalog.payload(),
                 "default_cwd": str(self.default_cwd),
                 "default_cwd_display": self.default_cwd_display(),
                 "runtime_dir": str(self.runtime_dir),
@@ -2730,9 +2837,23 @@ class Runtime:
                 current.pop(key, None)
             else:
                 current[key] = value
+        if "workspace_catalog" in updates or "default_workspace_id" in updates:
+            try:
+                catalog = WorkspaceCatalog.from_settings(current, self._workspace.root)
+            except WorkspaceCatalogError as exc:
+                return {"ok": False, "error": str(exc)}
+            current.update(catalog.settings_payload())
+            # Keep the legacy key during the migration window so an older
+            # server can still start with the catalog default.
+            current["workspace"] = str(catalog.default().root)
         write_server_settings(self.settings_path, current)
         self.startup_settings = current
-        return {"ok": True, "requires_restart": True, "restart_command": self.restart_command(), "settings": current}
+        return {
+            "ok": True,
+            "requires_restart": True,
+            "restart_command": self.restart_command(),
+            "settings": sanitize_settings(current),
+        }
 
     def apply_runtime_update(self, request: dict[str, Any]) -> dict[str, Any]:
         changes: dict[str, Any] = {}
@@ -5735,8 +5856,11 @@ def guard_allow_roots() -> list[str]:
             resolved = Path(item).resolve()
         except OSError:
             continue
-        if resolved.is_dir() and is_default_system_path_root(resolved):
-            roots.add(str(resolved))
+        try:
+            if resolved.is_dir() and is_default_system_path_root(resolved):
+                roots.add(str(resolved))
+        except OSError:
+            continue
     for item in os.environ.get(f"{ENV_PREFIX}_EXEC_ALLOW_ROOTS", "").split(os.pathsep):
         if not item:
             continue
@@ -5744,8 +5868,11 @@ def guard_allow_roots() -> list[str]:
             resolved = Path(item).expanduser().resolve()
         except OSError:
             continue
-        if resolved.is_dir():
-            roots.add(str(resolved))
+        try:
+            if resolved.is_dir():
+                roots.add(str(resolved))
+        except OSError:
+            continue
     return sorted(root for root in roots if root and Path(root).is_absolute())
 
 
@@ -6836,6 +6963,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return
             self.send_json(self.runtime.admin_status_payload(base_url=self.oauth_base_url()))
             return
+        if normalized.startswith("/api/admin/oauth/"):
+            self.handle_oauth_admin_get(normalized)
+            return
         self.handle_metadata_request(head_only=False)
 
     def do_HEAD(self) -> None:
@@ -6920,6 +7050,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         if normalized == "/api/admin/runtime":
             self.handle_admin_runtime()
+            return
+        if normalized == "/api/admin/workspaces/session":
+            self.handle_admin_workspace_session()
+            return
+        if normalized == "/api/admin/oauth/actions":
+            self.handle_oauth_admin_action()
             return
         if normalized == "/oauth/authorize":
             self.handle_oauth_authorize_post()
@@ -7252,6 +7388,88 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         except ToolFailure as exc:
             self.send_json({"ok": False, "error": exc.message, "code": exc.code, "details": exc.details}, status=400)
 
+    def handle_admin_workspace_session(self) -> None:
+        if not self.is_admin_request():
+            self.send_admin_unauthorized()
+            return
+        request = self._read_admin_json_body()
+        if request is None:
+            return
+        session_id = request.get("session_id")
+        workspace_id = request.get("workspace_id")
+        if not isinstance(session_id, str) or not isinstance(workspace_id, str):
+            self.send_json({"ok": False, "error": "session_id and workspace_id are required"}, status=400)
+            return
+        try:
+            payload = self.runtime.set_http_session_workspace(session_id, workspace_id)
+        except ToolFailure as exc:
+            self.send_json({"ok": False, "error": exc.message, "code": exc.code}, status=400)
+            return
+        self.send_json({"ok": True, **payload})
+
+    def handle_oauth_admin_get(self, path: str) -> None:
+        if not self.is_admin_request():
+            self.send_admin_unauthorized()
+            return
+        store = self.runtime.oauth_config.store if self.runtime.oauth_config is not None else None
+        if store is None:
+            self.send_json({"ok": False, "error": "OAuth authorization store is not enabled"}, status=404)
+            return
+        try:
+            if path == "/api/admin/oauth/agents":
+                self.send_json({"ok": True, "agents": store.list_clients()})
+            elif path == "/api/admin/oauth/grants":
+                self.send_json({"ok": True, "grants": store.list_grants()})
+            elif path == "/api/admin/oauth/tokens":
+                self.send_json({"ok": True, "tokens": store.list_access_tokens()})
+            elif path == "/api/admin/oauth/signing-keys":
+                self.send_json({"ok": True, "keys": store.list_signing_keys()})
+            elif path == "/api/admin/oauth/audit":
+                self.send_json({"ok": True, "events": store.list_audit_events()})
+            else:
+                self.send_json({"ok": False, "error": "Unknown OAuth management endpoint"}, status=404)
+        except OAuthStoreError:
+            self.send_json({"ok": False, "error": "OAuth authorization store is unavailable", "code": "OAUTH_STORE_UNAVAILABLE"}, status=503)
+
+    def handle_oauth_admin_action(self) -> None:
+        if not self.is_admin_request():
+            self.send_admin_unauthorized()
+            return
+        origin = self.headers.get("Origin")
+        if origin and not is_allowed_origin(origin, auth_enabled=True, allowed_origins=self.runtime.allowed_origins):
+            self.send_json({"ok": False, "error": "Origin denied"}, status=403)
+            return
+        request = self._read_admin_json_body()
+        if request is None:
+            return
+        store = self.runtime.oauth_config.store if self.runtime.oauth_config is not None else None
+        if store is None:
+            self.send_json({"ok": False, "error": "OAuth authorization store is not enabled"}, status=404)
+            return
+        action = request.get("action")
+        identifier = request.get("id")
+        if not isinstance(action, str) or not isinstance(identifier, str):
+            self.send_json({"ok": False, "error": "action and id are required"}, status=400)
+            return
+        try:
+            if action == "revoke_access_token":
+                changed = store.revoke_access_token(identifier)
+            elif action == "revoke_grant":
+                changed = store.revoke_grant(identifier)
+            elif action == "revoke_refresh_family":
+                changed = store.revoke_refresh_family(identifier)
+            elif action == "disable_agent":
+                changed = store.set_client_enabled(identifier, False)
+            elif action == "enable_agent":
+                changed = store.set_client_enabled(identifier, True)
+            else:
+                self.send_json({"ok": False, "error": "Unsupported OAuth management action"}, status=400)
+                return
+        except OAuthStoreError:
+            self.send_json({"ok": False, "error": "OAuth authorization store is unavailable", "code": "OAUTH_STORE_UNAVAILABLE"}, status=503)
+            return
+        self.send_json({"ok": True, "changed": changed, "action": action})
+
     def oauth_base_url(self) -> str:
         cfg = self.runtime.oauth_config
         if cfg is not None and cfg.server_url:
@@ -7407,6 +7625,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not _oauth_client_id_allowed(client_id, cfg):
             self._send_html("<h2>Error</h2><p>Unknown client_id</p>", status=400)
             return
+        if cfg.store is not None:
+            try:
+                OAuthAuthorizationStore.validate_client_id(client_id)
+                OAuthAuthorizationStore.validate_redirect_uri(redirect_uri)
+            except ValueError:
+                self._send_html("<h2>Error</h2><p>Invalid client or redirect URI</p>", status=400)
+                return
         if code_challenge_method != "S256" or not code_challenge:
             self._send_html("<h2>Error</h2><p>code_challenge_method must be S256 and code_challenge is required</p>", status=400)
             return
@@ -7465,6 +7690,23 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 code_challenge_method=code_challenge_method, state=state, scope=scope, error="Invalid password",
             ), status=401)
             return
+        grant_id: str | None = None
+        if cfg.store is not None:
+            try:
+                cfg.store.upsert_client(
+                    client_id,
+                    display_name=client_id,
+                    redirect_uri=redirect_uri,
+                    scopes=scope,
+                )
+                grant_id = cfg.store.create_grant(client_id, scope)
+            except (OAuthStoreError, ValueError):
+                self._send_html(self._oauth_login_page(
+                    client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
+                    code_challenge_method=code_challenge_method, state=state, scope=scope,
+                    error="Invalid or disabled OAuth client",
+                ), status=400)
+                return
 
         code = secrets.token_urlsafe(32)
         now = time.time()
@@ -7478,6 +7720,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "redirect_uri": redirect_uri,
                 "state": state,
                 "scope": scope,
+                "grant_id": grant_id,
                 "expires_at": now + OAUTH_CODE_TTL_SECONDS,
                 "server_url": self.oauth_base_url(),
             }
@@ -7534,8 +7777,43 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
 
+        if grant_type == "refresh_token":
+            refresh_token = _p("refresh_token")
+            if cfg.store is None or not refresh_token:
+                _err("invalid_grant", "Invalid refresh token")
+                return
+            try:
+                refreshed = cfg.store.rotate_refresh_token(refresh_token, expires_at=time.time() + cfg.refresh_token_ttl)
+            except OAuthStoreError:
+                _err("invalid_grant", "Refresh token store is unavailable")
+                return
+            if refreshed is None:
+                _err("invalid_grant", "Invalid, expired, or reused refresh token")
+                return
+            if not client_id or not secrets.compare_digest(client_id, refreshed.client_id):
+                _err("invalid_client", "client_id mismatch")
+                return
+            if cfg.client_secret is not None and not secrets.compare_digest(client_secret, cfg.client_secret):
+                _err("invalid_client", "Invalid client_secret")
+                return
+            server_url = self.oauth_base_url().rstrip("/")
+            access_token = _create_oauth_token(
+                cfg,
+                server_url,
+                scope=refreshed.scopes,
+                client_id=refreshed.client_id,
+                grant_id=refreshed.grant_id,
+            )
+            self.send_json({
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": cfg.token_ttl,
+                "scope": refreshed.scopes,
+                "refresh_token": refreshed.token,
+            })
+            return
         if grant_type != "authorization_code":
-            _err("unsupported_grant_type", "Only authorization_code is supported")
+            _err("unsupported_grant_type", "Only authorization_code and refresh_token are supported")
             return
         if not _oauth_client_id_allowed(client_id, cfg):
             _err("invalid_client", "Unknown client_id")
@@ -7571,8 +7849,28 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
         server_url = str(code_data.get("server_url") or self.oauth_base_url()).rstrip("/")
         scope = str(code_data.get("scope") or "mcp")
-        access_token = _create_oauth_token(cfg, server_url, scope=scope)
-        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl, "scope": scope})
+        grant_id = code_data.get("grant_id")
+        access_token = _create_oauth_token(
+            cfg,
+            server_url,
+            scope=scope,
+            client_id=client_id if isinstance(grant_id, str) else None,
+            grant_id=grant_id if isinstance(grant_id, str) else None,
+        )
+        response: dict[str, Any] = {"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl, "scope": scope}
+        if cfg.store is not None and isinstance(grant_id, str):
+            try:
+                _family_id, refresh_token = cfg.store.issue_refresh_token(
+                    grant_id,
+                    client_id,
+                    scope,
+                    expires_at=time.time() + cfg.refresh_token_ttl,
+                )
+            except OAuthStoreError:
+                _err("server_error", "Refresh token store is unavailable")
+                return
+            response["refresh_token"] = refresh_token
+        self.send_json(response)
 
     def send_cors_headers(self) -> None:
         origin = self.headers.get("Origin")
@@ -7769,6 +8067,11 @@ def build_runtime(
 ) -> Runtime:
     settings = dict(startup_settings or {})
     workspace = effective_workspace_path(args, settings)
+    try:
+        workspace_catalog = WorkspaceCatalog.from_settings(settings, workspace)
+    except WorkspaceCatalogError as exc:
+        raise ToolFailure("INVALID_WORKSPACE_CATALOG", str(exc), category="configuration") from exc
+    workspace = workspace_catalog.default().root
     if config_dir is None or upstream_config_path is None or settings_path is None:
         config_dir, upstream_config_path, settings_path = resolve_config_paths(args, workspace)
         if not settings:
@@ -7808,6 +8111,7 @@ def build_runtime(
             settings.get("allowed_origins"),
             getattr(args, "allowed_origin", None),
         ),
+        workspace_catalog=workspace_catalog,
     )
     if runtime.capabilities.skip_all_permissions:
         print(
@@ -7823,7 +8127,28 @@ AUTH_MODE_CHOICES = ("bearer", "noauth", "oauth")
 def run_http(args: argparse.Namespace) -> int:
     workspace = effective_workspace_path(args, {})
     config_dir, upstream_config_path, settings_path = resolve_config_paths(args, workspace)
-    startup_settings = read_server_settings(settings_path)
+    # One-time import from the old workspace-coupled location.  The new
+    # settings path is decided before reading its contents and is never
+    # re-derived after a workspace change.
+    legacy_config_dir = workspace / DEFAULT_CONFIG_DIR_NAME
+    legacy_settings_path = legacy_config_dir / SERVER_SETTINGS_FILENAME
+    if not settings_path.exists() and settings_path != legacy_settings_path and legacy_settings_path.exists():
+        try:
+            legacy_settings = read_server_settings(legacy_settings_path)
+            write_server_settings(settings_path, legacy_settings)
+            legacy_upstream = legacy_config_dir / UPSTREAM_CONFIG_FILENAME
+            if not upstream_config_path.exists() and legacy_upstream.exists():
+                upstream_config_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy_upstream, upstream_config_path)
+            print(f"Imported legacy server settings from {legacy_settings_path} to {settings_path}.", file=sys.stderr)
+        except (OSError, SettingsStoreError) as exc:
+            print(f"ERROR: could not import legacy server settings: {exc}", file=sys.stderr)
+            return 2
+    try:
+        startup_settings = read_server_settings(settings_path)
+    except SettingsStoreError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     workspace = effective_workspace_path(args, startup_settings)
     config_dir, upstream_config_path, settings_path = resolve_config_paths(args, workspace)
     startup_settings = read_server_settings(settings_path)
@@ -7867,6 +8192,16 @@ def run_http(args: argparse.Namespace) -> int:
         except ValueError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
+        signing_kid = f"legacy-{hashlib.sha256(token_secret).hexdigest()[:16]}"
+        try:
+            oauth_store = OAuthAuthorizationStore(config_dir / OAUTH_DB_FILENAME, pepper=token_secret)
+            oauth_store.register_signing_key(
+                signing_kid,
+                hashlib.sha256(token_secret).hexdigest()[:16],
+            )
+        except (OSError, OAuthStoreError) as exc:
+            print(f"ERROR: OAuth authorization store is unavailable: {exc}", file=sys.stderr)
+            return 2
         try:
             token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL") or OAUTH_TOKEN_TTL_SECONDS)
         except ValueError:
@@ -7878,6 +8213,8 @@ def run_http(args: argparse.Namespace) -> int:
             server_url=server_url,
             token_secret=token_secret,
             token_ttl=token_ttl,
+            store=oauth_store,
+            signing_kid=signing_kid,
         )
         if auth_token:
             print(

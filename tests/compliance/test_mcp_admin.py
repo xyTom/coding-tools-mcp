@@ -30,6 +30,7 @@ from coding_tools_mcp.server import (
     build_runtime,
     read_server_settings,
 )
+from coding_tools_mcp.settings_store import default_settings_dir
 from coding_tools_mcp.upstream import UpstreamManager, parse_server_config, resolve_env_config
 from coding_tools_mcp.webui import ADMIN_CSS, ADMIN_HTML, ADMIN_JS, WEBUI_DIST, admin_asset_response
 
@@ -917,9 +918,9 @@ class McpAdminConfigTests(unittest.TestCase):
             args = build_parser().parse_args(["--workspace", str(workspace)])
             runtime = build_runtime(args, RuntimePolicy("safe", ShellEnvPolicy(), False))
 
-            self.assertEqual(runtime.config_dir, workspace / ".coding-tools-mcp")
-            self.assertEqual(runtime.upstream_config_path, workspace / ".coding-tools-mcp" / "mcp-servers.json")
-            self.assertEqual(runtime.settings_path, workspace / ".coding-tools-mcp" / "server-settings.json")
+            self.assertEqual(runtime.config_dir, default_settings_dir())
+            self.assertEqual(runtime.upstream_config_path, default_settings_dir() / "mcp-servers.json")
+            self.assertEqual(runtime.settings_path, default_settings_dir() / "server-settings.json")
 
             config_dir = Path(tmp) / "config"
             args = build_parser().parse_args(["--workspace", str(workspace), "--config-dir", str(config_dir)])

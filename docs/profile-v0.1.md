@@ -146,6 +146,8 @@ Shared error object:
           "type": "string",
           "enum": [
             "INVALID_ARGUMENT",
+            "INVALID_WORKSPACE",
+            "INVALID_WORKSPACE_CATALOG",
             "PATH_OUTSIDE_WORKSPACE",
             "ABSOLUTE_PATH_DENIED",
             "SYMLINK_ESCAPE",
@@ -157,6 +159,7 @@ Shared error object:
             "OUTPUT_TOO_LARGE",
             "TIMEOUT",
             "SESSION_NOT_FOUND",
+            "UNKNOWN_SESSION",
             "SESSION_CLOSED",
             "COMMAND_REJECTED",
             "PERMISSION_REQUIRED",
