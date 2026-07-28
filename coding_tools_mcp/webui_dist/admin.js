@@ -46,6 +46,7 @@ const $ = (id) => document.getElementById(id);
       };
     };
     const headers = () => ({ 'Content-Type':'application/json', ...(state.token ? {'Authorization':'Bearer '+state.token} : {}) });
+    const isAuthError = (err) => err && typeof err === 'object' && (err.status === 401 || err.status === 403);
     const east8Formatter = new Intl.DateTimeFormat('zh-CN', {
       timeZone: 'Asia/Shanghai',
       year: 'numeric', month: '2-digit', day: '2-digit',
@@ -184,7 +185,7 @@ const $ = (id) => document.getElementById(id);
     async function withBusy(label, task) {
       setBusy(true, label);
       try { return await task(); }
-      catch (err) { out(err); throw err; }
+      catch (err) { if (!isAuthError(err)) out(err); throw err; }
       finally { setBusy(false, label); }
     }
 
@@ -249,21 +250,44 @@ const $ = (id) => document.getElementById(id);
       document.querySelectorAll('[data-chat-pane]').forEach((el) => el.classList.toggle('active', el.dataset.chatPane === name));
     }
 
-    function setAuthGate(kind, message) {
-      const gate = $('authGate');
-      if (gate) gate.classList.toggle('needs-auth', kind !== 'ok');
+    function showLogin(message = '请输入管理 token 或使用 OAuth 登录。', kind = 'info') {
+      const login = $('loginLayer');
+      const app = $('adminApp');
+      login?.classList.remove('hidden');
+      login?.removeAttribute('aria-hidden');
+      app?.classList.add('hidden');
+      app?.setAttribute('aria-hidden', 'true');
+      closeOutputPanel();
+      setText('loginError', message);
+      const loginMessage = $('loginError');
+      if (loginMessage) loginMessage.className = `login-message ${kind === 'error' ? 'error' : kind === 'ok' ? 'ok' : ''}`.trim();
+    }
+
+    function showAdmin() {
+      const login = $('loginLayer');
+      const app = $('adminApp');
+      login?.classList.add('hidden');
+      login?.setAttribute('aria-hidden', 'true');
+      app?.classList.remove('hidden');
+      app?.removeAttribute('aria-hidden');
       const pill = $('authState');
       if (pill) {
-        pill.textContent = kind === 'ok' ? '已连接' : (kind === 'auth' ? '需要认证' : '连接异常');
-        pill.className = `status-pill ${kind === 'ok' ? 'ok' : kind === 'auth' ? 'warn' : 'bad'}`;
+        pill.textContent = '已连接';
+        pill.className = 'status-pill ok';
       }
-      setText('homeAuthHint', message || (kind === 'ok' ? '管理接口可用。' : '输入管理 token 或使用 OAuth 登录后刷新。'));
     }
 
     async function api(path, body) {
       const res = await fetch(path, { method:'POST', headers:headers(), body:JSON.stringify(body || {}) });
       const data = await res.json().catch(() => ({ ok:false, error:'响应不是 JSON' }));
-      if (!res.ok) throw { ...data, status: res.status };
+      if (!res.ok) {
+        const err = { ...data, status: res.status };
+        if (isAuthError(err)) {
+          localStorage.removeItem('mcpAdminToken');
+          showLogin('登录已失效，请重新输入管理 token。', 'error');
+        }
+        throw err;
+      }
       return data;
     }
 
@@ -505,6 +529,44 @@ const $ = (id) => document.getElementById(id);
       return Array.from(crypto.getRandomValues(new Uint8Array(bytes))).map((b) => b.toString(16).padStart(2, '0')).join('');
     }
 
+    function setOAuthTokenSecretVisibility(visible) {
+      const secret = $('settingsOAuthTokenSecret');
+      const toggle = $('toggleOAuthTokenSecret');
+      secret.type = visible ? 'text' : 'password';
+      toggle.textContent = visible ? '隐藏' : '显示';
+      toggle.setAttribute('aria-pressed', String(visible));
+    }
+
+    function generateOAuthTokenSecret() {
+      const secret = $('settingsOAuthTokenSecret');
+      secret.value = randomHex(32);
+      setOAuthTokenSecretVisibility(true);
+      setText('oauthTokenSecretHint', '已生成 64 位十六进制 secret，可以直接复制。');
+      secret.focus();
+      secret.select();
+    }
+
+    function toggleOAuthTokenSecretVisibility() {
+      setOAuthTokenSecretVisibility($('settingsOAuthTokenSecret').type === 'password');
+    }
+
+    async function copyOAuthTokenSecret() {
+      const secret = $('settingsOAuthTokenSecret');
+      if (!secret.value) {
+        setText('oauthTokenSecretHint', '请先生成或输入 token secret。');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(secret.value);
+        setText('oauthTokenSecretHint', 'token secret 已复制到剪贴板。');
+      } catch (err) {
+        setOAuthTokenSecretVisibility(true);
+        secret.focus();
+        secret.select();
+        setText('oauthTokenSecretHint', '浏览器未允许自动复制，已选中 secret，请按 Ctrl+C。');
+      }
+    }
+
     function startupSettingsPayload() {
       const settings = {
         workspace:$('settingsWorkspace').value,
@@ -532,19 +594,33 @@ const $ = (id) => document.getElementById(id);
 
     async function refreshStatus(options = {}) {
       const { silent = false, force = false } = options;
-      if (state.dirty && !force) return;
+      if (state.dirty && !force) return false;
       if (!silent) setBusy(true, '刷新中');
       try {
         const res = await fetch('/api/admin/status', { headers: state.token ? {'Authorization':'Bearer '+state.token} : {} });
         const data = await res.json().catch(() => ({ ok:false, error:`HTTP ${res.status}` }));
         if (!res.ok) throw { ...data, status: res.status };
         state.status = data;
-        setAuthGate('ok', '管理接口已连接，首页 token 会保存在本机浏览器。');
         renderStatus(data);
+        if (state.token) localStorage.setItem('mcpAdminToken', state.token);
+        else localStorage.removeItem('mcpAdminToken');
+        showAdmin();
+        return true;
       } catch (err) {
-        const status = err && typeof err === 'object' ? err.status : undefined;
-        setAuthGate(status === 401 || status === 403 ? 'auth' : 'bad', status === 401 || status === 403 ? '需要管理 token 或 OAuth 登录。' : '无法读取管理状态，请检查服务是否运行。');
-        out(err);
+        if (isAuthError(err)) {
+          localStorage.removeItem('mcpAdminToken');
+          showLogin(state.token ? '管理 token 无效或已过期，请检查后重试。' : '需要管理员登录后才能进入管理台。', 'error');
+        } else if ($('adminApp')?.classList.contains('hidden')) {
+          showLogin('无法连接管理服务，请检查服务是否正在运行。', 'error');
+        } else {
+          const pill = $('authState');
+          if (pill) {
+            pill.textContent = '连接异常';
+            pill.className = 'status-pill bad';
+          }
+          if (!silent) out(err);
+        }
+        return false;
       } finally {
         if (!silent) setBusy(false, '刷新中');
       }
@@ -1078,16 +1154,40 @@ const $ = (id) => document.getElementById(id);
       const url = new URL(location.href);
       const code = url.searchParams.get('code');
       const verifier = sessionStorage.getItem('mcpAdminVerifier');
-      if (!code || !verifier) return;
+      if (!code || !verifier) return false;
       const body = new URLSearchParams({ grant_type:'authorization_code', client_id:'admin-console', redirect_uri:location.origin + '/admin', code, code_verifier:verifier });
       const res = await fetch('/oauth/token', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
       const data = await res.json().catch(() => ({ ok:false, error:`HTTP ${res.status}` }));
       if (!res.ok || !data.access_token) throw { ...data, status: res.status };
       state.token = data.access_token;
-      localStorage.setItem('mcpAdminToken', state.token);
       sessionStorage.removeItem('mcpAdminVerifier');
       setValue('token', state.token);
       history.replaceState(null, '', '/admin');
+      return true;
+    }
+
+    async function loginWithToken(event) {
+      event?.preventDefault();
+      const candidate = $('token').value.trim();
+      if (!candidate) {
+        showLogin('请输入管理 token。', 'error');
+        $('token').focus();
+        return;
+      }
+      state.token = candidate;
+      setText('loginError', '正在验证管理 token…');
+      const ok = await refreshStatus({ force:true });
+      if (!ok) $('token').focus();
+    }
+
+    function logoutAdmin() {
+      state.token = '';
+      state.status = null;
+      localStorage.removeItem('mcpAdminToken');
+      sessionStorage.removeItem('mcpAdminVerifier');
+      setValue('token', '');
+      showLogin('已退出登录，请输入管理 token 或使用 OAuth 登录。');
+      $('token').focus();
     }
 
     function wireEvents() {
@@ -1134,9 +1234,9 @@ const $ = (id) => document.getElementById(id);
       state.showChatSource = localStorage.getItem('mcpShowChatSource') === '1';
       const showSource = $('showChatSource');
       if (showSource) showSource.checked = state.showChatSource;
-      $('saveToken').onclick = () => { state.token = $('token').value.trim(); localStorage.setItem('mcpAdminToken', state.token); refreshStatus(); };
-      $('clearToken').onclick = () => { if (!confirm('确认清除本地保存的 token？')) return; state.token = ''; localStorage.removeItem('mcpAdminToken'); setValue('token', ''); refreshStatus(); };
+      $('loginForm').onsubmit = loginWithToken;
       $('oauthLogin').onclick = oauthLogin;
+      $('logoutAdmin').onclick = logoutAdmin;
       $('refresh').onclick = () => { if (confirmDirty('刷新页面状态')) refreshStatus({ force:true }); };
       $('wizardTransport').onchange = updateTransportFields;
       $('applyTemplate').onclick = () => resetServerEditor(selectedTemplateConfig());
@@ -1196,13 +1296,29 @@ const $ = (id) => document.getElementById(id);
       $('chatReadLimit').onchange = () => { if (state.selectedConversation) window.readChatConversation(state.selectedConversation); };
       $('copyOutput').onclick = copyOutput;
       $('saveRuntimeAuth').onclick = async () => { out(await api('/api/admin/runtime', { auth_token:$('runtimeAuthToken').value, admin_token:$('runtimeAdminToken').value, oauth_password:$('runtimeOAuthPassword').value })); await refreshStatus(); };
-      $('generateOAuthTokenSecret').onclick = () => { $('settingsOAuthTokenSecret').value = randomHex(32); };
-      $('saveStartupSettings').onclick = async () => { out(await api('/api/admin/settings', { settings:startupSettingsPayload() })); setValue('settingsOAuthTokenSecret', ''); await refreshStatus(); };
+      $('generateOAuthTokenSecret').onclick = generateOAuthTokenSecret;
+      $('toggleOAuthTokenSecret').onclick = toggleOAuthTokenSecretVisibility;
+      $('copyOAuthTokenSecret').onclick = copyOAuthTokenSecret;
+      $('saveStartupSettings').onclick = async () => { out(await api('/api/admin/settings', { settings:startupSettingsPayload() })); setValue('settingsOAuthTokenSecret', ''); setOAuthTokenSecretVisibility(false); setText('oauthTokenSecretHint', '设置已保存，输入框已清空。'); await refreshStatus(); };
       $('advancedRun').onclick = async () => { const payload = JSON.parse($('advancedPayload').value); out(await callTool(payload.name, payload.arguments || {})); await refreshStatus(); };
     }
 
-    wireEvents();
-    setView('overview');
-    setChatTrack('backup');
-    resetContextForm();
-    exchangeOAuthCode().catch(out).finally(() => { refreshStatus(); setInterval(() => refreshStatus({ silent:true }), 5000); });
+    async function initialize() {
+      wireEvents();
+      setView('overview');
+      setChatTrack('backup');
+      resetContextForm();
+      showLogin('正在检查登录状态…');
+      try {
+        await exchangeOAuthCode();
+        await refreshStatus({ force:true });
+      } catch (err) {
+        sessionStorage.removeItem('mcpAdminVerifier');
+        showLogin(isAuthError(err) ? 'OAuth 登录失败或授权已过期，请重试。' : 'OAuth 登录未完成，请重试。', 'error');
+      }
+      setInterval(() => {
+        if (!$('adminApp')?.classList.contains('hidden')) refreshStatus({ silent:true });
+      }, 5000);
+    }
+
+    initialize();
