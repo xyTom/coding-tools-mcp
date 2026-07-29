@@ -1,0 +1,163 @@
+# v0.2.2 Extension Integration Contract
+
+Status: normative integration decision record for
+`integration/upstream-v0.2.2`.
+
+This document fixes the compatibility decisions that later integration phases
+must implement. It extends the upstream `0.2.2` runtime contract without
+changing upstream product behavior in Phase 02.
+
+## Protocol and version
+
+- The MCP protocol target remains `2025-11-25` with explicit compatibility for
+  `2025-06-18`.
+- Negotiation continues to accept only the versions listed by
+  `coding_tools_mcp.protocol.SUPPORTED_PROTOCOL_VERSIONS`; dates are not
+  compared lexicographically.
+- The package version remains `0.2.2` during integration. A fork release version
+  is a release-phase decision.
+
+## Fixed tool catalog
+
+- `coding_tools_mcp.server.TOOL_REGISTRY` remains the single catalog source.
+- Every client sees the same deterministic catalog for a given installation.
+  Explicit installation capability gates such as optional `view_image` support
+  may remove their own tool, but persisted profiles must not filter the list.
+- The legacy values `full`, `read-only`, and `compat-readonly-all` are accepted
+  only as migration inputs. They do not control `tools/list` and are omitted on
+  the next successful settings write.
+- Unknown legacy `tool_profile` values are ignored with the same migration
+  warning rather than being reinterpreted as a security policy.
+
+`--dangerously-fake-readonly-annotations` is an annotation compatibility
+override, not a security feature. It does not hide tools, change schemas, block
+handlers, or prevent mutation. The upstream requirements remain: dangerous
+permission mode is mandatory, and HTTP use requires authentication. UI copy
+must never describe this switch as safe or genuinely read-only.
+
+## OAuth protocol and persistence
+
+- `coding_tools_mcp.oauth.OAUTH_GRANT_TYPES_SUPPORTED` is the single source for
+  authorization-server metadata and dynamic-client-registration narrowing.
+- `coding_tools_mcp.oauth.OAUTH_RESPONSE_TYPES_SUPPORTED` is the corresponding
+  response-type source.
+- At the Phase 02 boundary, only `authorization_code` and response type `code`
+  are advertised. `refresh_token` may be advertised only after the token
+  endpoint branch exists and is covered in Phase 05.
+- Phase 04 introduces a persistent, transactional OAuth Store in the stable
+  user configuration directory. It must persist clients, grants, access-token
+  metadata, refresh-token families and hashes, signing-key metadata, and audit
+  events. Authorization codes remain short-lived and process-local.
+- Store migrations are forward-only, idempotent, and transactional. Reopening
+  the database must preserve data; a failed schema migration must not leave a
+  half-migrated database. Bearer and refresh token plaintext must never be
+  stored.
+- Phase 05 adapts the upstream registry and handlers to that store. Store
+  unavailability fails closed; it must not silently fall back to a permissive
+  process-local registry.
+
+## Agent to Workspace binding
+
+- The binding point is HTTP initialization/runtime creation, after the
+  authenticated OAuth identity (`client_id` and, when available, `grant_id`) is
+  known and before project context or tools are exposed.
+- The mapping resolves to one Workspace ID and constructs the session Runtime
+  with that Workspace adapter. The binding is immutable for the lifetime of the
+  MCP HTTP session.
+- Ordinary MCP tools do not switch Workspace roots. Administrative mapping
+  changes apply to new sessions; a session whose mapped Workspace is no longer
+  valid must fail closed rather than fall back to another root.
+- stdio keeps one explicit default Workspace because it has no OAuth Agent
+  identity.
+
+## Telemetry and secret-store boundaries
+
+- Integration preserves the upstream v0.2.2 telemetry default: anonymous
+  telemetry is enabled unless disabled by the existing environment controls,
+  `DO_NOT_TRACK`, or CI behavior. Changing that default is a separate product
+  decision.
+- Telemetry must not gain Workspace IDs, Agent IDs, paths, commands, file
+  contents, OAuth identifiers, or secret material during integration.
+- Server Admin settings use the server Secret Vault introduced in Phase 03.
+  Desktop profiles keep their existing desktop-local storage. The two stores
+  are not unified during this integration, and neither side may silently read
+  the other's secrets.
+
+## Machine-readable decision table
+
+The following block is consumed by the Phase 02 contract tests.
+
+<!-- integration-contract-json:start -->
+```json
+{
+  "schema_version": 1,
+  "protocol": {
+    "target": "2025-11-25",
+    "compatible": ["2025-06-18"]
+  },
+  "version": {
+    "integration": "0.2.2"
+  },
+  "tool_catalog": {
+    "strategy": "fixed",
+    "source": "coding_tools_mcp.server.TOOL_REGISTRY",
+    "legacy_tool_profile_controls_catalog": false,
+    "optional_installation_gates": ["view_image"],
+    "fake_readonly": {
+      "security_boundary": false,
+      "changes_catalog": false,
+      "changes_handlers": false,
+      "requires_permission_mode": "dangerous",
+      "http_requires_authentication": true
+    }
+  },
+  "legacy_tool_profile_migration": {
+    "warning_code": "legacy_tool_profile_ignored",
+    "persist_on_next_write": false,
+    "unknown_value": "ignore_with_warning",
+    "cases": [
+      {
+        "input": {"tool_profile": "full"},
+        "output": {"tool_profile": null, "catalog": "fixed", "warning": "legacy_tool_profile_ignored"}
+      },
+      {
+        "input": {"tool_profile": "read-only"},
+        "output": {"tool_profile": null, "catalog": "fixed", "warning": "legacy_tool_profile_ignored"}
+      },
+      {
+        "input": {"tool_profile": "compat-readonly-all"},
+        "output": {"tool_profile": null, "catalog": "fixed", "warning": "legacy_tool_profile_ignored"}
+      }
+    ]
+  },
+  "oauth": {
+    "grant_types_source": "coding_tools_mcp.oauth.OAUTH_GRANT_TYPES_SUPPORTED",
+    "response_types_source": "coding_tools_mcp.oauth.OAUTH_RESPONSE_TYPES_SUPPORTED",
+    "advertised_grant_types": ["authorization_code"],
+    "advertised_response_types": ["code"],
+    "authorization_codes": "ephemeral",
+    "persistent_store_phase": 4,
+    "http_integration_phase": 5,
+    "migration": "idempotent_transactional"
+  },
+  "workspace_binding": {
+    "phase": 6,
+    "point": "http_initialize_runtime_factory",
+    "identity_fields": ["client_id", "grant_id"],
+    "immutable_per_session": true,
+    "ordinary_tool_switching": false,
+    "invalid_mapping": "fail_closed",
+    "stdio_binding": "default_workspace"
+  },
+  "telemetry": {
+    "default_policy": "upstream_v0.2.2",
+    "change_during_integration": false
+  },
+  "secret_stores": {
+    "server_admin": "server_secret_vault",
+    "desktop": "desktop_profile_storage",
+    "shared": false
+  }
+}
+```
+<!-- integration-contract-json:end -->
