@@ -1,7 +1,7 @@
 | Phase | Status | Implementation commit | Handoff |
 | --- | --- | --- | --- |
 | 00 | complete | ac59871 | phase-00.md |
-| 01 | blocked | - | phase-01.md |
+| 01 | complete | - | phase-01.md + phase-01-unblock.md |
 | 02 | pending | - | - |
 | 03 | pending | - | - |
 | 04 | pending | - | - |
