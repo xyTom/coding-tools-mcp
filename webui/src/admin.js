@@ -1,4 +1,9 @@
-const $ = (id) => document.getElementById(id);
+import { SettingsPageState } from './settings-page.js';
+import { createWorkspace, serializeSettings } from './settings-model.js';
+import { SAFETY_PRESETS, hostMode, presetFor } from './settings-copy.js';
+import { bindWorkspaceEditor, renderWorkspaceEditor } from './workspace-editor.js';
+
+    const $ = (id) => document.getElementById(id);
     const state = {
       token: localStorage.getItem('mcpAdminToken') || '',
       status: null,
@@ -19,6 +24,8 @@ const $ = (id) => document.getElementById(id);
       busyCount: 0,
       dirty: false,
       suppressDirtyTracking: false,
+      settings: null,
+      pendingOAuthCredential: null,
     };
     const toolTemplate = { name: 'mcp_catalog_list', arguments: {} };
     const defaultServer = { alias:'filesystem', transport:'stdio', command:'uvx', args:['mcp-server-filesystem','G:/LLM'], env:{TOKEN:{secret_ref:'github_token'}}, include_tools:['read_file'] };
@@ -291,21 +298,150 @@ const $ = (id) => document.getElementById(id);
       return data;
     }
 
+    async function loadOAuthPasswordStatus() {
+      const res = await fetch('/api/admin/oauth/password', { headers: state.token ? {'Authorization':'Bearer '+state.token} : {} });
+      const status = await res.json().catch(() => ({ configured:false, error:`HTTP ${res.status}` }));
+      if (!res.ok) throw { ...status, status:res.status };
+      renderOAuthPasswordStatus(status);
+      return status;
+    }
+
+    function renderOAuthPasswordStatus(status = {}) {
+      const sourceLabels = {
+        environment:'环境变量',
+        vault:'Vault',
+        generated:'首次自动生成',
+        legacy_settings:'旧配置迁移',
+      };
+      setText('oauthPasswordConfigured', status.configured ? '已配置' : '未配置');
+      setText('oauthPasswordSource', sourceLabels[status.source] || status.source || '-');
+      setText('oauthPasswordFingerprint', status.fingerprint || '-');
+      setText('oauthPasswordPersisted', status.persisted ? '是' : '否');
+      setText('oauthPasswordVault', status.vault_enabled ? '已启用' : '未启用');
+      setText('oauthPasswordCreatedAt', status.created_at ? formatEast8(status.created_at) : '-');
+
+      const generate = $('generateOAuthPassword');
+      const rotate = $('rotateOAuthPassword');
+      const hint = $('oauthPasswordHint');
+      if (!generate || !rotate || !hint) return;
+      generate.classList.toggle('hidden', Boolean(status.configured));
+      rotate.classList.toggle('hidden', !status.configured || status.managed_externally);
+      if (status.managed_externally) {
+        generate.classList.remove('hidden');
+        generate.disabled = true;
+        generate.textContent = '由环境变量管理';
+        hint.textContent = '请修改 CODING_TOOLS_MCP_OAUTH_PASSWORD 后重启服务。';
+        hint.className = 'settings-status warn';
+      } else if (!status.vault_enabled) {
+        generate.disabled = true;
+        rotate.disabled = true;
+        generate.textContent = '生成并保存 OAuth Password';
+        hint.textContent = 'Secret Vault 未启用。请先设置 CODING_TOOLS_MCP_SECRETS_KEY 并重启服务。';
+        hint.className = 'settings-status error';
+      } else {
+        generate.disabled = !status.can_generate;
+        rotate.disabled = !status.can_rotate;
+        generate.textContent = '生成并保存 OAuth Password';
+        hint.textContent = status.configured
+          ? '密码已加密持久化；轮换只影响新的授权页面登录。'
+          : '可以生成并加密保存新的 OAuth Password。';
+        hint.className = 'settings-status ok';
+      }
+    }
+
+    function showOneTimeOAuthPassword(password, fingerprint) {
+      setValue('oauthPasswordOneTimeValue', password);
+      setText('oauthPasswordOneTimeFingerprint', fingerprint || '');
+      $('oauthPasswordOneTime')?.classList.remove('hidden');
+    }
+
+    function clearOneTimeOAuthPassword() {
+      setValue('oauthPasswordOneTimeValue', '');
+      setText('oauthPasswordOneTimeFingerprint', '');
+      $('oauthPasswordOneTime')?.classList.add('hidden');
+    }
+
+    async function generateOAuthPassword() {
+      try {
+        const result = await api('/api/admin/oauth/password/generate', {});
+        showOneTimeOAuthPassword(result.password, result.fingerprint);
+        await loadOAuthPasswordStatus();
+      } catch (err) {
+        if (!isAuthError(err)) out(err);
+      }
+    }
+
+    async function rotateOAuthPassword() {
+      const confirmed = confirm(
+        '轮换后，旧 OAuth Password 将不能继续用于新的授权页面登录。\n\n已有 Access Token 和 Refresh Token 不会被撤销。\n\n确认轮换？'
+      );
+      if (!confirmed) return;
+      try {
+        const result = await api('/api/admin/oauth/password/rotate', {});
+        showOneTimeOAuthPassword(result.password, result.fingerprint);
+        await loadOAuthPasswordStatus();
+      } catch (err) {
+        if (!isAuthError(err)) out(err);
+      }
+    }
+
     async function refreshOAuthAgents() {
       try {
         const authHeaders = headers();
-        const [agentsRes, auditRes] = await Promise.all([
+        const responses = await Promise.all([
           fetch('/api/admin/oauth/agents', { headers:authHeaders }),
+          fetch('/api/admin/oauth/grants', { headers:authHeaders }),
+          fetch('/api/admin/oauth/tokens', { headers:authHeaders }),
+          fetch('/api/admin/oauth/refresh-families', { headers:authHeaders }),
           fetch('/api/admin/oauth/audit', { headers:authHeaders }),
         ]);
-        const agents = await agentsRes.json();
-        const audit = await auditRes.json();
-        if (!agentsRes.ok || !auditRes.ok) throw agents.error || audit.error || 'OAuth API unavailable';
-        const items = agents.agents || [];
-        setHtml('oauthAgents', items.map((agent) => `<tr><td>${esc(agent.display_name || agent.client_id)}</td><td><code>${esc(agent.client_id)}</code></td><td>${esc(agent.allowed_scopes || '')}</td><td>${Number(agent.active_access_tokens || 0)}</td><td>${Number(agent.active_refresh_families || 0)}</td><td>${agent.enabled ? '启用' : '已禁用'}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无已授权 Agent</td></tr>');
+        const [agents, grants, tokens, families, audit] = await Promise.all(responses.map((response) => response.json()));
+        const failed = responses.findIndex((response) => !response.ok);
+        if (failed >= 0) throw [agents, grants, tokens, families, audit][failed]?.error || 'OAuth API unavailable';
+
+        const agentItems = agents.agents || [];
+        const grantItems = grants.grants || [];
+        const tokenItems = tokens.tokens || [];
+        const familyItems = families.families || [];
+        const now = Date.now() / 1000;
+        const statusText = (item, expiryField) => {
+          if (item.revoked_at) return '<span class="status-pill bad">已撤销</span>';
+          if (expiryField && Number(item[expiryField] || 0) <= now) return '<span class="status-pill warn">已过期</span>';
+          if (Object.prototype.hasOwnProperty.call(item, 'enabled') && !item.enabled) return '<span class="status-pill bad">已禁用</span>';
+          return '<span class="status-pill ok">有效</span>';
+        };
+        const actionButton = (label, handler, kind = 'danger') => `<button class="${kind}" onclick="${handler}">${label}</button>`;
+
+        setHtml('oauthAgents', agentItems.map((agent) => {
+          const excessiveAdmin = String(agent.allowed_scopes || '').split(/\s+/).includes('admin') && agent.client_id !== 'admin-console';
+          const scope = excessiveAdmin
+            ? `${esc(agent.allowed_scopes || '')} <span class="status-pill bad">包含管理权限</span>`
+            : esc(agent.allowed_scopes || '');
+          const action = agent.enabled
+            ? actionButton('禁用', `setOAuthAgentEnabled('${esc(jsArg(agent.client_id))}', false)`)
+            : actionButton('重新启用', `setOAuthAgentEnabled('${esc(jsArg(agent.client_id))}', true)`, 'secondary');
+          return `<tr><td>${esc(agent.display_name || agent.client_id)}</td><td><code>${esc(agent.client_id)}</code></td><td><code>${esc(agent.redirect_uri || '')}</code></td><td>${scope}</td><td>${Number(agent.active_access_tokens || 0)}</td><td>${Number(agent.active_refresh_families || 0)}</td><td>${agent.enabled ? '<span class="status-pill ok">启用</span>' : '<span class="status-pill bad">已禁用</span>'}</td><td>${action}</td></tr>`;
+        }).join('') || '<tr><td colspan="8" class="muted">暂无已授权客户端。请在上方复制 MCP URL，并由客户端发起 OAuth 连接。</td></tr>');
+
+        setHtml('oauthGrants', grantItems.map((grant) => `<tr><td><code>${esc(grant.grant_id)}</code></td><td><code>${esc(grant.client_id)}</code></td><td>${esc(grant.scopes || '')}</td><td>${statusText(grant)}</td><td>${timeCell(grant.created_at ? new Date(grant.created_at * 1000).toISOString() : '')}</td><td>${grant.revoked_at || !grant.enabled ? '' : actionButton('撤销 Grant', `revokeOAuthGrant('${esc(jsArg(grant.grant_id))}')`)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无 OAuth Grant。</td></tr>');
+
+        setHtml('oauthTokens', tokenItems.map((token) => `<tr><td><code>${esc(token.jti)}</code></td><td><code>${esc(token.client_id)}</code></td><td>${esc(token.scopes || '')}</td><td>${esc(token.token_mode || 'standard')}</td><td>${timeCell(token.expires_at ? new Date(token.expires_at * 1000).toISOString() : '')}</td><td>${statusText(token, 'expires_at')}</td><td>${token.revoked_at || Number(token.expires_at || 0) <= now ? '' : actionButton('撤销 Token', `revokeOAuthAccessToken('${esc(jsArg(token.jti))}')`)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">暂无 Access Token 记录。</td></tr>');
+
+        setHtml('oauthRefreshFamilies', familyItems.map((family) => `<tr><td><code>${esc(family.family_id)}</code></td><td><code>${esc(family.client_id)}</code></td><td>${esc(family.scopes || '')}</td><td>${timeCell(family.expires_at ? new Date(family.expires_at * 1000).toISOString() : '')}</td><td>${timeCell(family.last_used_at ? new Date(family.last_used_at * 1000).toISOString() : '')}</td><td>${statusText(family, 'expires_at')}</td><td>${family.revoked_at || Number(family.expires_at || 0) <= now ? '' : actionButton('撤销 Family', `revokeOAuthRefreshFamily('${esc(jsArg(family.family_id))}')`)}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">暂无 Refresh Token Family。</td></tr>');
+
+        setText('oauthClientCount', agentItems.length);
+        setText('oauthRefreshFamilyCount', familyItems.filter((family) => !family.revoked_at && Number(family.expires_at || 0) > now).length);
         setText('oauthAudit', JSON.stringify(audit.events || [], null, 2));
+
+        const overPrivileged = agentItems.filter((agent) => agent.client_id !== 'admin-console' && String(agent.allowed_scopes || '').split(/\s+/).includes('admin'));
+        if (overPrivileged.length) {
+          setText('oauthCredentialHint', `检测到 ${overPrivileged.length} 个外部客户端历史授权包含 admin。建议禁用后重新连接；新授权会自动降为 mcp。`);
+        }
       } catch (err) {
-        setHtml('oauthAgents', '<tr><td colspan="6" class="muted">无法读取 OAuth Agent；请确认管理员凭据。</td></tr>');
+        setHtml('oauthAgents', '<tr><td colspan="8" class="muted">无法读取 OAuth 客户端；请确认管理员凭据和 OAuth 模式。</td></tr>');
+        setHtml('oauthGrants', '<tr><td colspan="6" class="muted">无法读取 OAuth Grants。</td></tr>');
+        setHtml('oauthTokens', '<tr><td colspan="7" class="muted">无法读取 Access Token 记录。</td></tr>');
+        setHtml('oauthRefreshFamilies', '<tr><td colspan="7" class="muted">无法读取 Refresh Token Families。</td></tr>');
         setText('oauthAudit', String(err));
       }
     }
@@ -484,9 +620,9 @@ const $ = (id) => document.getElementById(id);
     function setServerEditorMode(alias = '') {
       state.editingServerAlias = alias;
       const editing = Boolean(alias);
-      setText('serverEditorTitle', editing ? `编辑 MCP：${alias}` : '添加 MCP');
+      setText('serverEditorTitle', editing ? `编辑工具连接：${alias}` : '添加工具连接');
       setText('serverEditorHint', editing ? '修改现有 MCP 配置，保存后会重新加载上游。' : '用向导生成 JSON，先预览再保存。');
-      setText('serverEditorNavLabel', editing ? '编辑 MCP' : '添加 MCP');
+      setText('serverEditorNavLabel', editing ? '编辑工具连接' : '添加工具连接');
       setText('installServer', editing ? '保存编辑并重载' : '保存并重载');
       setText('planServer', editing ? '预览编辑' : '预览变更');
       const aliasInput = $('wizardAlias');
@@ -529,67 +665,275 @@ const $ = (id) => document.getElementById(id);
       return Array.from(crypto.getRandomValues(new Uint8Array(bytes))).map((b) => b.toString(16).padStart(2, '0')).join('');
     }
 
-    function setOAuthTokenSecretVisibility(visible) {
-      const secret = $('settingsOAuthTokenSecret');
-      const toggle = $('toggleOAuthTokenSecret');
-      secret.type = visible ? 'text' : 'password';
-      toggle.textContent = visible ? '隐藏' : '显示';
-      toggle.setAttribute('aria-pressed', String(visible));
+    const OAUTH_VAULT_COMMAND = `$key = [Convert]::ToBase64String(
+    [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+)
+[Environment]::SetEnvironmentVariable(
+    "CODING_TOOLS_MCP_SECRETS_KEY",
+    $key,
+    "User"
+)
+$env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
+
+    async function copyText(value, successMessage = '已复制到剪贴板。') {
+      if (!value) throw new Error('没有可复制的内容。');
+      await navigator.clipboard.writeText(String(value));
+      setText('resultSummary', successMessage);
     }
 
-    function generateOAuthTokenSecret() {
-      const secret = $('settingsOAuthTokenSecret');
-      secret.value = randomHex(32);
-      setOAuthTokenSecretVisibility(true);
-      setText('oauthTokenSecretHint', '已生成 64 位十六进制 secret，可以直接复制。');
-      secret.focus();
-      secret.select();
+    function oauthVerifier() {
+      const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+      return Array.from(crypto.getRandomValues(new Uint8Array(64))).map((byte) => alphabet[byte % alphabet.length]).join('');
     }
 
-    function toggleOAuthTokenSecretVisibility() {
-      setOAuthTokenSecretVisibility($('settingsOAuthTokenSecret').type === 'password');
+    async function pkceChallenge(verifier) {
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+      return btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
     }
 
-    async function copyOAuthTokenSecret() {
-      const secret = $('settingsOAuthTokenSecret');
-      if (!secret.value) {
-        setText('oauthTokenSecretHint', '请先生成或输入 token secret。');
+    async function beginOAuthFlow({ kind, clientId, scope }) {
+      const verifier = oauthVerifier();
+      const challenge = await pkceChallenge(verifier);
+      const redirectUri = location.origin + '/admin';
+      const flow = {
+        kind,
+        verifier,
+        state: randomHex(16),
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        scope,
+      };
+      sessionStorage.setItem('mcpOAuthFlow', JSON.stringify(flow));
+      const params = new URLSearchParams({
+        response_type:'code',
+        client_id:clientId,
+        redirect_uri:redirectUri,
+        code_challenge:challenge,
+        code_challenge_method:'S256',
+        scope,
+        state:flow.state,
+      });
+      location.href = '/oauth/authorize?' + params.toString();
+    }
+
+    function generateOAuthClientId() {
+      const restriction = state.status?.auth?.oauth_persistence?.client_id_restriction;
+      setValue('oauthCredentialClientId', restriction || `mcp-local-${randomHex(8)}`);
+    }
+
+    async function issueOAuthCredential() {
+      const persistence = state.status?.auth?.oauth_persistence;
+      if (!persistence?.enabled) {
+        setText('oauthCredentialHint', 'OAuth 模式未启用，无法签发凭据。');
         return;
       }
-      try {
-        await navigator.clipboard.writeText(secret.value);
-        setText('oauthTokenSecretHint', 'token secret 已复制到剪贴板。');
-      } catch (err) {
-        setOAuthTokenSecretVisibility(true);
-        secret.focus();
-        secret.select();
-        setText('oauthTokenSecretHint', '浏览器未允许自动复制，已选中 secret，请按 Ctrl+C。');
+      const clientId = $('oauthCredentialClientId').value.trim();
+      if (!/^[A-Za-z0-9._~-]{1,128}$/.test(clientId)) {
+        setText('oauthCredentialHint', 'Client ID 只能包含字母、数字、点、下划线、波浪号和连字符，长度 1–128。');
+        return;
+      }
+      if (persistence.client_id_restriction && persistence.client_id_restriction !== clientId) {
+        setText('oauthCredentialHint', `服务器只允许 Client ID：${persistence.client_id_restriction}`);
+        setValue('oauthCredentialClientId', persistence.client_id_restriction);
+        return;
+      }
+      await beginOAuthFlow({ kind:'credential', clientId, scope:'mcp' });
+    }
+
+    function clearOAuthCredential() {
+      state.pendingOAuthCredential = null;
+      setValue('oauthAccessTokenResult', '');
+      setValue('oauthRefreshTokenResult', '');
+      setValue('oauthCredentialExpires', '');
+      setValue('oauthCredentialScope', '');
+      $('oauthCredentialResult')?.classList.add('hidden');
+    }
+
+    function renderOAuthCredential() {
+      const credential = state.pendingOAuthCredential;
+      if (!credential) return;
+      setValue('oauthAccessTokenResult', credential.access_token || '');
+      setValue('oauthRefreshTokenResult', credential.refresh_token || '');
+      setValue('oauthCredentialExpires', credential.expires_in ? `${credential.expires_in} 秒` : '未提供');
+      setValue('oauthCredentialScope', credential.scope || 'mcp');
+      $('oauthCredentialResult')?.classList.remove('hidden');
+      setText('oauthCredentialHint', credential.refresh_token
+        ? '已签发可刷新的 OAuth 凭据。原始 refresh token 只在这里显示一次。'
+        : '已签发 Access Token；当前兼容模式不会返回 refresh token。');
+    }
+
+    async function copyOAuthCredentialJson() {
+      if (!state.pendingOAuthCredential) return;
+      await copyText(JSON.stringify(state.pendingOAuthCredential, null, 2), 'OAuth 凭据 JSON 已复制。');
+    }
+
+    function renderOAuthPersistence(data) {
+      const persistence = data.auth?.oauth_persistence || { enabled:false };
+      const store = data.auth?.oauth_store || {};
+      setText('oauthEnabledStatus', persistence.enabled ? '已启用' : '未启用');
+      setText('oauthVaultStatus', persistence.vault?.enabled ? '已启用' : '未启用');
+      setText('oauthVaultPath', persistence.vault?.path || '');
+      setText('oauthIssuerStatus', persistence.stable_issuer_configured ? '固定地址' : '随请求变化');
+      setText('oauthClientCount', store.clients || 0);
+      setText('oauthRefreshFamilyCount', store.refresh_token_families || 0);
+      setValue('oauthMcpUrl', persistence.mcp_url || '');
+      setValue('oauthAuthorizeUrl', persistence.authorization_endpoint || '');
+      setValue('oauthTokenUrl', persistence.token_endpoint || '');
+      setText('oauthVaultCommand', OAUTH_VAULT_COMMAND);
+      renderOAuthPasswordStatus(persistence.authorization_password || {});
+
+      const upstreamVault = data.admin?.secrets || { enabled:false, path:null, secret_count:0 };
+      const vaultBanner = $('secretVaultBanner');
+      if (vaultBanner) {
+        vaultBanner.textContent = upstreamVault.enabled
+          ? 'Secret Vault 已启用，可以加密保存上游 MCP 凭据。'
+          : `Secret Vault 未启用。设置 ${persistence.secrets_key_env || 'CODING_TOOLS_MCP_SECRETS_KEY'} 并重启后才能保存真实凭据。`;
+        vaultBanner.className = upstreamVault.enabled ? 'settings-status ok' : 'settings-status error';
+      }
+      setText('secretVaultPath', upstreamVault.path || '未配置');
+      setText('secretVaultCount', upstreamVault.secret_count || 0);
+      if ($('secretSet')) $('secretSet').disabled = !upstreamVault.enabled;
+      if ($('secretDelete')) $('secretDelete').disabled = !upstreamVault.enabled;
+
+      if (!$('oauthCredentialClientId')?.value) generateOAuthClientId();
+      const problems = [];
+      if (!persistence.enabled) problems.push('OAuth 模式未启用。');
+      if (!persistence.vault?.enabled) problems.push(`Secret Vault 未启用；请设置 ${persistence.secrets_key_env || 'CODING_TOOLS_MCP_SECRETS_KEY'} 后重启。`);
+      if (persistence.signing_key_storage === 'plaintext_settings') problems.push('Signing key 仍在 server-settings.json 中明文保存。');
+      if (persistence.refresh_pepper_storage === 'plaintext_settings') problems.push('Refresh-token pepper 仍在 server-settings.json 中明文保存。');
+      if (!persistence.stable_issuer_configured) problems.push('未配置固定公开 OAuth 地址；隧道域名变化会使旧 Token 失效。');
+      if (persistence.compatibility_mode) problems.push('兼容模式已启用，不会签发 refresh token。');
+      const warning = $('oauthPersistenceWarning');
+      if (warning) {
+        warning.textContent = problems.length ? problems.join(' ') : 'OAuth 持久化配置正常：固定 issuer、加密 Vault 和 refresh token 均已启用。';
+        warning.className = problems.length ? 'risk-warning' : 'settings-status ok';
       }
     }
 
-    function startupSettingsPayload() {
-      const settings = {
-        workspace:$('settingsWorkspace').value,
-        host:$('settingsHost').value,
-        port:$('settingsPort').value,
-        allowed_origins:parseList($('settingsAllowedOrigins').value),
-        oauth_server_url:$('settingsOAuthServerUrl').value,
-        oauth_compatibility_mode:$('settingsOauthCompatibility').checked,
-        permission_mode:$('settingsPermission').value,
-        tool_profile:$('settingsToolProfile').value,
-        shell_env_inherit:$('settingsShellEnv').value,
+    async function copyOAuthConfig() {
+      const persistence = state.status?.auth?.oauth_persistence || {};
+      const config = {
+        mcp_url: persistence.mcp_url,
+        authorization_endpoint: persistence.authorization_endpoint,
+        token_endpoint: persistence.token_endpoint,
+        authorization_server_metadata: persistence.authorization_server_metadata,
+        protected_resource_metadata: persistence.protected_resource_metadata,
+        client_id: persistence.client_id_restriction || '<client-generated-id>',
+        client_secret_required: Boolean(persistence.client_secret_required),
+        token_endpoint_auth_methods: persistence.token_endpoint_auth_methods || ['none'],
+        scope: 'mcp',
+        pkce: 'S256',
       };
-      const tokenSecret = $('settingsOAuthTokenSecret').value.trim();
-      if (tokenSecret) settings.oauth_token_secret = tokenSecret;
-      const rawCatalog = $('settingsWorkspaceCatalog').value.trim();
-      if (rawCatalog) {
-        const catalog = JSON.parse(rawCatalog);
-        if (!Array.isArray(catalog)) throw new Error('Workspace Catalog 必须是 JSON 数组');
-        settings.workspace_catalog = catalog;
-        const chosen = catalog.find((item) => item && item.default);
-        if (chosen?.id) settings.default_workspace_id = chosen.id;
+      await copyText(JSON.stringify(config, null, 2), 'OAuth 连接配置已复制。');
+    }
+
+    function settingsStatus(message, kind = '') {
+      const el = $('settingsStatus');
+      if (!el) return;
+      el.textContent = message;
+      el.className = `settings-status ${kind}`.trim();
+      setText('settingsSaveHint', message);
+    }
+
+    function updateAccessAddress() {
+      const host = $('settingsHost')?.value || '127.0.0.1';
+      const port = $('settingsPort')?.value || '8000';
+      setText('settingsAccessAddress', `http://${host}:${port}/admin`);
+      const custom = document.querySelector('input[name="settingsHostMode"]:checked')?.value === 'custom';
+      $('customHostField')?.toggleAttribute('hidden', !custom);
+    }
+
+    function syncSettingsControls() {
+      const settings = state.settings?.draft;
+      if (!settings) return;
+      setValue('settingsHost', settings.host || '127.0.0.1');
+      setValue('settingsPort', settings.port || 8000);
+      setValue('settingsAllowedOrigins', (settings.allowed_origins || []).join('\n'));
+      setValue('settingsOAuthServerUrl', settings.oauth_server_url || '');
+      $('settingsOauthCompatibility').checked = Boolean(settings.oauth_compatibility_mode);
+      setValue('settingsPermission', settings.permission_mode || 'safe');
+      setValue('settingsToolProfile', settings.tool_profile || 'full');
+      setValue('settingsShellEnv', settings.shell_env_inherit || 'core');
+      const mode = hostMode(settings.host || '127.0.0.1');
+      document.querySelector(`input[name="settingsHostMode"][value="${mode}"]`)?.click();
+      setValue('settingsSafetyPreset', presetFor(settings));
+      const preset = SAFETY_PRESETS[presetFor(settings)];
+      setText('settingsSafetyHelp', preset?.help || '正在使用自定义高级设置。');
+      $('settingsDangerWarning').hidden = settings.permission_mode !== 'dangerous';
+      setText('settingsJsonPreview', JSON.stringify(serializeSettings(settings), null, 2));
+      updateAccessAddress();
+    }
+
+    function renderSettingsPage(payload) {
+      if (!state.settings) state.settings = new SettingsPageState();
+      if (payload && !state.settings.dirty) state.settings.reset(payload);
+      const settings = state.settings;
+      renderWorkspaceEditor($('workspaceEditor'), settings.draft.workspace_catalog || [], settings.fieldErrors || {});
+      syncSettingsControls();
+      const pending = settings.pendingFields?.length ? `已保存，重启后生效：${settings.pendingFields.join('、')}` : '所有设置已生效。';
+      settingsStatus(settings.dirty ? '有未保存修改。' : pending, settings.dirty ? 'warn' : settings.pendingFields?.length ? 'pending' : 'ok');
+    }
+
+    function syncDraftFromSettingsControls() {
+      if (!state.settings) return;
+      const draft = state.settings.draft;
+      draft.host = $('settingsHost').value.trim();
+      draft.port = $('settingsPort').value;
+      draft.allowed_origins = parseList($('settingsAllowedOrigins').value);
+      draft.oauth_server_url = $('settingsOAuthServerUrl').value.trim();
+      draft.oauth_compatibility_mode = $('settingsOauthCompatibility').checked;
+      draft.permission_mode = $('settingsPermission').value;
+      draft.tool_profile = $('settingsToolProfile').value;
+      draft.shell_env_inherit = $('settingsShellEnv').value;
+      setText('settingsJsonPreview', JSON.stringify(serializeSettings(draft), null, 2));
+      const dirty = state.settings.dirty;
+      settingsStatus(dirty ? '有未保存修改。' : '所有设置已生效。', dirty ? 'warn' : 'ok');
+      updateAccessAddress();
+    }
+
+    function setWorkspaceDefault(index) {
+      const workspaces = state.settings.draft.workspace_catalog;
+      const selected = workspaces[index];
+      if (!selected || selected.enabled === false) return;
+      state.settings.draft.default_workspace_id = selected.id;
+      workspaces.forEach((item) => { item.default = item.id === selected.id; });
+      renderSettingsPage();
+    }
+
+    async function checkWorkspace(index) {
+      syncDraftFromSettingsControls();
+      const result = await fetch('/api/admin/settings/validate', { method:'POST', headers:headers(), body:JSON.stringify({ settings:state.settings.payload }) });
+      const data = await result.json().catch(() => ({ ok:false, error:'校验服务没有返回 JSON' }));
+      if (!data.ok) {
+        state.settings.failed(data.field_errors || {});
+        renderSettingsPage();
+        settingsStatus(data.field_errors?.workspace_catalog || data.error || '目录校验失败。', 'error');
+        return;
       }
-      return settings;
+      state.settings.failed({});
+      renderSettingsPage();
+      settingsStatus(`工作区 ${index + 1} 的目录可保存。`, 'ok');
+    }
+
+    async function saveStartupSettings(event) {
+      event?.preventDefault();
+      syncDraftFromSettingsControls();
+      const draft = state.settings;
+      if (draft.draft.permission_mode === 'dangerous' && !confirm('完全权限会关闭主要命令权限门。确认仅在隔离环境中使用吗？')) return;
+      const settings = draft.payload;
+      const response = await fetch('/api/admin/settings', { method:'POST', headers:headers(), body:JSON.stringify({ settings }) });
+      const data = await response.json().catch(() => ({ ok:false, error:'保存服务没有返回 JSON' }));
+      if (!response.ok || !data.ok) {
+        draft.failed(data.field_errors || {});
+        renderSettingsPage();
+        settingsStatus(data.error || '设置未保存，请检查标记的字段。', 'error');
+        return;
+      }
+      draft.saved(data.persisted || data.settings, data.pending_fields || []);
+      state.status = state.status || {};
+      state.status.settings = { active:draft.active, persisted:draft.persisted, pending_fields:draft.pendingFields };
+      renderSettingsPage();
+      settingsStatus(data.pending_restart ? `设置已保存；重启后生效：${data.pending_fields.join('、')}。` : '设置已保存。', data.pending_restart ? 'pending' : 'ok');
     }
 
     async function refreshStatus(options = {}) {
@@ -602,6 +946,7 @@ const $ = (id) => document.getElementById(id);
         if (!res.ok) throw { ...data, status: res.status };
         state.status = data;
         renderStatus(data);
+        await loadOAuthPasswordStatus();
         if (state.token) localStorage.setItem('mcpAdminToken', state.token);
         else localStorage.removeItem('mcpAdminToken');
         showAdmin();
@@ -649,26 +994,21 @@ const $ = (id) => document.getElementById(id);
       renderChatConversations();
       renderMcpRequests(data.recent_mcp_requests || []);
       renderCalls(data.recent_tool_calls || []);
+      renderOAuthPersistence(data);
+      renderOAuthCredential();
       refreshOAuthAgents();
       refreshSigningKeys();
       setValue('defaultCwd', data.runtime?.default_cwd_display || '.');
       renderSessionOverview(data, contextCount, projectCount);
       const startup = data.startup_settings || {};
-      setValue('settingsWorkspace', data.runtime?.workspace || '');
-      setValue('settingsWorkspaceCatalog', JSON.stringify(data.runtime?.workspace_catalog?.workspaces || [], null, 2));
-      setValue('settingsHost', data.server?.host || '');
-      setValue('settingsPort', data.server?.port || '');
-      const allowedOrigins = Object.prototype.hasOwnProperty.call(startup, 'allowed_origins')
-        ? (Array.isArray(startup.allowed_origins) ? startup.allowed_origins : parseList(startup.allowed_origins))
-        : (Array.isArray(data.auth?.allowed_origins) ? data.auth.allowed_origins : []);
-      setValue('settingsAllowedOrigins', allowedOrigins.join('\n'));
-      setValue('settingsOAuthServerUrl', startup.oauth_server_url || '');
-      const tokenSecret = $('settingsOAuthTokenSecret');
-      if (tokenSecret) tokenSecret.placeholder = startup.oauth_token_secret_configured ? '已保存，留空不变' : '留空时首次 OAuth 启动会自动生成';
-      $('settingsOauthCompatibility').checked = Boolean(startup.oauth_compatibility_mode || data.auth?.oauth_compatibility_mode);
-      setValue('settingsPermission', data.runtime?.permission_mode || 'safe');
-      setValue('settingsToolProfile', data.runtime?.tool_profile || startup.tool_profile || 'full');
-      setValue('settingsShellEnv', data.runtime?.shell_env_inherit || 'core');
+      renderSettingsPage(data.settings || {
+        active: {
+          workspace_catalog:data.runtime?.workspace_catalog?.workspaces || [], default_workspace_id:data.runtime?.workspace_catalog?.default_workspace_id || '',
+          host:data.server?.host || '127.0.0.1', port:data.server?.port || 8000, allowed_origins:data.auth?.allowed_origins || [],
+          permission_mode:data.runtime?.permission_mode || 'safe', tool_profile:data.runtime?.tool_profile || 'full', shell_env_inherit:data.runtime?.shell_env_inherit || 'core',
+        },
+        persisted:startup,
+      });
       setText('resultSummary', JSON.stringify({ ok:true, summary:'status refreshed', runtime:data.runtime, tool_counts:data.tool_counts }, null, 2));
     }
 
@@ -999,6 +1339,16 @@ const $ = (id) => document.getElementById(id);
     window.serverLogs = async (alias) => { out(await callTool('mcp_server_logs', { alias, max_lines:80 })); };
     window.restartServer = async (alias) => { await callTool('mcp_server_stop', { alias }); out(await callTool('mcp_server_start', { alias })); await refreshStatus(); };
     window.removeServer = async (alias) => { if (!confirm('确认删除这个 MCP 配置？')) return; out(await callTool('mcp_server_remove', { alias, apply:true })); await refreshStatus(); };
+    async function runOAuthAdminAction(action, id, message) {
+      if (message && !confirm(message)) return;
+      out(await api('/api/admin/oauth/actions', { action, id }));
+      await refreshOAuthAgents();
+      await refreshStatus({ silent:true, force:true });
+    }
+    window.setOAuthAgentEnabled = async (clientId, enabled) => runOAuthAdminAction(enabled ? 'enable_agent' : 'disable_agent', clientId, `${enabled ? '重新启用' : '禁用'}客户端 ${clientId}？禁用会立即撤销其现有授权。`);
+    window.revokeOAuthGrant = async (grantId) => runOAuthAdminAction('revoke_grant', grantId, '撤销这个 Grant 及其 Access/Refresh Token？');
+    window.revokeOAuthAccessToken = async (jti) => runOAuthAdminAction('revoke_access_token', jti, '立即撤销这个 Access Token？');
+    window.revokeOAuthRefreshFamily = async (familyId) => runOAuthAdminAction('revoke_refresh_family', familyId, '撤销这个 Refresh Token Family？客户端将无法继续刷新。');
     window.activateSigningKey = async (kid) => { if (!confirm(`激活 ${kid}？`)) return; out(await api('/api/admin/oauth/actions', { action:'activate_signing_key', id:kid })); await refreshStatus(); };
     window.revokeSigningKey = async (kid) => { if (!confirm(`紧急撤销 ${kid} 会立即使相关 Agent token 失效。继续？`)) return; out(await api('/api/admin/oauth/actions', { action:'revoke_signing_key', id:kid })); await refreshStatus(); };
     window.terminateSession = async (sessionId) => { if (!confirm('确认终止这个会话？')) return; out(await api('/api/admin/runtime', { terminate_session: sessionId })); await refreshStatus(); };
@@ -1142,28 +1492,60 @@ const $ = (id) => document.getElementById(id);
     }
 
     async function oauthLogin() {
-      const verifier = Array.from(crypto.getRandomValues(new Uint8Array(48))).map((b) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'[b % 66]).join('');
-      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
-      const challenge = btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-      sessionStorage.setItem('mcpAdminVerifier', verifier);
-      const params = new URLSearchParams({ response_type:'code', client_id:'admin-console', redirect_uri:location.origin + '/admin', code_challenge:challenge, code_challenge_method:'S256', scope:'admin', state:String(Date.now()) });
-      location.href = '/oauth/authorize?' + params.toString();
+      await beginOAuthFlow({ kind:'admin', clientId:'admin-console', scope:'admin' });
     }
 
     async function exchangeOAuthCode() {
       const url = new URL(location.href);
       const code = url.searchParams.get('code');
-      const verifier = sessionStorage.getItem('mcpAdminVerifier');
-      if (!code || !verifier) return false;
-      const body = new URLSearchParams({ grant_type:'authorization_code', client_id:'admin-console', redirect_uri:location.origin + '/admin', code, code_verifier:verifier });
+      if (!code) return false;
+
+      let flow = null;
+      try {
+        flow = JSON.parse(sessionStorage.getItem('mcpOAuthFlow') || 'null');
+      } catch (err) {
+        sessionStorage.removeItem('mcpOAuthFlow');
+      }
+      const legacyVerifier = sessionStorage.getItem('mcpAdminVerifier');
+      if (!flow && legacyVerifier) {
+        flow = {
+          kind:'admin',
+          verifier:legacyVerifier,
+          state:url.searchParams.get('state') || '',
+          client_id:'admin-console',
+          redirect_uri:location.origin + '/admin',
+          scope:'admin',
+        };
+      }
+      if (!flow?.verifier) throw new Error('OAuth 回调缺少本地 PKCE verifier。');
+      if (flow.state && !url.searchParams.get('state')) throw new Error('OAuth 回调缺少 state。');
+      if (flow.state && flow.state !== url.searchParams.get('state')) throw new Error('OAuth state 校验失败。');
+
+      const body = new URLSearchParams({
+        grant_type:'authorization_code',
+        client_id:flow.client_id,
+        redirect_uri:flow.redirect_uri,
+        code,
+        code_verifier:flow.verifier,
+      });
       const res = await fetch('/oauth/token', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
       const data = await res.json().catch(() => ({ ok:false, error:`HTTP ${res.status}` }));
       if (!res.ok || !data.access_token) throw { ...data, status: res.status };
-      state.token = data.access_token;
+
+      sessionStorage.removeItem('mcpOAuthFlow');
       sessionStorage.removeItem('mcpAdminVerifier');
-      setValue('token', state.token);
       history.replaceState(null, '', '/admin');
-      return true;
+      if (flow.kind === 'credential') {
+        state.pendingOAuthCredential = {
+          ...data,
+          client_id:flow.client_id,
+          token_endpoint:location.origin + '/oauth/token',
+        };
+        return 'credential';
+      }
+      state.token = data.access_token;
+      setValue('token', state.token);
+      return 'admin';
     }
 
     async function loginWithToken(event) {
@@ -1185,6 +1567,7 @@ const $ = (id) => document.getElementById(id);
       state.status = null;
       localStorage.removeItem('mcpAdminToken');
       sessionStorage.removeItem('mcpAdminVerifier');
+      clearOneTimeOAuthPassword();
       setValue('token', '');
       showLogin('已退出登录，请输入管理 token 或使用 OAuth 登录。');
       $('token').focus();
@@ -1211,7 +1594,7 @@ const $ = (id) => document.getElementById(id);
         }
       });
       window.addEventListener('beforeunload', (event) => {
-        if (!state.dirty) return;
+        if (!state.dirty && !state.settings?.dirty) return;
         event.preventDefault();
         event.returnValue = '';
       });
@@ -1248,6 +1631,62 @@ const $ = (id) => document.getElementById(id);
       $('validateServer').onclick = validateCurrentServerConfig;
       $('planServer').onclick = previewServerConfig;
       $('installServer').onclick = saveServerConfig;
+      bindWorkspaceEditor($('workspaceEditor'), {
+        update(index, field, value) {
+          const workspace = state.settings?.draft.workspace_catalog?.[index];
+          if (!workspace) return;
+          if (field === 'enabled' && !value && workspace.id === state.settings.draft.default_workspace_id) {
+            workspace.enabled = true;
+            settingsStatus('默认工作区必须保持启用；请先选择新的默认工作区。', 'error');
+            renderSettingsPage();
+            return;
+          }
+          workspace[field] = value;
+          syncDraftFromSettingsControls();
+        },
+        setDefault: setWorkspaceDefault,
+        remove(index) {
+          const workspaces = state.settings?.draft.workspace_catalog || [];
+          if (workspaces.length <= 1) return;
+          const removed = workspaces[index];
+          workspaces.splice(index, 1);
+          if (removed?.id === state.settings.draft.default_workspace_id) {
+            const next = workspaces.find((item) => item.enabled !== false) || workspaces[0];
+            state.settings.draft.default_workspace_id = next.id;
+          }
+          renderSettingsPage();
+        },
+        check: checkWorkspace,
+      });
+      $('addWorkspace').onclick = () => {
+        if (!state.settings) return;
+        state.settings.draft.workspace_catalog.push(createWorkspace(state.settings.draft.workspace_catalog));
+        renderSettingsPage();
+      };
+      $('settingsForm').addEventListener('input', () => syncDraftFromSettingsControls());
+      $('settingsForm').addEventListener('change', () => syncDraftFromSettingsControls());
+      $('settingsSafetyPreset').onchange = () => {
+        const preset = SAFETY_PRESETS[$('settingsSafetyPreset').value];
+        if (!preset || !state.settings) return;
+        state.settings.draft.permission_mode = preset.permission_mode;
+        state.settings.draft.tool_profile = preset.tool_profile;
+        syncSettingsControls();
+        syncDraftFromSettingsControls();
+      };
+      document.querySelectorAll('input[name="settingsHostMode"]').forEach((input) => {
+        input.onchange = () => {
+          if (input.value === 'local') setValue('settingsHost', '127.0.0.1');
+          if (input.value === 'lan') setValue('settingsHost', '0.0.0.0');
+          updateAccessAddress();
+          syncDraftFromSettingsControls();
+        };
+      });
+      $('discardStartupSettings').onclick = () => {
+        if (!state.settings?.dirty || confirm('放弃所有未保存的设置修改？')) {
+          state.settings.reset({ active:state.settings.active, persisted:state.settings.persisted, pending_fields:state.settings.pendingFields });
+          renderSettingsPage();
+        }
+      };
       $('secretSet').onclick = async () => {
         const name = $('secretName').value.trim();
         const value = $('secretValue').value;
@@ -1267,6 +1706,10 @@ const $ = (id) => document.getElementById(id);
       $('refreshOAuthAgents').onclick = () => { refreshOAuthAgents(); };
       $('refreshSigningKeys').onclick = () => { refreshSigningKeys(); };
       $('rotateSigningKey').onclick = async () => { if (!confirm('生成并激活新的 OAuth signing key？旧 key 将保留用于验证未过期 token。')) return; out(await api('/api/admin/oauth/actions', { action:'rotate_signing_key', id:'active' })); await refreshStatus(); };
+      $('generateOAuthPassword').onclick = generateOAuthPassword;
+      $('rotateOAuthPassword').onclick = rotateOAuthPassword;
+      $('copyOAuthPassword').onclick = async () => copyText($('oauthPasswordOneTimeValue').value, 'OAuth Password 已复制。');
+      $('clearOAuthPassword').onclick = clearOneTimeOAuthPassword;
       $('setDefaultCwd').onclick = async () => { out(await api('/api/admin/runtime', { default_cwd:$('defaultCwd').value })); await refreshStatus(); };
       $('exportAllTranscripts').onclick = async () => exportTranscriptPayload();
       $('exportAllChatTranscripts').onclick = async () => exportChatPayload();
@@ -1295,11 +1738,18 @@ const $ = (id) => document.getElementById(id);
       $('showChatSource').onchange = () => applyChatFilter();
       $('chatReadLimit').onchange = () => { if (state.selectedConversation) window.readChatConversation(state.selectedConversation); };
       $('copyOutput').onclick = copyOutput;
-      $('saveRuntimeAuth').onclick = async () => { out(await api('/api/admin/runtime', { auth_token:$('runtimeAuthToken').value, admin_token:$('runtimeAdminToken').value, oauth_password:$('runtimeOAuthPassword').value })); await refreshStatus(); };
-      $('generateOAuthTokenSecret').onclick = generateOAuthTokenSecret;
-      $('toggleOAuthTokenSecret').onclick = toggleOAuthTokenSecretVisibility;
-      $('copyOAuthTokenSecret').onclick = copyOAuthTokenSecret;
-      $('saveStartupSettings').onclick = async () => { out(await api('/api/admin/settings', { settings:startupSettingsPayload() })); setValue('settingsOAuthTokenSecret', ''); setOAuthTokenSecretVisibility(false); setText('oauthTokenSecretHint', '设置已保存，输入框已清空。'); await refreshStatus(); };
+      $('saveRuntimeAuth').onclick = async () => { out(await api('/api/admin/runtime', { auth_token:$('runtimeAuthToken').value, admin_token:$('runtimeAdminToken').value })); await refreshStatus(); };
+      $('copyOAuthMcpUrl').onclick = async () => copyText($('oauthMcpUrl').value, 'MCP URL 已复制。');
+      $('copyOAuthConfig').onclick = copyOAuthConfig;
+      $('copyVaultSetup').onclick = async () => copyText(OAUTH_VAULT_COMMAND, 'Secret Vault 启用命令已复制。');
+      $('copySecretVaultSetup').onclick = async () => copyText(OAUTH_VAULT_COMMAND, 'Secret Vault 启用命令已复制。');
+      $('generateOAuthClientId').onclick = generateOAuthClientId;
+      $('issueOAuthCredential').onclick = issueOAuthCredential;
+      $('copyOAuthCredentialJson').onclick = copyOAuthCredentialJson;
+      $('clearOAuthCredential').onclick = clearOAuthCredential;
+      $('goOAuthSettings').onclick = () => { setView('settings'); $('settingsOAuthServerUrl')?.focus(); };
+      $('goSigningKeys').onclick = () => setView('signingKeys');
+      $('settingsForm').onsubmit = saveStartupSettings;
       $('advancedRun').onclick = async () => { const payload = JSON.parse($('advancedPayload').value); out(await callTool(payload.name, payload.arguments || {})); await refreshStatus(); };
     }
 
@@ -1314,7 +1764,8 @@ const $ = (id) => document.getElementById(id);
         await refreshStatus({ force:true });
       } catch (err) {
         sessionStorage.removeItem('mcpAdminVerifier');
-        showLogin(isAuthError(err) ? 'OAuth 登录失败或授权已过期，请重试。' : 'OAuth 登录未完成，请重试。', 'error');
+        sessionStorage.removeItem('mcpOAuthFlow');
+        showLogin(isAuthError(err) ? 'OAuth 登录失败或授权已过期，请重试。' : `OAuth 登录未完成：${err?.error_description || err?.message || '请重试。'}`, 'error');
       }
       setInterval(() => {
         if (!$('adminApp')?.classList.contains('hidden')) refreshStatus({ silent:true });

@@ -7,6 +7,8 @@ The normative schema source is [profile-v0.1.md](profile-v0.1.md). Live schemas 
 - `read_file`: read UTF-8 text slices inside the workspace.
 - `server_info`: inspect server/version/protocol/workspace/default cwd/profile/auth/runtime policy metadata.
 - `workspace_identity`: confirm the active host, platform, workspace identity, and git state before remote edits.
+- `list_workspaces`: list configured workspace roots and identify the workspace active for the current MCP session.
+- `select_workspace`: select the active workspace for the calling MCP HTTP session and reset its default cwd.
 - `check_exec_environment`: inspect lightweight `exec_command` environment and sandbox state known to the server.
 - `get_default_cwd`: return the current default cwd inside the workspace.
 - `set_default_cwd`: set the default cwd for relative tool paths.

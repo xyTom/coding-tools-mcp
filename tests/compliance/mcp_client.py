@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parents[2]
 REQUIRED_TOOLS = (
     "server_info",
     "workspace_identity",
+    "list_workspaces",
+    "select_workspace",
     "check_exec_environment",
     "read_file",
     "file_stat",

@@ -40,6 +40,12 @@ from .admin import ADMIN_TOOL_NAMES, McpAdminManager, McpManagementError
 from .codex_sessions import import_codex_session_candidates, scan_codex_session_candidates
 from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
 from .secret_vault import SecretVault, SecretVaultError
+from .settings_definition import (
+    SettingsValidationError,
+    normalize_startup_settings,
+    pending_restart_fields,
+    schema_payload,
+)
 from .settings_store import ServerSettingsStore, SettingsStoreError, default_settings_dir, sanitize_settings
 from .transcript import TranscriptStore
 from .upstream import UpstreamManager
@@ -237,6 +243,7 @@ UPSTREAM_CONFIG_FILENAME = "mcp-servers.json"
 SERVER_SETTINGS_FILENAME = "server-settings.json"
 OAUTH_DB_FILENAME = "oauth.sqlite3"
 OAUTH_SECRET_VAULT_FILENAME = "oauth-secrets.json"
+OAUTH_AUTHORIZATION_PASSWORD_SECRET = "oauth_authorization_password"
 TRANSCRIPT_DB_FILENAME = "transcripts.sqlite3"
 RECENT_TOOL_TRACE_LIMIT = 100
 STARTUP_SETTING_KEYS = {
@@ -342,6 +349,8 @@ class OAuthConfig:
     refresh_token_ttl: int = 60 * 60 * 24 * 90
     compatibility_mode: bool = False
     compatibility_token_ttl: int = 60 * 60 * 24 * 90
+    authorization_password_source: str = "legacy_settings"
+    authorization_password_created_at: str | None = None
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
@@ -440,9 +449,47 @@ def _oauth_scope_allowed(scope: str, cfg: OAuthConfig) -> bool:
 def _oauth_client_id_allowed(client_id: str, cfg: OAuthConfig) -> bool:
     if not client_id:
         return False
+    # The built-in admin console is a first-party public PKCE client. Keep it
+    # available even when deployments restrict ordinary MCP OAuth to one
+    # configured client ID.
+    if secrets.compare_digest(client_id, "admin-console"):
+        return True
     if cfg.client_id is None:
         return True
     return secrets.compare_digest(client_id, cfg.client_id)
+
+
+def _oauth_effective_scope(
+    scope: str,
+    cfg: OAuthConfig,
+    *,
+    client_id: str,
+    redirect_uri: str,
+    server_url: str,
+) -> str | None:
+    requested = {part for part in scope.split() if part}
+    if not requested or not requested.issubset({"mcp", cfg.admin_scope}):
+        return None
+
+    # Admin scope is reserved for the same-origin built-in admin console.
+    # External MCP clients that request both advertised scopes are safely
+    # down-scoped to `mcp` instead of receiving management privileges.
+    if cfg.admin_scope in requested:
+        try:
+            normalized_redirect = OAuthAuthorizationStore.validate_redirect_uri(redirect_uri)
+            admin_redirect = OAuthAuthorizationStore.validate_redirect_uri(f"{server_url.rstrip('/')}/admin")
+        except ValueError:
+            return None
+        trusted_admin_client = secrets.compare_digest(client_id, "admin-console") and secrets.compare_digest(
+            normalized_redirect,
+            admin_redirect,
+        )
+        if not trusted_admin_client:
+            requested.discard(cfg.admin_scope)
+
+    if not requested:
+        return None
+    return " ".join(name for name in ("mcp", cfg.admin_scope) if name in requested)
 
 
 def _oauth_token_auth_methods(cfg: OAuthConfig) -> list[str]:
@@ -567,6 +614,80 @@ def _oauth_key_secret_ref(kid: str) -> str:
     return f"oauth-signing/{kid}"
 
 
+def _oauth_password_vault_error() -> ValueError:
+    return ValueError(
+        "OAuth password cannot be persisted because the secret vault is disabled. "
+        f"Set {ENV_PREFIX}_SECRETS_KEY and restart the server."
+    )
+
+
+def _resolve_oauth_authorization_password(
+    startup_settings: dict[str, Any],
+    settings_path: Path | None,
+    *,
+    secret_vault: SecretVault,
+) -> tuple[str, str]:
+    """Resolve the authorize-page password without ever keeping a generated value ephemeral."""
+    env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD") or ""
+    if env_password:
+        return env_password, "environment"
+
+    secret_ref = (
+        _settings_text(startup_settings, "oauth_authorization_password_secret_ref")
+        or OAUTH_AUTHORIZATION_PASSWORD_SECRET
+    )
+    if secret_vault.enabled():
+        try:
+            if secret_ref in secret_vault.list_names():
+                password = secret_vault.get_secret(secret_ref)
+                if settings_path is not None and not _settings_text(
+                    startup_settings,
+                    "oauth_authorization_password_secret_ref",
+                ):
+                    updated_settings = dict(startup_settings)
+                    updated_settings["oauth_authorization_password_secret_ref"] = secret_ref
+                    try:
+                        write_server_settings(settings_path, updated_settings)
+                    except (OSError, SettingsStoreError) as exc:
+                        raise ValueError("OAuth authorization password reference could not be persisted.") from exc
+                    startup_settings.clear()
+                    startup_settings.update(updated_settings)
+                return password, "vault"
+        except SecretVaultError as exc:
+            raise ValueError("Configured OAuth authorization password cannot be read from the secret vault.") from exc
+
+    legacy_password = _settings_text(startup_settings, "oauth_password")
+    if not secret_vault.enabled():
+        raise _oauth_password_vault_error()
+
+    password = legacy_password or secrets.token_urlsafe(32)
+    source = "legacy_settings" if legacy_password else "generated"
+    created_at = _settings_text(startup_settings, "oauth_authorization_password_created_at") or (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    try:
+        secret_vault.set_secret(OAUTH_AUTHORIZATION_PASSWORD_SECRET, password)
+    except SecretVaultError as exc:
+        raise ValueError("OAuth authorization password could not be saved to the secret vault.") from exc
+
+    updated_settings = dict(startup_settings)
+    updated_settings["oauth_authorization_password_secret_ref"] = OAUTH_AUTHORIZATION_PASSWORD_SECRET
+    updated_settings["oauth_authorization_password_created_at"] = created_at
+    updated_settings.pop("oauth_password", None)
+    if settings_path is not None:
+        try:
+            write_server_settings(settings_path, updated_settings)
+        except (OSError, SettingsStoreError) as exc:
+            try:
+                secret_vault.delete_secret(OAUTH_AUTHORIZATION_PASSWORD_SECRET)
+            except SecretVaultError:
+                pass
+            raise ValueError("OAuth authorization password could not be persisted.") from exc
+    startup_settings.clear()
+    startup_settings.update(updated_settings)
+    return password, source
+
+
 def _resolve_oauth_token_secret(
     startup_settings: dict[str, Any],
     settings_path: Path | None,
@@ -631,19 +752,35 @@ def _resolve_oauth_refresh_pepper(
     secret_vault: SecretVault | None = None,
     legacy_seed: bytes | None = None,
 ) -> bytes:
-    raw = os.environ.get(f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_PEPPER") or _settings_text(startup_settings, "oauth_refresh_token_pepper") or ""
+    env_raw = os.environ.get(f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_PEPPER") or ""
+    settings_raw = _settings_text(startup_settings, "oauth_refresh_token_pepper") or ""
+    raw = env_raw or settings_raw
     secret_ref = _settings_text(startup_settings, "oauth_refresh_token_pepper_secret_ref")
+    loaded_from_vault = False
     if not raw and secret_ref and secret_vault is not None and secret_vault.enabled():
         try:
             raw = secret_vault.get_secret(secret_ref)
+            loaded_from_vault = True
         except SecretVaultError as exc:
             raise ValueError("Configured OAuth refresh-token pepper cannot be read from the secret vault.") from exc
     if raw:
         try:
-            return bytes.fromhex(raw)
+            pepper = bytes.fromhex(raw)
         except ValueError as exc:
             raise ValueError(f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_PEPPER must be hex-encoded bytes.") from exc
-    pepper = legacy_seed or secrets.token_bytes(32)
+    else:
+        pepper = legacy_seed or secrets.token_bytes(32)
+
+    # Environment-provided material is intentionally not copied into settings.
+    if env_raw or settings_path is None:
+        return pepper
+
+    # A pepper already loaded from the vault is fully persisted and needs no
+    # rewrite. Plaintext legacy settings, however, are migrated on the first
+    # restart after CODING_TOOLS_MCP_SECRETS_KEY is configured.
+    if loaded_from_vault:
+        return pepper
+
     if settings_path is None:
         return pepper
     updated_settings = dict(startup_settings)
@@ -655,8 +792,10 @@ def _resolve_oauth_refresh_pepper(
             raise ValueError("OAuth refresh-token pepper could not be saved to the secret vault.") from exc
         updated_settings["oauth_refresh_token_pepper_secret_ref"] = secret_ref
         updated_settings.pop("oauth_refresh_token_pepper", None)
-    else:
+    elif not settings_raw:
         updated_settings["oauth_refresh_token_pepper"] = pepper.hex()
+    else:
+        return pepper
     try:
         write_server_settings(settings_path, updated_settings)
     except (OSError, SettingsStoreError) as exc:
@@ -848,6 +987,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Workspace identity",
         description="Return stable workspace identity, host, platform, and git state for remote editing confirmation.",
         read_only=True,
+        idempotent=True,
+        in_read_only_profile=True,
+    ),
+    "list_workspaces": ToolSpec(
+        title="List workspaces",
+        description="List configured workspace roots and identify the workspace active for the current MCP session.",
+        read_only=True,
+        idempotent=True,
+        in_read_only_profile=True,
+    ),
+    "select_workspace": ToolSpec(
+        title="Select workspace",
+        description="Select the active workspace for the current MCP HTTP session and reset its default cwd.",
+        read_only=False,
         idempotent=True,
         in_read_only_profile=True,
     ),
@@ -2423,6 +2576,13 @@ class Runtime:
         with self.session_default_cwds_lock:
             self.session_workspace_ids[session_id] = entry.id
             self.session_default_cwds[session_id] = entry.root
+        with self.http_sessions_lock:
+            current = self.http_sessions.get(session_id)
+            if current is not None:
+                current["workspace_id"] = entry.id
+                current["workspace"] = str(entry.root)
+                current["default_cwd"] = str(entry.root)
+                current["default_cwd_display"] = "."
         return {"session_id": session_id, "workspace": entry.payload(), "default_cwd": "."}
 
     def _set_runtime_dir(self, runtime_dir: Path) -> None:
@@ -2504,7 +2664,10 @@ class Runtime:
                 "title": "Coding Tools MCP",
                 "version": __version__,
             },
-            "instructions": "Use these tools only for local coding operations inside the configured workspace.",
+            "instructions": (
+                "Use these tools only for local coding operations inside the active workspace. "
+                "Call list_workspaces and select_workspace when the requested project is in another configured root."
+            ),
         }
 
     def list_tools(self, *, include_admin: bool = False) -> dict[str, Any]:
@@ -2537,6 +2700,119 @@ class Runtime:
 
     def oauth_enabled(self) -> bool:
         return self.oauth_config is not None
+
+    def oauth_authorization_password_status(self) -> dict[str, Any]:
+        cfg = self.oauth_config
+        if cfg is None:
+            return {
+                "configured": False,
+                "source": None,
+                "managed_externally": False,
+                "can_generate": False,
+                "can_rotate": False,
+                "fingerprint": None,
+                "created_at": None,
+                "persisted": False,
+                "vault_enabled": False,
+            }
+        source = cfg.authorization_password_source
+        managed_externally = source == "environment"
+        vault_enabled = cfg.secret_vault is not None and cfg.secret_vault.enabled()
+        configured = bool(cfg.password)
+        return {
+            "configured": configured,
+            "source": source,
+            "managed_externally": managed_externally,
+            "can_generate": not managed_externally and vault_enabled,
+            "can_rotate": configured and not managed_externally and vault_enabled,
+            "fingerprint": hashlib.sha256(cfg.password.encode("utf-8")).hexdigest()[:8] if configured else None,
+            "created_at": cfg.authorization_password_created_at,
+            "persisted": managed_externally or source in {"vault", "generated", "legacy_settings"},
+            "vault_enabled": vault_enabled,
+        }
+
+    def _persist_oauth_authorization_password(self, password: str) -> dict[str, Any]:
+        cfg = self.oauth_config
+        if cfg is None:
+            raise ToolFailure("OAUTH_PASSWORD_UNAVAILABLE", "OAuth mode is not enabled.", category="configuration")
+        if cfg.authorization_password_source == "environment":
+            raise ToolFailure(
+                "OAUTH_PASSWORD_MANAGED_EXTERNALLY",
+                f"OAuth password is managed by {ENV_PREFIX}_OAUTH_PASSWORD. Modify the environment variable and restart the server.",
+                category="configuration",
+            )
+        vault = cfg.secret_vault
+        if vault is None or not vault.enabled():
+            raise ToolFailure(
+                "OAUTH_PASSWORD_VAULT_DISABLED",
+                str(_oauth_password_vault_error()),
+                category="configuration",
+            )
+        created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        updated_settings = dict(self.startup_settings)
+        updated_settings["oauth_authorization_password_secret_ref"] = OAUTH_AUTHORIZATION_PASSWORD_SECRET
+        updated_settings["oauth_authorization_password_created_at"] = created_at
+        updated_settings.pop("oauth_password", None)
+        old_password = cfg.password
+        try:
+            vault.set_secret(OAUTH_AUTHORIZATION_PASSWORD_SECRET, password)
+            if self.settings_path is not None:
+                write_server_settings(self.settings_path, updated_settings)
+        except (SecretVaultError, SettingsStoreError, OSError) as exc:
+            try:
+                if old_password:
+                    vault.set_secret(OAUTH_AUTHORIZATION_PASSWORD_SECRET, old_password)
+                else:
+                    vault.delete_secret(OAUTH_AUTHORIZATION_PASSWORD_SECRET)
+            except SecretVaultError:
+                pass
+            raise ToolFailure(
+                "OAUTH_PASSWORD_PERSIST_FAILED",
+                "OAuth authorization password could not be persisted.",
+                category="runtime",
+            ) from exc
+        self.startup_settings = updated_settings
+        self.oauth_config = replace(
+            cfg,
+            password=password,
+            authorization_password_source="vault",
+            authorization_password_created_at=created_at,
+        )
+        return {
+            "password": password,
+            "fingerprint": hashlib.sha256(password.encode("utf-8")).hexdigest()[:8],
+            "persisted": True,
+            "source": "vault",
+        }
+
+    def generate_oauth_authorization_password(self) -> dict[str, Any]:
+        cfg = self.oauth_config
+        if cfg is not None and cfg.password:
+            raise ToolFailure(
+                "OAUTH_PASSWORD_ALREADY_CONFIGURED",
+                "OAuth authorization password is already configured. Use rotate instead.",
+                category="validation",
+            )
+        return self._persist_oauth_authorization_password(secrets.token_urlsafe(32))
+
+    def rotate_oauth_authorization_password(self) -> dict[str, Any]:
+        cfg = self.oauth_config
+        if cfg is None or not cfg.password:
+            raise ToolFailure(
+                "OAUTH_PASSWORD_NOT_CONFIGURED",
+                "OAuth authorization password is not configured. Use generate instead.",
+                category="validation",
+            )
+        return {**self._persist_oauth_authorization_password(secrets.token_urlsafe(32)), "rotated": True}
+
+    def set_oauth_authorization_password(self, password: str) -> dict[str, Any]:
+        if len(password) < 16:
+            raise ToolFailure(
+                "OAUTH_PASSWORD_TOO_SHORT",
+                "OAuth authorization password must be at least 16 characters.",
+                category="validation",
+            )
+        return self._persist_oauth_authorization_password(password)
 
     def rotate_oauth_signing_key(self) -> dict[str, Any]:
         cfg = self.oauth_config
@@ -2759,6 +3035,27 @@ class Runtime:
     def workspace_identity(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.workspace_identity_payload()
 
+    def list_workspaces(self, args: dict[str, Any]) -> dict[str, Any]:
+        active_workspace_id = self.workspace_id_for_session()
+        active_workspace = self.workspace_catalog.get(active_workspace_id)
+        return {
+            "active_workspace_id": active_workspace_id,
+            "active_workspace": active_workspace.payload(),
+            "default_workspace_id": self.workspace_catalog.default_id,
+            "workspaces": [entry.payload() for entry in self.workspace_catalog.entries if entry.enabled],
+        }
+
+    def select_workspace(self, args: dict[str, Any]) -> dict[str, Any]:
+        session_id = self.current_tool_session_id()
+        if session_id is None:
+            raise ToolFailure(
+                "SESSION_REQUIRED",
+                "Workspace selection requires an active MCP HTTP session.",
+                category="validation",
+            )
+        payload = self.set_http_session_workspace(session_id, str(args["workspace_id"]))
+        return {**payload, "active_workspace_id": self.workspace_id_for_session(session_id)}
+
     def server_info_payload(self) -> dict[str, Any]:
         tools = self.exposed_tool_names()
         landlock = landlock_status_payload()
@@ -2877,6 +3174,114 @@ class Runtime:
             parts.extend(["--allowed-origin", origin])
         return " ".join(shlex.quote(part) for part in parts)
 
+    def active_startup_settings(self) -> dict[str, Any]:
+        """Settings currently used by this process, excluding write-only values."""
+        return {
+            "workspace": str(self.workspace.root),
+            "workspace_catalog": [entry.payload() for entry in self.workspace_catalog.entries],
+            "default_workspace_id": self.workspace_catalog.default_id,
+            "host": self.server_host or "127.0.0.1",
+            "port": self.server_port or 8000,
+            "allowed_origins": list(self.allowed_origins),
+            "oauth_server_url": _settings_text(self.startup_settings, "oauth_server_url") or "",
+            "oauth_compatibility_mode": bool(self.oauth_config.compatibility_mode) if self.oauth_config else False,
+            "permission_mode": self.permission_mode,
+            "tool_profile": self.tool_profile,
+            "shell_env_inherit": self.shell_env_policy.inherit,
+        }
+
+    def startup_settings_payload(self) -> dict[str, Any]:
+        active = self.active_startup_settings()
+        persisted = dict(active)
+        persisted.update(sanitize_settings(self.startup_settings))
+        # A legacy workspace is normalised into the same canonical catalog
+        # shape used by the form, without mutating the saved file on read.
+        try:
+            normalized = normalize_startup_settings(self.startup_settings, {}, self._workspace.root)
+            persisted.update(sanitize_settings(normalized))
+        except SettingsValidationError:
+            pass
+        pending_fields = pending_restart_fields(active, persisted)
+        return {
+            "ok": True,
+            "active": active,
+            "persisted": persisted,
+            "pending_restart": bool(pending_fields),
+            "pending_fields": pending_fields,
+            "schema": schema_payload(),
+        }
+
+    def validate_startup_settings(self, updates: dict[str, Any]) -> dict[str, Any]:
+        try:
+            normalized = normalize_startup_settings(self.startup_settings, updates, self._workspace.root)
+        except SettingsValidationError as exc:
+            return {"ok": False, "field_errors": exc.field_errors, "form_errors": exc.form_errors, "error": str(exc)}
+        active = self.active_startup_settings()
+        persisted = dict(active)
+        persisted.update(sanitize_settings(normalized))
+        pending_fields = pending_restart_fields(active, persisted)
+        return {
+            "ok": True,
+            "normalized": sanitize_settings(normalized),
+            "warnings": [],
+            "restart_fields": pending_fields,
+        }
+
+    def oauth_persistence_payload(self, *, base_url: str | None = None) -> dict[str, Any]:
+        cfg = self.oauth_config
+        if cfg is None:
+            return {"enabled": False}
+
+        public_base_url = (cfg.server_url or base_url or "").rstrip("/")
+        vault = cfg.secret_vault.status_payload() if cfg.secret_vault is not None else {
+            "enabled": False,
+            "path": None,
+            "secret_count": 0,
+        }
+        signing_ref = _settings_text(self.startup_settings, "oauth_active_key_secret_ref")
+        pepper_ref = _settings_text(self.startup_settings, "oauth_refresh_token_pepper_secret_ref")
+
+        def storage_kind(*, env_name: str, secret_ref: str | None, plaintext_key: str) -> str:
+            if os.environ.get(env_name):
+                return "environment"
+            if secret_ref:
+                return "vault" if vault.get("enabled") else "vault_locked"
+            if _settings_text(self.startup_settings, plaintext_key):
+                return "plaintext_settings"
+            return "ephemeral"
+
+        return {
+            "enabled": True,
+            "public_base_url": public_base_url or None,
+            "mcp_url": f"{public_base_url}/mcp" if public_base_url else None,
+            "authorization_endpoint": f"{public_base_url}/oauth/authorize" if public_base_url else None,
+            "token_endpoint": f"{public_base_url}/oauth/token" if public_base_url else None,
+            "authorization_server_metadata": f"{public_base_url}/.well-known/oauth-authorization-server" if public_base_url else None,
+            "protected_resource_metadata": f"{public_base_url}/.well-known/oauth-protected-resource" if public_base_url else None,
+            "stable_issuer_configured": bool(cfg.server_url),
+            "client_id_restriction": cfg.client_id,
+            "client_secret_required": cfg.client_secret is not None,
+            "token_endpoint_auth_methods": _oauth_token_auth_methods(cfg),
+            "pkce_method": "S256",
+            "mcp_scope": "mcp",
+            "admin_scope": cfg.admin_scope,
+            "refresh_tokens_enabled": cfg.store is not None and not cfg.compatibility_mode,
+            "compatibility_mode": cfg.compatibility_mode,
+            "vault": vault,
+            "signing_key_storage": storage_kind(
+                env_name=f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET",
+                secret_ref=signing_ref,
+                plaintext_key="oauth_token_secret",
+            ),
+            "refresh_pepper_storage": storage_kind(
+                env_name=f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_PEPPER",
+                secret_ref=pepper_ref,
+                plaintext_key="oauth_refresh_token_pepper",
+            ),
+            "authorization_password": self.oauth_authorization_password_status(),
+            "secrets_key_env": f"{ENV_PREFIX}_SECRETS_KEY",
+        }
+
     def admin_status_payload(self, *, base_url: str | None = None) -> dict[str, Any]:
         upstream_status = self.upstream_manager.status_payload()
         admin_status = self.admin_manager.status_payload() if self.admin_manager is not None else {"enabled": False}
@@ -2899,7 +3304,7 @@ class Runtime:
         http_sessions = self.http_sessions_payload()
         with self.session_default_cwds_lock:
             session_cwds = {session: str(path) for session, path in self.session_default_cwds.items()}
-        startup_settings = sanitize_settings(self.startup_settings)
+        startup_settings = self.startup_settings_payload()["persisted"]
         oauth_store_status: dict[str, Any] = {"available": False}
         if self.oauth_config is not None and self.oauth_config.store is not None:
             try:
@@ -2910,6 +3315,7 @@ class Runtime:
                     "clients": len(self.oauth_config.store.list_clients()),
                     "grants": len(self.oauth_config.store.list_grants()),
                     "access_tokens": len(self.oauth_config.store.list_access_tokens()),
+                    "refresh_token_families": len(self.oauth_config.store.list_refresh_token_families()),
                 }
             except OAuthStoreError as exc:
                 oauth_store_status = {"available": False, "error": str(exc)}
@@ -2929,6 +3335,7 @@ class Runtime:
             },
             "config_paths": self.config_paths_payload(),
             "startup_settings": startup_settings,
+            "settings": self.startup_settings_payload(),
             "admin": admin_status,
             "upstream": upstream_status,
             "catalog": catalog,
@@ -2951,6 +3358,7 @@ class Runtime:
                 "oauth_admin_scope": self.oauth_config.admin_scope if self.oauth_config else None,
                 "oauth_compatibility_mode": self.oauth_config.compatibility_mode if self.oauth_config else False,
                 "oauth_secret_vault": self.oauth_config.secret_vault.status_payload() if self.oauth_config and self.oauth_config.secret_vault else {"enabled": False},
+                "oauth_persistence": self.oauth_persistence_payload(base_url=base_url),
                 "allowed_origins": list(self.allowed_origins),
                 "oauth_store": oauth_store_status,
             },
@@ -2979,6 +3387,11 @@ class Runtime:
     def save_startup_settings(self, updates: dict[str, Any]) -> dict[str, Any]:
         if self.settings_path is None:
             return {"ok": False, "error": "Settings path is not configured."}
+        if "oauth_password" in updates:
+            return {
+                "ok": False,
+                "error": "OAuth authorization passwords cannot be stored in plaintext settings. Use the OAuth Password management endpoint.",
+            }
         if _settings_text(updates, "oauth_token_secret") and self.oauth_config is not None:
             if self.oauth_config.secret_vault is None or not self.oauth_config.secret_vault.enabled():
                 return {
@@ -2989,36 +3402,24 @@ class Runtime:
                 "ok": False,
                 "error": "Use Signing Keys to rotate OAuth signing material; direct secret replacement is disabled.",
             }
-        current = dict(self.startup_settings)
-        for key, value in updates.items():
-            if key not in STARTUP_SETTING_KEYS:
-                continue
-            if key == "allowed_origins":
-                if value is None:
-                    current.pop(key, None)
-                else:
-                    current[key] = list(parse_allowed_origins(value))
-                continue
-            if value is None or value == "":
-                current.pop(key, None)
-            else:
-                current[key] = value
-        if "workspace_catalog" in updates or "default_workspace_id" in updates:
-            try:
-                catalog = WorkspaceCatalog.from_settings(current, self._workspace.root)
-            except WorkspaceCatalogError as exc:
-                return {"ok": False, "error": str(exc)}
-            current.update(catalog.settings_payload())
-            # Keep the legacy key during the migration window so an older
-            # server can still start with the catalog default.
-            current["workspace"] = str(catalog.default().root)
+        validation = self.validate_startup_settings(updates)
+        if not validation["ok"]:
+            return validation
+        try:
+            current = normalize_startup_settings(self.startup_settings, updates, self._workspace.root)
+        except SettingsValidationError as exc:  # Defensive: validation and save share the same rules.
+            return {"ok": False, "field_errors": exc.field_errors, "form_errors": exc.form_errors, "error": str(exc)}
         write_server_settings(self.settings_path, current)
         self.startup_settings = current
+        settings_payload = self.startup_settings_payload()
         return {
             "ok": True,
             "requires_restart": True,
             "restart_command": self.restart_command(),
-            "settings": sanitize_settings(current),
+            "persisted": settings_payload["persisted"],
+            "pending_restart": settings_payload["pending_restart"],
+            "pending_fields": settings_payload["pending_fields"],
+            "settings": settings_payload["persisted"],
         }
 
     def apply_runtime_update(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -3030,8 +3431,8 @@ class Runtime:
             self.admin_token = str(request.get("admin_token") or "") or None
             changes["admin_token"] = self.admin_token is not None
         if "oauth_password" in request and self.oauth_config is not None:
-            password = str(request.get("oauth_password") or "") or secrets.token_urlsafe(32)
-            self.oauth_config = replace(self.oauth_config, password=password)
+            password = str(request.get("oauth_password") or "")
+            self.set_oauth_authorization_password(password)
             changes["oauth_password"] = True
         if "default_cwd" in request:
             resolved = self.workspace.resolve_existing(str(request.get("default_cwd") or "."))
@@ -6733,6 +7134,11 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     return {
         "server_info": object_schema(),
         "workspace_identity": object_schema(),
+        "list_workspaces": object_schema(),
+        "select_workspace": object_schema(
+            {"workspace_id": {**string, "minLength": 1}},
+            ["workspace_id"],
+        ),
         "check_exec_environment": object_schema(),
         "record_chat_transcript": object_schema(
             {
@@ -7137,6 +7543,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return
             self.send_json(self.runtime.admin_status_payload(base_url=self.oauth_base_url()))
             return
+        if normalized == "/api/admin/settings":
+            if not self.is_admin_request():
+                self.send_admin_unauthorized()
+                return
+            self.send_json(self.runtime.startup_settings_payload())
+            return
         if normalized.startswith("/api/admin/oauth/"):
             self.handle_oauth_admin_get(normalized)
             return
@@ -7154,7 +7566,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             "/api/admin/status",
             "/api/admin/tool",
             "/api/admin/settings",
+            "/api/admin/settings/validate",
             "/api/admin/runtime",
+            "/api/admin/oauth/password",
+            "/api/admin/oauth/password/generate",
+            "/api/admin/oauth/password/rotate",
             "/api/tool",
             "/.well-known/mcp.json",
             "/.well-known/mcp/server-card.json",
@@ -7222,11 +7638,17 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized == "/api/admin/settings":
             self.handle_admin_settings()
             return
+        if normalized == "/api/admin/settings/validate":
+            self.handle_admin_settings_validate()
+            return
         if normalized == "/api/admin/runtime":
             self.handle_admin_runtime()
             return
         if normalized == "/api/admin/workspaces/session":
             self.handle_admin_workspace_session()
+            return
+        if normalized in {"/api/admin/oauth/password/generate", "/api/admin/oauth/password/rotate"}:
+            self.handle_oauth_password_action(rotate=normalized.endswith("/rotate"))
             return
         if normalized == "/api/admin/oauth/actions":
             self.handle_oauth_admin_action()
@@ -7548,7 +7970,19 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if request is None:
             return
         updates = request.get("settings") if isinstance(request.get("settings"), dict) else request
-        self.send_json(self.runtime.save_startup_settings(cast(dict[str, Any], updates)))
+        result = self.runtime.save_startup_settings(cast(dict[str, Any], updates))
+        self.send_json(result, status=200 if result.get("ok") else 400)
+
+    def handle_admin_settings_validate(self) -> None:
+        if not self.is_admin_request():
+            self.send_admin_unauthorized()
+            return
+        request = self._read_admin_json_body()
+        if request is None:
+            return
+        updates = request.get("settings") if isinstance(request.get("settings"), dict) else request
+        result = self.runtime.validate_startup_settings(cast(dict[str, Any], updates))
+        self.send_json(result, status=200 if result.get("ok") else 400)
 
     def handle_admin_runtime(self) -> None:
         if not self.is_admin_request():
@@ -7585,6 +8019,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not self.is_admin_request():
             self.send_admin_unauthorized()
             return
+        if path == "/api/admin/oauth/password":
+            self.send_json(self.runtime.oauth_authorization_password_status())
+            return
         store = self.runtime.oauth_config.store if self.runtime.oauth_config is not None else None
         if store is None:
             self.send_json({"ok": False, "error": "OAuth authorization store is not enabled"}, status=404)
@@ -7596,6 +8033,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "grants": store.list_grants()})
             elif path == "/api/admin/oauth/tokens":
                 self.send_json({"ok": True, "tokens": store.list_access_tokens()})
+            elif path == "/api/admin/oauth/refresh-families":
+                self.send_json({"ok": True, "families": store.list_refresh_token_families()})
             elif path == "/api/admin/oauth/signing-keys":
                 self.send_json({"ok": True, "keys": store.list_signing_keys()})
             elif path == "/api/admin/oauth/audit":
@@ -7604,6 +8043,35 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "Unknown OAuth management endpoint"}, status=404)
         except OAuthStoreError:
             self.send_json({"ok": False, "error": "OAuth authorization store is unavailable", "code": "OAUTH_STORE_UNAVAILABLE"}, status=503)
+
+    def handle_oauth_password_action(self, *, rotate: bool) -> None:
+        if not self.is_admin_request():
+            self.send_admin_unauthorized()
+            return
+        origin = self.headers.get("Origin")
+        if origin and not is_allowed_origin(origin, auth_enabled=True, allowed_origins=self.runtime.allowed_origins):
+            self.send_json({"ok": False, "error": "Origin denied"}, status=403)
+            return
+        try:
+            payload = (
+                self.runtime.rotate_oauth_authorization_password()
+                if rotate
+                else self.runtime.generate_oauth_authorization_password()
+            )
+        except ToolFailure as exc:
+            if exc.code in {
+                "OAUTH_PASSWORD_ALREADY_CONFIGURED",
+                "OAUTH_PASSWORD_NOT_CONFIGURED",
+                "OAUTH_PASSWORD_MANAGED_EXTERNALLY",
+            }:
+                status = 409
+            elif exc.code in {"OAUTH_PASSWORD_UNAVAILABLE", "OAUTH_PASSWORD_VAULT_DISABLED"}:
+                status = 503
+            else:
+                status = 500
+            self.send_json({"ok": False, "error": exc.message, "code": exc.code}, status=status)
+            return
+        self.send_json({"ok": True, **payload})
 
     def handle_oauth_admin_action(self) -> None:
         if not self.is_admin_request():
@@ -7703,7 +8171,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "authorization_endpoint": f"{base}/oauth/authorize",
                 "token_endpoint": f"{base}/oauth/token",
                 "response_types_supported": ["code"],
-                "grant_types_supported": ["authorization_code"],
+                "grant_types_supported": [
+                    "authorization_code",
+                    *(["refresh_token"] if cfg.store is not None and not cfg.compatibility_mode else []),
+                ],
                 "scopes_supported": ["mcp", cfg.admin_scope],
                 "code_challenge_methods_supported": ["S256"],
                 "token_endpoint_auth_methods_supported": _oauth_token_auth_methods(cfg),
@@ -7718,7 +8189,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         base = self.oauth_base_url()
         self.send_json(
-            {"resource": base, "authorization_servers": [base], "bearer_methods_supported": ["header"], "scopes_supported": ["mcp", cfg.admin_scope]},
+            {"resource": base, "authorization_servers": [base], "bearer_methods_supported": ["header"], "scopes_supported": ["mcp"]},
             head_only=head_only,
         )
 
@@ -7821,7 +8292,14 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if code_challenge_method != "S256" or not code_challenge:
             self._send_html("<h2>Error</h2><p>code_challenge_method must be S256 and code_challenge is required</p>", status=400)
             return
-        if not _oauth_scope_allowed(scope, cfg):
+        scope = _oauth_effective_scope(
+            scope,
+            cfg,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            server_url=self.oauth_base_url(),
+        ) or ""
+        if not scope:
             self._send_html("<h2>Error</h2><p>Unsupported OAuth scope</p>", status=400)
             return
 
@@ -7864,12 +8342,20 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 code_challenge_method=code_challenge_method, state=state, scope=scope, error="Invalid PKCE parameters",
             ), status=400)
             return
-        if not _oauth_scope_allowed(scope, cfg):
+        effective_scope = _oauth_effective_scope(
+            scope,
+            cfg,
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            server_url=self.oauth_base_url(),
+        )
+        if effective_scope is None:
             self._send_html(self._oauth_login_page(
                 client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
                 code_challenge_method=code_challenge_method, state=state, scope=scope, error="Unsupported OAuth scope",
             ), status=400)
             return
+        scope = effective_scope
         if not secrets.compare_digest(password, cfg.password):
             self._send_html(self._oauth_login_page(
                 client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
@@ -8128,6 +8614,18 @@ class AdminUIHandler(http.server.BaseHTTPRequestHandler):
                 return
             self.send_json(self.runtime.admin_status_payload(base_url=self.oauth_base_url()))
             return
+        if path == "/api/admin/settings":
+            if not self.is_admin_request():
+                self.send_json({"error": "Admin token required"}, status=401)
+                return
+            self.send_json(self.runtime.startup_settings_payload())
+            return
+        if path == "/api/admin/oauth/password":
+            if not self.is_admin_request():
+                self.send_json({"error": "Admin token required"}, status=401)
+                return
+            self.send_json(self.runtime.oauth_authorization_password_status())
+            return
         self.send_json({"error": "Unknown endpoint"}, status=404)
 
     def _send_admin_asset(self, asset_name: str) -> None:
@@ -8165,7 +8663,15 @@ class AdminUIHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = posixpath.normpath(self.path.split("?", 1)[0])
-        if path not in {"/api/tool", "/api/admin/tool", "/api/admin/settings", "/api/admin/runtime"}:
+        if path not in {
+            "/api/tool",
+            "/api/admin/tool",
+            "/api/admin/settings",
+            "/api/admin/settings/validate",
+            "/api/admin/runtime",
+            "/api/admin/oauth/password/generate",
+            "/api/admin/oauth/password/rotate",
+        }:
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
         if not self.is_admin_request():
@@ -8174,9 +8680,37 @@ class AdminUIHandler(http.server.BaseHTTPRequestHandler):
         request = self._read_json_body()
         if request is None:
             return
+        if path in {"/api/admin/oauth/password/generate", "/api/admin/oauth/password/rotate"}:
+            try:
+                payload = (
+                    self.runtime.rotate_oauth_authorization_password()
+                    if path.endswith("/rotate")
+                    else self.runtime.generate_oauth_authorization_password()
+                )
+            except ToolFailure as exc:
+                if exc.code in {
+                    "OAUTH_PASSWORD_ALREADY_CONFIGURED",
+                    "OAUTH_PASSWORD_NOT_CONFIGURED",
+                    "OAUTH_PASSWORD_MANAGED_EXTERNALLY",
+                }:
+                    status = 409
+                elif exc.code in {"OAUTH_PASSWORD_UNAVAILABLE", "OAUTH_PASSWORD_VAULT_DISABLED"}:
+                    status = 503
+                else:
+                    status = 500
+                self.send_json({"ok": False, "error": exc.message, "code": exc.code}, status=status)
+                return
+            self.send_json({"ok": True, **payload})
+            return
         if path == "/api/admin/settings":
             updates = request.get("settings") if isinstance(request.get("settings"), dict) else request
-            self.send_json(self.runtime.save_startup_settings(cast(dict[str, Any], updates)))
+            result = self.runtime.save_startup_settings(cast(dict[str, Any], updates))
+            self.send_json(result, status=200 if result.get("ok") else 400)
+            return
+        if path == "/api/admin/settings/validate":
+            updates = request.get("settings") if isinstance(request.get("settings"), dict) else request
+            result = self.runtime.validate_startup_settings(cast(dict[str, Any], updates))
+            self.send_json(result, status=200 if result.get("ok") else 400)
             return
         if path == "/api/admin/runtime":
             try:
@@ -8370,15 +8904,16 @@ def run_http(args: argparse.Namespace) -> int:
     if oauth_mode:
         client_id = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_ID") or None
         client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or None
-        env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD")
-        password = env_password or _settings_text(startup_settings, "oauth_password") or secrets.token_urlsafe(32)
         server_url = (
             os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or _settings_text(startup_settings, "oauth_server_url") or ""
         ).rstrip("/") or None
-        if not env_password:
-            print(f"OAuth authorize password: {password}", file=sys.stderr)
         oauth_vault = SecretVault(config_dir / OAUTH_SECRET_VAULT_FILENAME, os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"))
         try:
+            password, password_source = _resolve_oauth_authorization_password(
+                startup_settings,
+                settings_path,
+                secret_vault=oauth_vault,
+            )
             token_secret = _resolve_oauth_token_secret(startup_settings, settings_path, secret_vault=oauth_vault)
             refresh_pepper = _resolve_oauth_refresh_pepper(
                 startup_settings,
@@ -8422,10 +8957,15 @@ def run_http(args: argparse.Namespace) -> int:
             store=oauth_store,
             signing_kid=signing_kid,
             signing_keys=signing_keys,
-            secret_vault=oauth_vault if oauth_vault.enabled() else None,
+            secret_vault=oauth_vault,
             compatibility_mode=truthy_env(os.environ.get(f"{ENV_PREFIX}_OAUTH_COMPATIBILITY_MODE"))
             or bool(startup_settings.get("oauth_compatibility_mode")),
             compatibility_token_ttl=env_int(f"{ENV_PREFIX}_OAUTH_COMPATIBILITY_TOKEN_TTL", 60 * 60 * 24 * 90),
+            authorization_password_source=password_source,
+            authorization_password_created_at=_settings_text(
+                startup_settings,
+                "oauth_authorization_password_created_at",
+            ),
         )
         if auth_token:
             print(
@@ -8654,7 +9194,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "enable OAuth 2.1 Authorization Code + PKCE; "
             f"{ENV_PREFIX}_SERVER_URL is optional; when unset OAuth metadata uses the request host; "
-            "authorize password is generated when unset; client_id/client_secret are optional"
+            "authorize password is loaded from the environment or generated once and persisted in the secret vault; "
+            "client_id/client_secret are optional"
         ),
     )
     parser.add_argument(

@@ -64,7 +64,7 @@ Header: Authorization: Bearer <token>
 
 ## MCP Clients With OAuth 2.1
 
-For MCP clients that perform OAuth 2.1 Authorization Code + PKCE discovery on the server URL, run the tunnel script with `CODING_TOOLS_MCP_AUTH_MODE=oauth`. The OAuth authorize password is generated and printed for you on startup; client_id/client_secret are optional:
+For MCP clients that perform OAuth 2.1 Authorization Code + PKCE discovery on the server URL, run the tunnel script with `CODING_TOOLS_MCP_AUTH_MODE=oauth`. Set `CODING_TOOLS_MCP_SECRETS_KEY` so the OAuth authorize password can be generated once and stored in the encrypted vault; client_id/client_secret are optional:
 
 ```bash
 CODING_TOOLS_MCP_AUTH_MODE=oauth \
@@ -72,7 +72,7 @@ CODING_TOOLS_MCP_TOOL_PROFILE=read-only \
 scripts/tunnel.sh cloudflared /path/to/repo
 ```
 
-The script adds `--oauth-mode` to the server and prints the generated password before starting the tunnel. When cloudflared/ngrok/devtunnel prints the HTTPS URL, configure your MCP client with that URL; the server derives its OAuth issuer and metadata URLs from the incoming request host. The same flow works with `scripts/install.sh --tunnel <provider> --auth-mode oauth`.
+The script adds `--oauth-mode` to the server. Retrieve the one-time password only through the management console's generate/rotate operation; ordinary status endpoints never return it. When cloudflared/ngrok/devtunnel prints the HTTPS URL, configure your MCP client with that URL; the server derives its OAuth issuer and metadata URLs from the incoming request host. The same flow works with `scripts/install.sh --tunnel <provider> --auth-mode oauth`.
 
 The admin console OAuth login requests `scope=admin`. Ordinary MCP clients normally request or receive `scope=mcp`; those tokens can call `/mcp` but are rejected by `/api/admin/*`. Discovery metadata advertises both supported scopes.
 
@@ -82,7 +82,7 @@ Optional URL pinning:
 
 Default public client + PKCE:
 
-- `CODING_TOOLS_MCP_OAUTH_PASSWORD` — the password an operator types on the `/oauth/authorize` HTML form to grant the authorization code. It is generated and printed when unset.
+- `CODING_TOOLS_MCP_OAUTH_PASSWORD` — optional externally managed password for the `/oauth/authorize` HTML form. It overrides the vault value; while set, management-console generate and rotate actions are disabled. When unset, the password is loaded from `oauth_authorization_password` in `oauth-secrets.json`, or generated once and persisted there. `CODING_TOOLS_MCP_SECRETS_KEY` is required for that vault-backed mode.
 - `CODING_TOOLS_MCP_OAUTH_CLIENT_ID` — optional. When unset, any non-empty client_id is accepted. Set it to restrict OAuth to one client_id.
 - `CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET` — optional. When unset, `/oauth/token` uses `token_endpoint_auth_method=none` and relies on PKCE. Once set, clients **must** present this secret on `/oauth/token`, otherwise the request is rejected with `invalid_client`. The endpoint accepts `client_secret_post` and HTTP Basic. PKCE remains mandatory; only `code_challenge_method=S256` is accepted.
 

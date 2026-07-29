@@ -7,9 +7,17 @@ WEBUI_DIST = Path(__file__).with_name("webui_dist")
 ADMIN_HTML = WEBUI_DIST / "admin.html"
 ADMIN_CSS = WEBUI_DIST / "admin.css"
 ADMIN_JS = WEBUI_DIST / "admin.js"
+ADMIN_SETTINGS_MODEL = WEBUI_DIST / "settings-model.js"
+ADMIN_SETTINGS_COPY = WEBUI_DIST / "settings-copy.js"
+ADMIN_WORKSPACE_EDITOR = WEBUI_DIST / "workspace-editor.js"
+ADMIN_SETTINGS_PAGE = WEBUI_DIST / "settings-page.js"
 ADMIN_ASSET_TYPES = {
     "admin.css": "text/css; charset=utf-8",
     "admin.js": "application/javascript; charset=utf-8",
+    "settings-model.js": "application/javascript; charset=utf-8",
+    "settings-copy.js": "application/javascript; charset=utf-8",
+    "workspace-editor.js": "application/javascript; charset=utf-8",
+    "settings-page.js": "application/javascript; charset=utf-8",
 }
 
 
@@ -43,4 +51,4 @@ def admin_asset_response(asset_name: str) -> tuple[bytes, str] | None:
         return None
 
 
-__all__ = ["ADMIN_CSS", "ADMIN_HTML", "ADMIN_JS", "WEBUI_DIST", "admin_asset_response", "admin_console_html"]
+__all__ = ["ADMIN_CSS", "ADMIN_HTML", "ADMIN_JS", "ADMIN_SETTINGS_COPY", "ADMIN_SETTINGS_MODEL", "ADMIN_SETTINGS_PAGE", "ADMIN_WORKSPACE_EDITOR", "WEBUI_DIST", "admin_asset_response", "admin_console_html"]

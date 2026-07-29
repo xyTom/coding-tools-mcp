@@ -20,6 +20,8 @@ Coding Tools MCP 是一个面向 coding agent 的 MCP 服务。当前版本已�
 默认可用的本地工具包括：
 
 - `server_info`：查看服务、workspace、权限模式、上游 MCP 状态。
+- `workspace_identity`：确认当前会话实际绑定的主机和工作区。
+- `list_workspaces` / `select_workspace`：列出允许的工作区，并让 Agent 只切换自己的 MCP HTTP 会话工作区。
 - `get_default_cwd` / `set_default_cwd`：查看或设置当前会话的默认目录。
 - `read_file` / `list_dir` / `list_files` / `search_text`：读取、列目录、按 glob 列文件、全文搜索。
 - `apply_patch`：以结构化 patch 修改文件。
@@ -28,7 +30,7 @@ Coding Tools MCP 是一个面向 coding agent 的 MCP 服务。当前版本已�
 - `view_image`：查看 workspace 内图片。
 - `request_permissions`：为受控命令能力请求权限。
 
-这些工具仍然受 workspace 边界保护：路径默认相对 workspace，禁止 `..` 逃逸、绝对路径逃逸和不安全符号链接逃逸。
+这些工具仍然受 workspace 边界保护：每个 MCP HTTP 会话同一时间只绑定一个已配置工作区，路径默认相对当前工作区，禁止 `..` 逃逸、绝对路径逃逸和不安全符号链接逃逸。切换工作区会把该会话的默认目录重置到新工作区根目录。
 
 ### MCP 网关
 
@@ -219,8 +221,9 @@ python -m coding_tools_mcp --workspace G:/LLM --host 127.0.0.1 --port 8765
 - 脚本自动生成的 bearer token 默认只在本次启动/隧道进程中打印和使用，不会自动保存到磁盘。管理台里手动保存到 `server-settings.json` 的 token 是明文，适合个人本机使用，必须把该文件当作敏感文件。
 - `cloudflared tunnel --url` 生成的是临时 URL，重启后通常会变化。
 - OAuth 模式会在首次启动时把自动生成的 `oauth_token_secret` 保存到 `server-settings.json`，也可以用 `CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` 手动指定。OAuth token 同时绑定 server URL；如果 Cloudflare 临时隧道地址变了，旧 token 仍会失效。要跨隧道重启复用授权，请使用固定域名并设置 `CODING_TOOLS_MCP_SERVER_URL` 或管理台里的 OAuth server URL。
+- OAuth 授权密码优先读取 `CODING_TOOLS_MCP_OAUTH_PASSWORD`；否则需要先设置 `CODING_TOOLS_MCP_SECRETS_KEY`，服务会在首次启动时生成一次并加密保存到 `oauth-secrets.json`。管理台只显示来源和 8 位指纹，生成或轮换后的明文只返回一次。
 
-在线立即生效：`auth-token`、`admin-token`、OAuth 授权密码、默认目录、终止运行会话、secret 管理、MCP 配置保存和上游 reload。需要重启：host、port、workspace 根目录、OAuth issuer/server URL、OAuth token secret、权限模式和 shell 环境继承策略。
+在线立即生效：`auth-token`、`admin-token`、OAuth 授权密码的持久化设置或轮换、默认目录、终止运行会话、secret 管理、MCP 配置保存和上游 reload。环境变量来源的 OAuth 授权密码需要修改环境变量后重启。需要重启：host、port、workspace 根目录、OAuth issuer/server URL、OAuth token secret、权限模式和 shell 环境继承策略。
 
 如果希望 token 跨重启稳定，自己固定配置：
 
@@ -523,7 +526,7 @@ http://127.0.0.1:8765/admin
 - 启用、禁用、删除 server。
 - 重新加载上游。
 - 设置或删除 secrets。
-- 在线替换 token、切换默认目录、查看或终止运行会话。
+- 在线替换 token、管理工作区目录、切换会话工作区或默认目录、查看或终止运行会话。
 
 默认配置文件是 `G:/LLM/.coding-tools-mcp/mcp-servers.json`，启动设置文件是同目录的 `server-settings.json`。通过 `--config-dir` 可以把两者放到自定义目录；通过 `--upstream-config` 可以只指定 MCP server 配置文件。
 

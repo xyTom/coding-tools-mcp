@@ -97,6 +97,20 @@
     .form-grid .full { grid-column:1 / -1; }
     .secret-input-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:8px; align-items:center; }
     .secret-input-row button { min-width:62px; }
+    .oauth-summary { margin:0 0 14px; }
+    .oauth-connect-card h3 { font-size:17px; margin-bottom:4px; }
+    .oauth-connect-actions { margin:10px 0; }
+    .copy-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; }
+    .copy-row button { min-width:82px; }
+    #oauthVaultHelp, .oauth-local-credential { margin-top:12px; padding:10px 12px; border:1px solid var(--line); border-radius:8px; background:#fbfcfe; }
+    #oauthVaultHelp > summary, .oauth-local-credential > summary { cursor:pointer; font-weight:750; }
+    .credential-result { margin-top:12px; padding:12px; border:1px solid #a8d8c6; border-radius:8px; background:#f2fbf8; }
+    .credential-result h3 { color:#087f5b; }
+    .credential-result textarea { min-height:96px; }
+    .oauth-password-status-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:12px 0; }
+    .oauth-password-status-grid > div { display:grid; gap:4px; padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--surface-soft); }
+    .oauth-password-status-grid code { overflow-wrap:anywhere; }
+    .oauth-password-card .settings-status { border-radius:8px; margin-bottom:12px; }
     .checkline { display:flex; align-items:center; gap:8px; margin:10px 0 0; color:var(--muted); font-size:12px; font-weight:700; }
     .checkline.compact { margin:0; white-space:nowrap; }
     .checkline input { width:auto; min-height:auto; }
@@ -188,6 +202,22 @@
     .path-cell code { overflow-wrap:anywhere; }
     .merge-target { min-width:260px; min-height:52px; white-space:pre-wrap; overflow-wrap:anywhere; }
     .action-stack { align-items:flex-start; }
+    .settings-form { display:grid; gap:14px; max-width:980px; }
+    .settings-section { margin:0; }
+    .settings-section h3 { margin:0 0 6px; font-size:17px; }
+    .settings-status { margin:0; padding:7px 10px; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-size:13px; }
+    .settings-status.ok { color:#087f5b; border-color:#a8d8c6; background:#f2fbf8; }
+    .settings-status.warn, .settings-status.pending { color:#92400e; border-color:#f1d28a; background:#fffaf0; }
+    .settings-status.error { color:#b42318; border-color:#f3b6b0; background:#fff8f7; }
+    .workspace-card { margin:0 0 12px; padding:12px; border:1px solid var(--line); border-radius:8px; background:#fbfcfe; }
+    .workspace-card legend { padding:0 5px; font-weight:760; }
+    .workspace-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; }
+    .field-error { min-height:1.2em; margin:7px 0 0; color:#b42318; font-size:13px; }
+    .risk-warning { margin:8px 0; padding:9px 10px; border-left:4px solid #d97706; background:#fff7e6; color:#78350f; }
+    .input-like { display:flex; min-height:40px; align-items:center; padding:0 10px; border:1px solid var(--line); border-radius:6px; background:#f8fafc; overflow-wrap:anywhere; }
+    .sticky-save { position:sticky; bottom:10px; z-index:4; display:flex; align-items:center; justify-content:flex-end; gap:8px; padding:10px; border:1px solid var(--line); border-radius:8px; background:rgba(255,255,255,.96); box-shadow:var(--shadow); }
+    .sticky-save span { margin-right:auto; color:var(--muted); font-size:13px; }
+    .code-block { max-height:260px; overflow:auto; padding:10px; border:1px solid var(--line); border-radius:6px; background:#111827; color:#f8fafc; }
     @media (max-width: 1180px) { .metrics { grid-template-columns:repeat(3, 1fr); } .split, .split.wide, .persistence-layout { grid-template-columns:1fr; } .conversation-workspace { min-height:auto; } .workspace-empty { min-height:220px; } }
     @media (max-width: 780px) {
       .app-shell, .nav-collapsed { grid-template-columns:1fr; grid-template-rows:58px minmax(0,1fr); }
@@ -201,6 +231,11 @@
       .chat-filter-bar { grid-template-columns:1fr; }
       .form-grid .full { grid-column:auto; }
       .secret-input-row { grid-template-columns:minmax(0,1fr) auto auto; }
+      .oauth-password-status-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .copy-row { grid-template-columns:1fr; }
+      .workspace-actions, .sticky-save { align-items:stretch; }
+      .sticky-save { flex-wrap:wrap; }
+      .sticky-save span { min-width:100%; }
       .chat-reader-head { align-items:flex-start; }
       .reader-toolbar { align-items:stretch; }
       #chatReadLimit { width:100%; }

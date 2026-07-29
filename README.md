@@ -217,7 +217,7 @@ scripts/tunnel.sh ngrok /path/to/repo
 scripts/tunnel.sh devtunnel /path/to/repo
 ```
 
-For clients that support custom headers, use bearer-token auth with `Authorization: Bearer <token>`. For MCP clients that speak OAuth 2.1 Authorization Code + PKCE, use `CODING_TOOLS_MCP_AUTH_MODE=oauth` with `scripts/tunnel.sh` (or `scripts/install.sh --auth-mode oauth`). The server can infer its OAuth issuer from the tunnel request URL, so one-shot tunnels like cloudflared work without setting `CODING_TOOLS_MCP_SERVER_URL` before startup; set it only when you want to pin a stable issuer. The script prints a generated OAuth password, accepts any non-empty client_id by default, and lets you opt into `CODING_TOOLS_MCP_OAUTH_CLIENT_ID`/`CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET` only when you need to lock down a confidential client. Clients that cannot send custom bearer headers and do not speak OAuth should use anonymous `read-only` mode only for local/testing tunnels, or be placed behind an external auth proxy for production use.
+For clients that support custom headers, use bearer-token auth with `Authorization: Bearer <token>`. For MCP clients that speak OAuth 2.1 Authorization Code + PKCE, use `CODING_TOOLS_MCP_AUTH_MODE=oauth` with `scripts/tunnel.sh` (or `scripts/install.sh --auth-mode oauth`). The server can infer its OAuth issuer from the tunnel request URL, so one-shot tunnels like cloudflared work without setting `CODING_TOOLS_MCP_SERVER_URL` before startup; set it only when you want to pin a stable issuer. Configure `CODING_TOOLS_MCP_SECRETS_KEY` so the OAuth authorization password can be generated once and encrypted in the secret vault, or manage it externally with `CODING_TOOLS_MCP_OAUTH_PASSWORD`. The management console shows only its source and fingerprint and returns plaintext only after an explicit generate or rotate operation. Any non-empty client_id is accepted by default; use `CODING_TOOLS_MCP_OAUTH_CLIENT_ID`/`CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET` when you need to lock down a confidential client. Clients that cannot send custom bearer headers and do not speak OAuth should use anonymous `read-only` mode only for local/testing tunnels, or be placed behind an external auth proxy for production use.
 
 See [docs/remote-mcp.md](docs/remote-mcp.md) for the exact modes and security notes.
 
@@ -232,6 +232,9 @@ See [docs/remote-mcp.md](docs/remote-mcp.md) for the exact modes and security no
 P0 tools exposed by default:
 
 - `server_info`
+- `workspace_identity`
+- `list_workspaces`
+- `select_workspace`
 - `get_default_cwd`
 - `set_default_cwd`
 - `read_file`
@@ -257,7 +260,7 @@ For input/output schemas and result envelopes, see [docs/tools-and-schemas.md](d
 
 ## Safety Boundary
 
-The runtime binds one workspace root per server process. Paths are workspace-relative by default. Absolute paths, `..` traversal, and symlink escapes are rejected. Recursive listing/search excludes `.git`, `.reference`, `node_modules`, `target`, `dist`, build outputs, virtualenvs, and common caches by default.
+The runtime can manage a validated catalog of independent workspace roots, while each MCP HTTP session is bound to exactly one active workspace at a time. Agents can inspect and change only their own session binding with `list_workspaces` and `select_workspace`; selecting a workspace resets that session's default cwd to the selected root. Paths remain confined to the active workspace: absolute-path escapes, `..` traversal, and symlink escapes are rejected. Recursive listing/search excludes `.git`, `.reference`, `node_modules`, `target`, `dist`, build outputs, virtualenvs, and common caches by default.
 
 `exec_command` runs under policy controls with workspace-bound cwd, configurable shell environment inheritance, timeout, output caps, sensitive-value and loader/startup environment rejection, destructive command checks, network-looking command checks, shell-expansion permission gates, indirect absolute-path checks, cancellation/kill cleanup, session deadline watchdogs, and bounded session buffers. On Linux hosts with Landlock support it also applies filesystem confinement; on Windows, macOS, or Linux hosts without Landlock, command results include a warning and external sandboxing is required before running untrusted commands. This is still not a complete OS/container sandbox; see [SECURITY.md](SECURITY.md).
 

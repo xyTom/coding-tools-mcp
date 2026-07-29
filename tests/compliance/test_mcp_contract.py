@@ -91,6 +91,8 @@ class MCPContractTests(ComplianceTestCase):
         expected = {
             "server_info": (True, False, True, False),
             "workspace_identity": (True, False, True, False),
+            "list_workspaces": (True, False, True, False),
+            "select_workspace": (False, False, True, False),
             "check_exec_environment": (True, False, True, False),
             "get_default_cwd": (True, False, True, False),
             "set_default_cwd": (True, False, True, False),

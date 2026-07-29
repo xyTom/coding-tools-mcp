@@ -457,6 +457,15 @@ class OAuthAuthorizationStore:
         with self._connect() as conn:
             return [dict(row) for row in conn.execute(query, args).fetchall()]
 
+    def list_refresh_token_families(self, client_id: str | None = None) -> list[dict[str, Any]]:
+        query, args = "SELECT * FROM oauth_refresh_token_families", ()
+        if client_id:
+            query += " WHERE client_id=?"
+            args = (client_id,)
+        query += " ORDER BY created_at DESC, family_id"
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute(query, args).fetchall()]
+
     def list_signing_keys(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM oauth_signing_keys ORDER BY created_at DESC, kid").fetchall()]

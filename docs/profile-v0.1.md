@@ -150,6 +150,13 @@ Shared error object:
             "INVALID_WORKSPACE_CATALOG",
             "OAUTH_KEY_ROTATION_FAILED",
             "OAUTH_KEY_ROTATION_UNAVAILABLE",
+            "OAUTH_PASSWORD_ALREADY_CONFIGURED",
+            "OAUTH_PASSWORD_MANAGED_EXTERNALLY",
+            "OAUTH_PASSWORD_NOT_CONFIGURED",
+            "OAUTH_PASSWORD_PERSIST_FAILED",
+            "OAUTH_PASSWORD_TOO_SHORT",
+            "OAUTH_PASSWORD_UNAVAILABLE",
+            "OAUTH_PASSWORD_VAULT_DISABLED",
             "PATH_OUTSIDE_WORKSPACE",
             "ABSOLUTE_PATH_DENIED",
             "SYMLINK_ESCAPE",
@@ -210,6 +217,8 @@ P0 tools:
 
 - `server_info`
 - `workspace_identity`
+- `list_workspaces`
+- `select_workspace`
 - `check_exec_environment`
 - `get_default_cwd`
 - `set_default_cwd`
@@ -238,7 +247,7 @@ P1 tool:
 Tool profiles:
 
 - `full`: expose all tools with truthful annotations.
-- `read-only`: expose only `server_info`, `workspace_identity`, `check_exec_environment`, `get_default_cwd`, `set_default_cwd`, file read/list/search/stat tools, `command_status`, git inspection tools, and `view_image`.
+- `read-only`: expose only `server_info`, `workspace_identity`, `list_workspaces`, `select_workspace`, `check_exec_environment`, `get_default_cwd`, `set_default_cwd`, file read/list/search/stat tools, `command_status`, git inspection tools, and `view_image`. `select_workspace` changes only the calling session's active allowlisted root; it does not modify workspace files.
 - `compat-readonly-all`: expose all tools, but advertise `readOnlyHint: true`, `destructiveHint: false`, and `openWorldHint: false` for every tool. This profile is a compatibility escape hatch only; mutation-capable tools still mutate local state.
 
 Forbidden tools and equivalent aliases:
@@ -314,6 +323,66 @@ Input schema:
 ```
 
 Output fields include `workspace`, `workspace_id`, `root`, `default_cwd`, `host`, `platform`, `server_instance_id`, and `git`. Clients should use this before remote edits to confirm they are operating on the intended machine and workspace.
+
+### list_workspaces
+
+Description: List configured workspace roots and identify the workspace active for the current MCP session.
+
+Annotations:
+
+```json
+{
+  "title": "List workspaces",
+  "readOnlyHint": true,
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "openWorldHint": false
+}
+```
+
+Input schema:
+
+```json
+{
+  "type": "object",
+  "properties": {},
+  "required": [],
+  "additionalProperties": false
+}
+```
+
+Output fields include `active_workspace_id`, `active_workspace`, `default_workspace_id`, and `workspaces`. Only enabled workspaces are returned; disabled entries remain available only to administrators.
+
+### select_workspace
+
+Description: Select the active workspace for the calling MCP HTTP session and reset that session's default cwd to the selected root.
+
+Annotations:
+
+```json
+{
+  "title": "Select workspace",
+  "readOnlyHint": false,
+  "destructiveHint": false,
+  "idempotentHint": true,
+  "openWorldHint": false
+}
+```
+
+Input schema:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "workspace_id": { "type": "string", "minLength": 1 }
+  },
+  "required": ["workspace_id"],
+  "additionalProperties": false
+}
+```
+
+Output fields include `active_workspace_id`, `workspace`, `session_id`, and `default_cwd`. Calls without an active MCP HTTP session fail with `"SESSION_REQUIRED"`; unknown or disabled workspace IDs fail with `"INVALID_WORKSPACE"`.
 
 ### check_exec_environment
 

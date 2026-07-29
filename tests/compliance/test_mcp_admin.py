@@ -847,9 +847,15 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("codexSessionRoots", html)
         self.assertIn("previewCodexSessions", html)
         self.assertIn("syncAllCodexSessions", html)
-        self.assertIn('id="toggleOAuthTokenSecret"', html)
-        self.assertIn('id="copyOAuthTokenSecret"', html)
-        self.assertIn('id="oauthTokenSecretHint"', html)
+        self.assertIn('id="oauthMcpUrl"', html)
+        self.assertIn('id="issueOAuthCredential"', html)
+        self.assertIn('id="oauthRefreshFamilies"', html)
+        self.assertIn('id="goSigningKeys"', html)
+        self.assertIn('id="generateOAuthPassword"', html)
+        self.assertIn('id="rotateOAuthPassword"', html)
+        self.assertIn('id="oauthPasswordOneTime"', html)
+        self.assertNotIn('id="runtimeOAuthPassword"', html)
+        self.assertNotIn('id="settingsOAuthTokenSecret"', html)
 
         self.assertIn(".login-layer {", css)
         self.assertIn(".login-card {", css)
@@ -863,10 +869,18 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("function showLogin", js)
         self.assertIn("function showAdmin", js)
         self.assertIn("if (!isAuthError(err)) out(err);", js)
-        self.assertIn("function generateOAuthTokenSecret", js)
-        self.assertIn("function toggleOAuthTokenSecretVisibility", js)
-        self.assertIn("async function copyOAuthTokenSecret", js)
-        self.assertIn("navigator.clipboard.writeText(secret.value)", js)
+        self.assertIn("function renderOAuthPersistence", js)
+        self.assertIn("async function loadOAuthPasswordStatus", js)
+        self.assertIn("async function generateOAuthPassword", js)
+        self.assertIn("async function rotateOAuthPassword", js)
+        self.assertIn("function renderOAuthPasswordStatus", js)
+        self.assertIn("function showOneTimeOAuthPassword", js)
+        self.assertNotIn("localStorage.setItem('oauthPassword", js)
+        self.assertNotIn("sessionStorage.setItem('oauthPassword", js)
+        self.assertIn("async function issueOAuthCredential", js)
+        self.assertIn("async function copyOAuthCredentialJson", js)
+        self.assertIn("sessionStorage.setItem('mcpOAuthFlow'", js)
+        self.assertIn("/api/admin/oauth/refresh-families", js)
         self.assertIn("mcp_server_install", js)
         self.assertIn("mcp_server_update", js)
         self.assertIn("mcp_template_list", js)
@@ -896,8 +910,10 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("scope:'admin'", js)
         self.assertIn("showChatReader", js)
         self.assertIn("已读取会话正文", js)
-        self.assertIn("startupSettingsPayload", js)
-        self.assertIn("allowed_origins:parseList", js)
+        self.assertIn("SettingsPageState", js)
+        self.assertIn("renderWorkspaceEditor", js)
+        self.assertIn("/api/admin/settings/validate", js)
+        self.assertNotIn("settingsWorkspaceCatalog", html)
         self.assertIn("renderCodexCandidates", js)
 
         css_asset = admin_asset_response("admin.css")
@@ -906,6 +922,10 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIsNotNone(js_asset)
         self.assertIn("text/css", css_asset[1])
         self.assertIn("javascript", js_asset[1])
+        for asset_name in ("settings-model.js", "settings-copy.js", "workspace-editor.js", "settings-page.js"):
+            asset = admin_asset_response(asset_name)
+            self.assertIsNotNone(asset)
+            self.assertIn("javascript", asset[1])
         self.assertIn("chatReaderBackdrop", html)
         self.assertIn("chat-reader-modal", html)
         self.assertIn("chat-reader-dialog", html)
@@ -917,8 +937,14 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("sessionDefaultCwd", html)
         self.assertIn("settingsAllowedOrigins", html)
         self.assertIn("settingsOAuthServerUrl", html)
-        self.assertIn("settingsOAuthTokenSecret", html)
-        self.assertIn("generateOAuthTokenSecret", html)
+        self.assertIn("oauthMcpUrl", html)
+        self.assertIn("oauthCredentialClientId", html)
+        self.assertIn("oauthRefreshFamilies", html)
+        self.assertIn("workspaceEditor", html)
+        self.assertIn("settingsSafetyPreset", html)
+        self.assertIn("discardStartupSettings", html)
+        self.assertIn("goSigningKeys", html)
+        self.assertNotIn("generateOAuthTokenSecret", html)
         self.assertIn("httpSessionBadge", html)
         self.assertIn("execSessionBadge", html)
         self.assertIn("会话默认目录", html)
@@ -933,24 +959,26 @@ class McpAdminConfigTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
-            args = build_parser().parse_args(["--workspace", str(workspace)])
-            runtime = build_runtime(args, RuntimePolicy("safe", ShellEnvPolicy(), False))
+            appdata = Path(tmp) / "appdata"
+            with patch.dict(os.environ, {"APPDATA": str(appdata)}, clear=False):
+                args = build_parser().parse_args(["--workspace", str(workspace)])
+                runtime = build_runtime(args, RuntimePolicy("safe", ShellEnvPolicy(), False))
 
-            self.assertEqual(runtime.config_dir, default_settings_dir())
-            self.assertEqual(runtime.upstream_config_path, default_settings_dir() / "mcp-servers.json")
-            self.assertEqual(runtime.settings_path, default_settings_dir() / "server-settings.json")
+                self.assertEqual(runtime.config_dir, default_settings_dir())
+                self.assertEqual(runtime.upstream_config_path, default_settings_dir() / "mcp-servers.json")
+                self.assertEqual(runtime.settings_path, default_settings_dir() / "server-settings.json")
 
-            config_dir = Path(tmp) / "config"
-            args = build_parser().parse_args(["--workspace", str(workspace), "--config-dir", str(config_dir)])
-            runtime = build_runtime(args, RuntimePolicy("safe", ShellEnvPolicy(), False))
-            self.assertEqual(runtime.config_dir, config_dir)
-            self.assertEqual(runtime.upstream_config_path, config_dir / "mcp-servers.json")
+                config_dir = Path(tmp) / "config"
+                args = build_parser().parse_args(["--workspace", str(workspace), "--config-dir", str(config_dir)])
+                runtime = build_runtime(args, RuntimePolicy("safe", ShellEnvPolicy(), False))
+                self.assertEqual(runtime.config_dir, config_dir)
+                self.assertEqual(runtime.upstream_config_path, config_dir / "mcp-servers.json")
 
-            upstream = Path(tmp) / "custom.json"
-            args = build_parser().parse_args(["--workspace", str(workspace), "--upstream-config", str(upstream)])
-            runtime = build_runtime(args, RuntimePolicy("safe", ShellEnvPolicy(), False))
-            self.assertEqual(runtime.config_dir, upstream.parent)
-            self.assertEqual(runtime.upstream_config_path, upstream)
+                upstream = Path(tmp) / "custom.json"
+                args = build_parser().parse_args(["--workspace", str(workspace), "--upstream-config", str(upstream)])
+                runtime = build_runtime(args, RuntimePolicy("safe", ShellEnvPolicy(), False))
+                self.assertEqual(runtime.config_dir, upstream.parent)
+                self.assertEqual(runtime.upstream_config_path, upstream)
 
     def test_startup_settings_apply_tool_profile_when_cli_omits_it(self) -> None:
         args = build_parser().parse_args([])
@@ -1023,7 +1051,6 @@ class McpAdminConfigTests(unittest.TestCase):
                     "allowed_origins": [
                         "chrome-extension://KNGIAFGKDNLKGMEFDAFAIBKIBEGKCAEF",
                         "http://LOCALHOST:8181/",
-                        "not-an-origin",
                     ],
                 }
             )
@@ -1042,6 +1069,14 @@ class McpAdminConfigTests(unittest.TestCase):
             self.assertIn("--port 9123", saved["restart_command"])
             self.assertIn("--allowed-origin chrome-extension://kngiafgkdnlkgmefdafaibkibegkcaef", saved["restart_command"])
             self.assertNotIn("currentextension", saved["restart_command"])
+
+            invalid = runtime.save_startup_settings({"port": 70000})
+            self.assertFalse(invalid["ok"])
+            self.assertIn("port", invalid["field_errors"])
+            self.assertFalse((Path(tmp) / "server-settings.json").read_text(encoding="utf-8").find("70000") >= 0)
+            invalid_origin = runtime.save_startup_settings({"allowed_origins": ["not-an-origin"]})
+            self.assertFalse(invalid_origin["ok"])
+            self.assertIn("allowed_origins", invalid_origin["field_errors"])
 
     def test_oauth_tokens_preserve_admin_scope(self) -> None:
         cfg = OAuthConfig(None, None, "password", "http://127.0.0.1:8765", b"1" * 32)
