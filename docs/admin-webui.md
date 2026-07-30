@@ -41,3 +41,9 @@ Conversation lists call the summary endpoint. Full messages and context are load
 - Focus restoration after destructive confirmation dialogs.
 - 44-pixel minimum controls and responsive layouts for narrow screens.
 - Destructive confirmations include the exact Workspace/object ID and expected impact before execution; actual affected counts are displayed afterward.
+
+## Telemetry status
+
+The status page displays the effective `on`, `off`, or `debug` mode returned by the Admin backend. The backend supplies only the mode and the `docs/telemetry.md` documentation entry; it does not expose telemetry events or add paths, identifiers, commands, arguments, or file content to the response.
+
+The WebUI continues to show the documented controls `CODING_TOOLS_MCP_TELEMETRY=off`, `DO_NOT_TRACK=1`, and automatic CI suppression. Phase 11 preserves the upstream v0.2.2 default and does not add a browser-side telemetry switch.

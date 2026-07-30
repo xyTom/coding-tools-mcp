@@ -10,6 +10,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from coding_tools_mcp.admin import (
     AdminConflictError,
@@ -115,6 +116,28 @@ class AdminServiceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_status_reports_only_privacy_safe_telemetry_mode_and_docs(self) -> None:
+        with patch("coding_tools_mcp.admin.telemetry_mode", return_value="debug") as mode:
+            payload = self.service.status_payload()
+
+        mode.assert_called_once_with()
+        self.assertEqual(
+            payload["telemetry"],
+            {"mode": "debug", "docs": "docs/telemetry.md"},
+        )
+        serialized = json.dumps(payload["telemetry"], sort_keys=True)
+        for forbidden in (
+            "workspace_id",
+            "agent_id",
+            "client_id",
+            "command",
+            "arguments",
+            "file_content",
+            "path",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, serialized)
 
     def test_settings_separate_active_persisted_pending_and_reject_stale_revision(self) -> None:
         payload = self.service.settings_payload()

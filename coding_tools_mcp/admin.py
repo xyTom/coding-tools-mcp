@@ -22,6 +22,7 @@ from .settings_definition import (
     schema_payload,
 )
 from .settings_store import ServerSettingsStore, SettingsStoreError, sanitize_settings
+from .telemetry import telemetry_mode
 from .transcript import TranscriptStore, TranscriptStoreError, WorkspaceScope
 from .upstream import UpstreamConfigError, parse_server_config
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
@@ -246,6 +247,7 @@ class AdminService:
         self._gateway_lock = threading.Lock()
 
     def status_payload(self) -> dict[str, Any]:
+        mode = telemetry_mode()
         return {
             "ok": True,
             "admin_api": 1,
@@ -254,6 +256,10 @@ class AdminService:
             "gateway": {"available": True, "dynamic_reload": False},
             "chat": {"available": self.transcript_store is not None},
             "vault": {"enabled": self.secret_vault.enabled()},
+            "telemetry": {
+                "mode": mode,
+                "docs": "docs/telemetry.md",
+            },
         }
 
     def settings_payload(self) -> dict[str, Any]:

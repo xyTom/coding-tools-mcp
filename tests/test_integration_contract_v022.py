@@ -208,6 +208,26 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertEqual(webui["conversation_detail"], "explicit_paginated")
         self.assertEqual(webui["untrusted_rendering"], "dom_text_content")
 
+    def test_phase11_admin_telemetry_status_keeps_the_privacy_boundary(self) -> None:
+        telemetry = self.contract["telemetry"]
+        self.assertEqual(
+            telemetry,
+            {"default_policy": "upstream_v0.2.2", "change_during_integration": False},
+        )
+        source = inspect.getsource(AdminService.status_payload)
+        self.assertIn("telemetry_mode", source)
+        self.assertIn('"docs": "docs/telemetry.md"', source)
+        for forbidden in (
+            "workspace_id",
+            "agent_id",
+            "client_id",
+            "command",
+            "arguments",
+            "file_content",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+
     def test_phase09_chat_persistence_contract_is_machine_readable(self) -> None:
         chat = self.contract["chat_persistence"]
         self.assertEqual(chat["phase"], 9)

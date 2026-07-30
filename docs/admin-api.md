@@ -51,6 +51,21 @@ All responses use `Cache-Control: no-store`, apply the same validated allowed-or
 
 OAuth collections are `clients`, `grants`, `tokens`, `refresh-families`, `signing-keys`, and `audit`. Supported actions are Client `enable`/`disable`, Grant/Token/Refresh Family `revoke`, and Signing Key `activate`/`retire`/`revoke`.
 
+## Telemetry status
+
+`GET /admin/api/status` reports the effective upstream telemetry mode and the documentation entry only:
+
+```json
+{
+  "telemetry": {
+    "mode": "on",
+    "docs": "docs/telemetry.md"
+  }
+}
+```
+
+`mode` is `on`, `off`, or `debug` according to the same environment controls used by the runtime. The status response does not add paths, Workspace/Agent/Client IDs, commands, arguments, file contents, or telemetry event data. Phase 11 does not change the upstream v0.2.2 default policy; see `docs/telemetry.md` for the complete privacy schema and opt-out controls.
+
 ## Revision writes
 
 Settings and Gateway writes require the revision returned by the corresponding GET response:
