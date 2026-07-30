@@ -3,7 +3,7 @@
 | 00 | complete | ac59871 | phase-00.md |
 | 01 | complete | - | phase-01.md + phase-01-unblock.md |
 | 02 | complete | 3d8b54c | phase-02.md |
-| 03 | pending | - | - |
+| 03 | complete | aa3a0f4 | phase-03.md |
 | 04 | pending | - | - |
 | 05 | pending | - | - |
 | 06 | pending | - | - |
