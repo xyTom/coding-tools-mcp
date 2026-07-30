@@ -7,8 +7,10 @@ import http.client
 import os
 import select
 import signal
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -414,7 +416,10 @@ class MCPContractTests(ComplianceTestCase):
         try:
             metadata = self.wait_for_json(f"{base_url}/.well-known/oauth-authorization-server")
             self.assertEqual(metadata.get("issuer"), base_url)
-            self.assertEqual(metadata.get("grant_types_supported"), ["authorization_code"])
+            self.assertEqual(
+                metadata.get("grant_types_supported"),
+                ["authorization_code", "refresh_token"],
+            )
             self.assertEqual(metadata.get("response_types_supported"), ["code"])
             self.assertEqual(
                 set(metadata.get("token_endpoint_auth_methods_supported", [])),
@@ -698,7 +703,10 @@ class MCPContractTests(ComplianceTestCase):
             )
             self.assertEqual(status, 201, response_body)
             response = json.loads(response_body)
-            self.assertEqual(response.get("grant_types"), ["authorization_code"])
+            self.assertEqual(
+                response.get("grant_types"),
+                ["authorization_code", "refresh_token"],
+            )
             self.assertEqual(response.get("response_types"), ["code"])
 
             refresh_body = urllib.parse.urlencode(
@@ -717,7 +725,7 @@ class MCPContractTests(ComplianceTestCase):
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             self.assertEqual(refresh_status, 400)
-            self.assertEqual(json.loads(refresh_response).get("error"), "unsupported_grant_type")
+            self.assertEqual(json.loads(refresh_response).get("error"), "invalid_grant")
 
             unsupported_only_body = json.dumps(
                 {
@@ -732,8 +740,11 @@ class MCPContractTests(ComplianceTestCase):
                 body=unsupported_only_body,
                 headers={"Content-Type": "application/json"},
             )
-            self.assertEqual(unsupported_status, 400)
-            self.assertEqual(json.loads(unsupported_response).get("error"), "invalid_client_metadata")
+            self.assertEqual(unsupported_status, 201)
+            self.assertEqual(
+                json.loads(unsupported_response).get("grant_types"),
+                ["refresh_token"],
+            )
 
             unsupported_response_type_body = json.dumps(
                 {
@@ -1144,6 +1155,10 @@ class MCPContractTests(ComplianceTestCase):
 
     def oauth_server_env(self, **overrides: str) -> dict[str, str]:
         env = self.server_process_env()
+        config_dir = tempfile.mkdtemp(prefix="coding-tools-mcp-oauth-test-")
+        self.addCleanup(shutil.rmtree, config_dir, True)
+        env["CODING_TOOLS_MCP_CONFIG_DIR"] = config_dir
+        env["CODING_TOOLS_MCP_SECRETS_KEY"] = "synthetic-compliance-master-key"
         for name in (
             "CODING_TOOLS_MCP_OAUTH_CLIENT_ID",
             "CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET",

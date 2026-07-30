@@ -41,9 +41,9 @@ must never describe this switch as safe or genuinely read-only.
   authorization-server metadata and dynamic-client-registration narrowing.
 - `coding_tools_mcp.oauth.OAUTH_RESPONSE_TYPES_SUPPORTED` is the corresponding
   response-type source.
-- At the Phase 02 boundary, only `authorization_code` and response type `code`
-  are advertised. `refresh_token` may be advertised only after the token
-  endpoint branch exists and is covered in Phase 05.
+- Phase 05 advertises `authorization_code` and `refresh_token` from the shared
+  grant-type constant after both token-endpoint branches and rotation/reuse
+  tests are complete. Response type `code` remains the only supported response.
 - Phase 04 introduces a persistent, transactional OAuth Store in the stable
   user configuration directory. It must persist clients, grants, access-token
   metadata, refresh-token families and hashes, signing-key metadata, and audit
@@ -133,7 +133,7 @@ The following block is consumed by the Phase 02 contract tests.
   "oauth": {
     "grant_types_source": "coding_tools_mcp.oauth.OAUTH_GRANT_TYPES_SUPPORTED",
     "response_types_source": "coding_tools_mcp.oauth.OAUTH_RESPONSE_TYPES_SUPPORTED",
-    "advertised_grant_types": ["authorization_code"],
+    "advertised_grant_types": ["authorization_code", "refresh_token"],
     "advertised_response_types": ["code"],
     "authorization_codes": "ephemeral",
     "persistent_store_phase": 4,

@@ -42,6 +42,8 @@ def oauth_root() -> Iterator[Path]:
             try:
                 shutil.rmtree(root)
                 break
+            except FileNotFoundError:
+                break
             except OSError as exc:
                 retryable = os.name == "nt" and getattr(exc, "winerror", None) in {5, 32, 145}
                 if not retryable or attempt == 19:

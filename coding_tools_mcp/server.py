@@ -38,16 +38,21 @@ from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
     OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,
+    OAUTH_GRANT_TYPE_REFRESH_TOKEN,
     OAUTH_GRANT_TYPES_SUPPORTED,
     OAUTH_MAX_BODY_BYTES,
     OAUTH_RESPONSE_TYPES_SUPPORTED,
     MAX_PENDING_CODES,
     OAUTH_TOKEN_TTL_SECONDS,
+    OAuthClientAuthenticationError,
     OAuthConfig,
+    OAuthInvalidGrantError,
     OAuthServiceError,
     PersistentOAuthClientRegistry,
     create_access_token,
     create_authorization_grant,
+    exchange_refresh_token,
+    issue_refresh_token,
     valid_pkce_challenge,
     validate_access_token,
     verify_pkce,
@@ -5227,8 +5232,34 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
 
+        if grant_type == OAUTH_GRANT_TYPE_REFRESH_TOKEN:
+            refresh_token = _p("refresh_token")
+            if not refresh_token:
+                _err("invalid_grant", "refresh_token is required")
+                return
+            try:
+                response = exchange_refresh_token(
+                    cfg,
+                    refresh_token=refresh_token,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    auth_method=presented_auth_method,
+                    server_url=self.oauth_base_url(),
+                )
+            except OAuthClientAuthenticationError:
+                _err("invalid_client", "Invalid client authentication")
+                return
+            except OAuthInvalidGrantError:
+                _err("invalid_grant", "Invalid, expired, or reused refresh token")
+                return
+            except OAuthServiceError:
+                _err("server_error", "Refresh-token persistence is unavailable")
+                return
+            self.send_json(response)
+            return
         if grant_type != OAUTH_GRANT_TYPE_AUTHORIZATION_CODE:
-            _err("unsupported_grant_type", "Only authorization_code is supported")
+            supported = ", ".join(OAUTH_GRANT_TYPES_SUPPORTED)
+            _err("unsupported_grant_type", f"Supported grant types: {supported}")
             return
         if cfg.registry.get(client_id) is None:
             _err("invalid_client", "Unknown client_id")
@@ -5277,10 +5308,24 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 client_id=client_id,
                 grant_id=grant_id,
             )
+            refresh_token = issue_refresh_token(
+                cfg,
+                grant_id=grant_id,
+                client_id=client_id,
+                scopes="mcp",
+            )
         except OAuthServiceError:
-            _err("server_error", "Access-token state could not be persisted")
+            _err("server_error", "OAuth token state could not be persisted")
             return
-        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
+        self.send_json(
+            {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": cfg.token_ttl,
+                "scope": "mcp",
+                "refresh_token": refresh_token,
+            }
+        )
 
     def handle_oauth_register(self) -> None:
         cfg = self.runtime.oauth_config
@@ -5489,6 +5534,12 @@ def build_persistent_oauth_config(
         byte_length=32,
     )
     store = OAuthAuthorizationStore(config_dir / OAUTH_DB_FILENAME, pepper=refresh_pepper)
+    signing_kid = f"key-{hashlib.sha256(token_secret).hexdigest()[:16]}"
+    store.register_signing_key(
+        signing_kid,
+        hashlib.sha256(token_secret).hexdigest(),
+        secret_ref=OAUTH_TOKEN_SECRET,
+    )
     registry = PersistentOAuthClientRegistry(store)
     if client_id:
         registry.add_preregistered(
@@ -5505,6 +5556,8 @@ def build_persistent_oauth_config(
             registry=registry,
             store=store,
             secret_vault=vault,
+            signing_kid=signing_kid,
+            signing_keys={signing_kid: token_secret},
         ),
         password_created,
     )

@@ -128,7 +128,7 @@ class IntegrationContractTests(unittest.TestCase):
                 "response_types": ["code", "token"],
             }
         )
-        self.assertEqual(registered["grant_types"], ["authorization_code"])
+        self.assertEqual(registered["grant_types"], list(OAUTH_GRANT_TYPES_SUPPORTED))
         self.assertEqual(registered["response_types"], ["code"])
 
         metadata_source = inspect.getsource(MCPHandler.handle_oauth_as_metadata)

@@ -261,7 +261,7 @@ class BearerFailClosedTests(unittest.TestCase):
 
 
 class PersistentOAuthCompositionTests(unittest.TestCase):
-    def test_dcr_client_persists_across_runtime_rebuild_without_refresh_advertising(self) -> None:
+    def test_dcr_client_persists_across_runtime_rebuild_with_supported_grants(self) -> None:
         with oauth_root() as root:
             config, created = build_persistent_oauth_config(
                 root,
@@ -304,7 +304,10 @@ class PersistentOAuthCompositionTests(unittest.TestCase):
                 server.server_close()
                 thread.join(timeout=5)
 
-            self.assertEqual(registered["grant_types"], ["authorization_code"])
+            self.assertEqual(
+                registered["grant_types"],
+                ["authorization_code", "refresh_token"],
+            )
             self.assertEqual(registered["response_types"], ["code"])
             reopened, _created = build_persistent_oauth_config(
                 root,

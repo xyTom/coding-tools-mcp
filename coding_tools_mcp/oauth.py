@@ -21,10 +21,13 @@ OAUTH_CODE_TTL_SECONDS = 300
 OAUTH_TOKEN_TTL_SECONDS = 24 * 60 * 60
 OAUTH_MAX_BODY_BYTES = 8_192
 OAUTH_GRANT_TYPE_AUTHORIZATION_CODE = "authorization_code"
-# Advertised in AS metadata and used to narrow DCR requests. The token endpoint
-# implements authorization_code only — adding an entry here requires a matching
-# branch in handle_oauth_token, not just a wider check.
-OAUTH_GRANT_TYPES_SUPPORTED = (OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,)
+OAUTH_GRANT_TYPE_REFRESH_TOKEN = "refresh_token"
+# Shared by AS metadata, DCR narrowing, and token-endpoint dispatch. A grant
+# type belongs here only after its endpoint branch and focused tests are complete.
+OAUTH_GRANT_TYPES_SUPPORTED = (
+    OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,
+    OAUTH_GRANT_TYPE_REFRESH_TOKEN,
+)
 OAUTH_RESPONSE_TYPES_SUPPORTED = ("code",)
 MAX_REDIRECT_URIS = 10
 MAX_REGISTERED_CLIENTS = 1_024
@@ -229,6 +232,106 @@ def create_authorization_grant(
         return config.store.create_grant(client_id, scopes)
     except (OAuthStoreError, ValueError) as exc:
         raise OAuthServiceError("OAuth authorization store is unavailable.") from exc
+
+
+class OAuthClientAuthenticationError(OAuthServiceError):
+    pass
+
+
+class OAuthInvalidGrantError(OAuthServiceError):
+    pass
+
+
+def _active_grant(
+    config: OAuthConfig,
+    *,
+    grant_id: str,
+    client_id: str,
+) -> dict[str, Any]:
+    if config.store is None:
+        raise OAuthServiceError("OAuth authorization store is not configured.")
+    try:
+        grant = config.store.get_grant(grant_id)
+    except OAuthStoreError as exc:
+        raise OAuthServiceError("OAuth authorization store is unavailable.") from exc
+    if (
+        grant is None
+        or grant.get("client_id") != client_id
+        or not bool(grant.get("enabled"))
+        or grant.get("revoked_at") is not None
+    ):
+        raise OAuthInvalidGrantError("OAuth grant is not active.")
+    return grant
+
+
+def issue_refresh_token(
+    config: OAuthConfig,
+    *,
+    grant_id: str,
+    client_id: str,
+    scopes: str,
+) -> str:
+    if config.store is None:
+        raise OAuthServiceError("OAuth authorization store is not configured.")
+    _active_grant(config, grant_id=grant_id, client_id=client_id)
+    try:
+        _family_id, token = config.store.issue_refresh_token(
+            grant_id,
+            client_id,
+            scopes,
+            expires_at=time.time() + config.refresh_token_ttl,
+        )
+    except OAuthStoreError as exc:
+        raise OAuthServiceError("OAuth refresh-token state could not be persisted.") from exc
+    return token
+
+
+def exchange_refresh_token(
+    config: OAuthConfig,
+    *,
+    refresh_token: str,
+    client_id: str,
+    client_secret: str,
+    auth_method: str,
+    server_url: str,
+) -> dict[str, Any]:
+    if config.store is None:
+        raise OAuthServiceError("OAuth authorization store is not configured.")
+    try:
+        authenticated = config.registry.authenticates(
+            client_id,
+            client_secret,
+            auth_method,
+        )
+    except OAuthStoreError as exc:
+        raise OAuthServiceError("OAuth client registry is unavailable.") from exc
+    if not authenticated:
+        raise OAuthClientAuthenticationError("OAuth client authentication failed.")
+    try:
+        rotated = config.store.rotate_refresh_token(
+            refresh_token,
+            expires_at=time.time() + config.refresh_token_ttl,
+        )
+    except OAuthStoreError as exc:
+        raise OAuthServiceError("OAuth refresh-token store is unavailable.") from exc
+    if rotated is None:
+        raise OAuthInvalidGrantError("Refresh token is invalid, expired, or reused.")
+    if not secrets.compare_digest(rotated.client_id, client_id):
+        raise OAuthClientAuthenticationError("Refresh token client mismatch.")
+    access_token = create_access_token(
+        config,
+        server_url,
+        client_id=rotated.client_id,
+        grant_id=rotated.grant_id,
+        scope=rotated.scopes,
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": config.token_ttl,
+        "scope": rotated.scopes,
+        "refresh_token": rotated.token,
+    }
 
 
 def validate_redirect_uris(value: Any) -> tuple[str, ...]:
