@@ -16,7 +16,9 @@ import urllib.request
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Iterator
+from unittest.mock import patch
 
+from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
 from coding_tools_mcp.server import (
     MCPHandler,
     Runtime,
@@ -186,6 +188,34 @@ class RefreshTokenHTTPTests(unittest.TestCase):
             )
             restarted, restarted_thread, restarted_base = start_server(root, reopened)
             try:
+                original_audit = OAuthAuthorizationStore._audit
+
+                def fail_access_audit(
+                    conn: sqlite3.Connection,
+                    event_type: str,
+                    **kwargs: object,
+                ) -> None:
+                    if event_type == "access_token_issued":
+                        raise sqlite3.IntegrityError("injected access-token audit failure")
+                    original_audit(conn, event_type, **kwargs)  # type: ignore[arg-type]
+
+                with patch.object(
+                    OAuthAuthorizationStore,
+                    "_audit",
+                    staticmethod(fail_access_audit),
+                ):
+                    failed_status, failed = post_form(
+                        restarted_base,
+                        "/oauth/token",
+                        {
+                            "grant_type": "refresh_token",
+                            "refresh_token": original_refresh,
+                            "client_id": str(registered["client_id"]),
+                        },
+                    )
+                self.assertEqual(failed_status, 503)
+                self.assertEqual(failed["error"], "server_error")
+
                 refresh_status, refreshed = post_form(
                     restarted_base,
                     "/oauth/token",

@@ -116,8 +116,9 @@ or local tool-registry definitions were changed.
 - Remote capabilities and side effects remain governed by the remote server.
 - Gateway Secret Vault resolution is not connected in Phase 07; `secret_ref`
   entries fail closed until a later composition explicitly supplies a resolver.
-- The Phase 05 Refresh rotation/access-token issuance cross-transaction
-  availability risk remains unchanged and was not touched.
+- At Phase 07 completion, the Phase 05 Refresh rotation/access-token issuance
+  cross-transaction availability risk remained unchanged and was not touched. It
+  was resolved after Phase 12 by the supplemental atomic Refresh exchange fix.
 
 ## Phase 08 Preconditions
 

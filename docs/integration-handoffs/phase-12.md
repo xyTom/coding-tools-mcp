@@ -16,8 +16,9 @@
   OAuth description.
 - Added an `Unreleased` CHANGELOG section for persistent OAuth, immutable
   Workspace binding, Gateway snapshots, Admin API/WebUI, chat/session
-  persistence, packaging integration, security boundaries, and the retained
-  Refresh issuance availability risk.
+  persistence, packaging integration, security boundaries, and the then-retained
+  Refresh issuance availability risk. That risk was resolved by the subsequent
+  supplemental atomic Refresh exchange fix.
 - Added `docs/migration-v0.1-to-v0.2.2.md` with explicit backup, migration,
   reauthorization, signing-key, Gateway, Admin, Desktop-separation, and full
   snapshot rollback guidance.
@@ -183,12 +184,12 @@ creation. The final privacy/schema run used an isolated temporary HOME and
 executed all 16 test bodies successfully. No production change was made for this
 runner-environment issue.
 
-## Known Retained Risks
+## Known Retained Risks at Phase 12 Completion
 
-- Phase 05 Refresh rotation and access-token metadata insertion remain separate
-  transactions. If rotation succeeds but access-token persistence fails, no
-  bearer is disclosed, but the Client must reauthorize. This remains an
-  availability risk and was not mixed into Phase 12.
+- At Phase 12 completion, Phase 05 Refresh rotation and access-token metadata
+  insertion still used separate transactions. The subsequent supplemental
+  Refresh atomicity fix resolved this: all exchange writes and audits now share
+  one transaction, and failure leaves the original token retryable.
 - The server and OAuth Secret Vault cryptographic formats still require the
   security review already recorded by earlier phases.
 - Final release validation should still run the full Linux gate matrix.
@@ -201,8 +202,9 @@ runner-environment issue.
 - Do not reinterpret historical `tool_profile` examples as live configuration.
 - Preserve the complete OAuth Store/Vault/key ring during release/rollback
   testing.
-- Do not fold the retained Refresh cross-transaction availability risk into
-  unrelated release fixes unless Phase 13 explicitly scopes it.
+- Preserve the supplemental Refresh exchange atomicity invariant during Phase
+  13 regression: no partial replacement, metadata, family timestamp, or audit
+  may survive a failed exchange.
 
 ## Secret Check
 

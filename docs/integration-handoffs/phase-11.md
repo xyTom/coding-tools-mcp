@@ -140,7 +140,7 @@ An extra one-process Phase 03–11 cumulative run executed 138 tests. Product as
 
 ## Remaining Risks and Deferred Work
 
-- Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remains unchanged.
+- At Phase 11 completion, Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remained unchanged. It was resolved after Phase 12 by the supplemental atomic Refresh exchange fix.
 - Native Windows may intermittently report `WinError 145` while deleting freshly emptied temporary directories in very large one-process suites.
 - The installed npm version requires package-directory execution (or an explicit package spec) for the dry-run pack check; the package content itself is valid.
 - Final integrated Linux CI must execute the security and MCP-contract bodies skipped by the native-Windows `/dev/null` fixture.

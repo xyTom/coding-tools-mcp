@@ -134,7 +134,7 @@ The focused tests executed successfully on the native Windows host and cover:
 - Phase 09 intentionally adds backend persistence and service/API surfaces only. The full WebUI consuming these APIs remains Phase 10.
 - The CLI is available as `python -m coding_tools_mcp.chat_cli`; no new package script or lockfile change was introduced.
 - SQLite data-at-rest encryption is not introduced in this phase; filesystem access control remains an operator responsibility.
-- Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remains unchanged.
+- At Phase 09 completion, Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remained unchanged. It was resolved after Phase 12 by the supplemental atomic Refresh exchange fix.
 
 ## Phase 10 Preconditions
 

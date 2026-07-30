@@ -128,6 +128,7 @@ class RequiredDocsTests(unittest.TestCase):
                 "oauth-secrets.json",
                 "full snapshot rollback",
                 "Refresh rotation",
+                "original refresh token remains retryable",
             ],
             "docs/telemetry.md": [
                 "chat/transcript content",

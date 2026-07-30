@@ -95,7 +95,7 @@ No Admin, WebUI, desktop, tool-registry, Refresh Token issuance transaction, or 
 
 - Workspace mappings currently come from server settings or the preregistered Client environment variable; no Admin/WebUI endpoint was added.
 - Existing Sessions intentionally retain a frozen Workspace after a Catalog disable operation; operators must terminate them for immediate eviction.
-- Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remains unchanged.
+- At Phase 06 completion, Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remained unchanged. It was resolved after Phase 12 by the supplemental atomic Refresh exchange fix.
 - The Server Secret Vault format still requires the separate Phase 03 security review.
 
 ## Phase 07 Preconditions

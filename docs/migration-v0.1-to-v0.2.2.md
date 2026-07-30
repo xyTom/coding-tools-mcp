@@ -112,10 +112,14 @@ Client/Grant state, and signing-key ring remain intact.
 ### Refresh and signing keys
 
 Authorization Code exchange returns a refresh token. Each refresh rotates the
-opaque token; reuse of an old token revokes the family. Signing-key rotation
-creates a new active key and retires the previous key so unexpired access tokens
-remain verifiable. Emergency key revoke invalidates tokens associated with that
-key.
+opaque token; reuse of an old token revokes the family. Refresh rotation,
+replacement, access-token `jti` metadata, family timestamps, and issuance audits
+commit in one
+SQLite transaction. A persistence/audit failure rolls the whole exchange back,
+so the original refresh token remains retryable and no partial replacement is
+left behind. Signing-key rotation creates a new active key and retires the
+previous key so unexpired access tokens remain verifiable. Emergency key revoke
+invalidates tokens associated with that key.
 
 Do not delete retired key material until every token that depends on it has
 expired or been revoked. Admin pages expose IDs, status, fingerprints, and
@@ -188,9 +192,11 @@ After upgrade:
 - Admin responses and logs contain no token or Vault material;
 - `npm --prefix webui test`, `docs-required`, and `schema-drift` pass.
 
-## Known retained risk
+## Refresh exchange recovery
 
-Refresh rotation and access-token metadata insertion are separate transactions.
-If rotation succeeds but access-token persistence fails, the request fails
-closed and no bearer is disclosed, but the client must reauthorize. Treat this
-as an availability risk and keep it separate from migration or Workspace logic.
+Refresh exchange is atomic and does not require a schema migration. If any
+replacement-token write, access-token metadata write, family update, or issuance
+audit fails, the transaction rolls back and the same original refresh token may
+be retried after the persistence problem is corrected. A successfully committed
+exchange still consumes the old token, and replay continues to revoke the token
+family.

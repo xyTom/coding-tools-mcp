@@ -17,6 +17,7 @@ from unittest.mock import patch
 from coding_tools_mcp.oauth_store import (
     OAuthAuthorizationStore,
     OAuthStoreError,
+    RefreshTokenClientMismatchError,
     RefreshTokenResult,
 )
 
@@ -473,6 +474,130 @@ class OAuthStoreTests(unittest.TestCase):
             self.assertEqual(rows, [(None, None, None)])
             recovered = OAuthAuthorizationStore(root / "oauth.sqlite3", pepper=PEPPER)
             self.assertIsNotNone(recovered.rotate_refresh_token(token, expires_at=FUTURE))
+
+    def test_refresh_exchange_access_failure_rolls_back_rotation_and_metadata(self) -> None:
+        class FailingAccessAuditStore(OAuthAuthorizationStore):
+            @staticmethod
+            def _audit(
+                conn: sqlite3.Connection,
+                event_type: str,
+                **kwargs: object,
+            ) -> None:
+                if event_type == "access_token_issued":
+                    raise sqlite3.IntegrityError("injected access-token audit failure")
+                OAuthAuthorizationStore._audit(conn, event_type, **kwargs)  # type: ignore[arg-type]
+
+        with oauth_root() as root:
+            store, grant_id = prepared_store(root)
+            family_id, token = store.issue_refresh_token(
+                grant_id,
+                "agent-a",
+                "mcp",
+                expires_at=FUTURE,
+            )
+            failing = FailingAccessAuditStore(root / "oauth.sqlite3", pepper=PEPPER)
+            binding = failing.refresh_token_binding(token)
+            self.assertIsNotNone(binding)
+            assert binding is not None
+            self.assertEqual(binding.client_id, "agent-a")
+            self.assertEqual(binding.grant_id, grant_id)
+
+            with self.assertRaises(OAuthStoreError):
+                failing.rotate_refresh_token_and_record_access_token(
+                    token,
+                    expected_client_id="agent-a",
+                    refresh_expires_at=FUTURE,
+                    access_jti="jti-atomic-failure",
+                    access_signing_kid="key-a",
+                    access_scopes="mcp",
+                    access_issued_at=100.0,
+                    access_expires_at=FUTURE,
+                )
+
+            with closing(sqlite3.connect(root / "oauth.sqlite3")) as conn:
+                refresh_rows = conn.execute(
+                    """
+                    SELECT used_at, revoked_at, replacement_token_id
+                    FROM oauth_refresh_tokens WHERE family_id=?
+                    """,
+                    (family_id,),
+                ).fetchall()
+                access_count = conn.execute(
+                    "SELECT COUNT(*) FROM oauth_access_tokens WHERE jti=?",
+                    ("jti-atomic-failure",),
+                ).fetchone()[0]
+            self.assertEqual(refresh_rows, [(None, None, None)])
+            self.assertEqual(access_count, 0)
+            self.assertFalse(
+                any(
+                    event["event_type"] in {"refresh_token_rotated", "access_token_issued"}
+                    for event in failing.list_audit_events(limit=500)
+                )
+            )
+
+            recovered = OAuthAuthorizationStore(root / "oauth.sqlite3", pepper=PEPPER)
+            rotated = recovered.rotate_refresh_token_and_record_access_token(
+                token,
+                expected_client_id="agent-a",
+                refresh_expires_at=FUTURE,
+                access_jti="jti-atomic-success",
+                access_signing_kid="key-a",
+                access_scopes="mcp",
+                access_issued_at=100.0,
+                access_expires_at=FUTURE,
+            )
+            self.assertIsNotNone(rotated)
+            self.assertTrue(recovered.access_token_is_active("jti-atomic-success", now=101.0))
+
+    def test_refresh_exchange_client_mismatch_does_not_consume_token(self) -> None:
+        with oauth_root() as root:
+            store, grant_id = prepared_store(root)
+            family_id, token = store.issue_refresh_token(
+                grant_id,
+                "agent-a",
+                "mcp",
+                expires_at=FUTURE,
+            )
+
+            with self.assertRaises(RefreshTokenClientMismatchError):
+                store.rotate_refresh_token_and_record_access_token(
+                    token,
+                    expected_client_id="agent-b",
+                    refresh_expires_at=FUTURE,
+                    access_jti="jti-mismatch",
+                    access_signing_kid="key-a",
+                    access_scopes="mcp",
+                    access_issued_at=100.0,
+                    access_expires_at=FUTURE,
+                )
+
+            with closing(sqlite3.connect(root / "oauth.sqlite3")) as conn:
+                row = conn.execute(
+                    """
+                    SELECT used_at, revoked_at, replacement_token_id
+                    FROM oauth_refresh_tokens WHERE family_id=?
+                    """,
+                    (family_id,),
+                ).fetchone()
+                access_count = conn.execute(
+                    "SELECT COUNT(*) FROM oauth_access_tokens WHERE jti=?",
+                    ("jti-mismatch",),
+                ).fetchone()[0]
+            self.assertEqual(row, (None, None, None))
+            self.assertEqual(access_count, 0)
+
+            rotated = store.rotate_refresh_token_and_record_access_token(
+                token,
+                expected_client_id="agent-a",
+                refresh_expires_at=FUTURE,
+                access_jti="jti-after-mismatch",
+                access_signing_kid="key-a",
+                access_scopes="mcp",
+                access_issued_at=100.0,
+                access_expires_at=FUTURE,
+            )
+            self.assertIsNotNone(rotated)
+            self.assertTrue(store.access_token_is_active("jti-after-mismatch", now=101.0))
 
     def test_concurrent_refresh_rotation_has_one_winner_and_detects_reuse(self) -> None:
         with oauth_root() as root:

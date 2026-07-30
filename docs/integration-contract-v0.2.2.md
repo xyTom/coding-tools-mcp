@@ -58,6 +58,11 @@ must never describe this switch as safe or genuinely read-only.
 - Phase 05 adapts the upstream registry and handlers to that store. Store
   unavailability fails closed; it must not silently fall back to a permissive
   process-local registry.
+- Refresh exchange commits replacement-token creation, old-token consumption,
+  family last-used state, access-token metadata, and issuance audits in one
+  `BEGIN IMMEDIATE` transaction. Any failure rolls back all of those writes and
+  leaves the original refresh token retryable. No OAuth schema migration is
+  required for this atomicity fix.
 
 ## Agent to Workspace binding
 

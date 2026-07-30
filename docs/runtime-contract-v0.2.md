@@ -177,9 +177,12 @@ narrowed to supported grant/response types; public and confidential clients are
 bound to their registered authentication method.
 
 Clients, Grants, access-token `jti` metadata, refresh-token families, and
-signing-key metadata persist in `oauth.sqlite3`. Refresh tokens rotate; reuse of
-an already-rotated token revokes its family. Access validation checks the active
-Client, Grant, token, Workspace mapping, and signing key. Signing material is
+signing-key metadata persist in `oauth.sqlite3`. Refresh-token replacement,
+old-token consumption, access-token metadata, family timestamps, and issuance
+audits commit atomically; a failed exchange leaves the original token retryable.
+Reuse of an already-rotated token revokes its family. Access validation checks
+the active Client, Grant, token, Workspace mapping, and signing key. Signing
+material is
 loaded from `oauth-secrets.json` through the
 `CODING_TOOLS_MCP_SECRETS_KEY`-protected Secret Vault. Store or Vault failure is
 fail-closed; there is no in-memory fallback. Authorization codes remain

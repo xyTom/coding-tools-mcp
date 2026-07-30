@@ -187,7 +187,7 @@ No Desktop, OAuth Store/schema, OAuth/Refresh implementation, Gateway lifecycle,
 - Package-data inclusion for `coding_tools_mcp/webui_dist/admin.html` remains Phase 11 because Phase 10 was prohibited from modifying `pyproject.toml`.
 - Backend telemetry status wiring remains Phase 11; the UI already supports the documented states and currently shows unknown when the backend omits the field.
 - The WebUI intentionally does not edit credential-bearing Gateway documents; operators use the established Secret Vault/configuration workflow for those changes.
-- Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remains unchanged.
+- At Phase 10 completion, Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remained unchanged. It was resolved after Phase 12 by the supplemental atomic Refresh exchange fix.
 
 ## Phase 11 Preconditions
 

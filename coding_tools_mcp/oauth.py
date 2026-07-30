@@ -13,7 +13,11 @@ from typing import Any
 
 import jwt
 
-from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from .oauth_store import (
+    OAuthAuthorizationStore,
+    OAuthStoreError,
+    RefreshTokenClientMismatchError,
+)
 from .secret_vault import SecretVault, SecretVaultError
 
 
@@ -61,6 +65,19 @@ class OAuthIdentity:
     grant_id: str
     workspace_id: str
     jti: str
+
+
+@dataclass(frozen=True)
+class AccessTokenIssue:
+    token: str
+    jti: str
+    client_id: str
+    grant_id: str
+    signing_kid: str
+    scopes: str
+    issued_at: int
+    expires_at: int
+    token_mode: str
 
 
 class OAuthClientRegistry:
@@ -332,25 +349,41 @@ def exchange_refresh_token(
     if not authenticated:
         raise OAuthClientAuthenticationError("OAuth client authentication failed.")
     try:
-        rotated = config.store.rotate_refresh_token(
-            refresh_token,
-            expires_at=time.time() + config.refresh_token_ttl,
-        )
+        binding = config.store.refresh_token_binding(refresh_token)
     except OAuthStoreError as exc:
         raise OAuthServiceError("OAuth refresh-token store is unavailable.") from exc
-    if rotated is None:
+    if binding is None:
         raise OAuthInvalidGrantError("Refresh token is invalid, expired, or reused.")
-    if not secrets.compare_digest(rotated.client_id, client_id):
+    if not secrets.compare_digest(binding.client_id, client_id):
         raise OAuthClientAuthenticationError("Refresh token client mismatch.")
-    access_token = create_access_token(
+
+    access_issue = _prepare_access_token(
         config,
         server_url,
-        client_id=rotated.client_id,
-        grant_id=rotated.grant_id,
-        scope=rotated.scopes,
+        client_id=binding.client_id,
+        grant_id=binding.grant_id,
+        scope=binding.scopes,
     )
+    try:
+        rotated = config.store.rotate_refresh_token_and_record_access_token(
+            refresh_token,
+            expected_client_id=client_id,
+            refresh_expires_at=time.time() + config.refresh_token_ttl,
+            access_jti=access_issue.jti,
+            access_signing_kid=access_issue.signing_kid,
+            access_scopes=access_issue.scopes,
+            access_issued_at=access_issue.issued_at,
+            access_expires_at=access_issue.expires_at,
+            token_mode=access_issue.token_mode,
+        )
+    except RefreshTokenClientMismatchError as exc:
+        raise OAuthClientAuthenticationError("Refresh token client mismatch.") from exc
+    except OAuthStoreError as exc:
+        raise OAuthServiceError("OAuth refresh-token exchange could not be persisted.") from exc
+    if rotated is None:
+        raise OAuthInvalidGrantError("Refresh token is invalid, expired, or reused.")
     return {
-        "access_token": access_token,
+        "access_token": access_issue.token,
         "token_type": "Bearer",
         "expires_in": config.token_ttl,
         "scope": rotated.scopes,
@@ -559,7 +592,7 @@ def _oauth_signing_key(config: OAuthConfig, kid: str) -> bytes | None:
     return None
 
 
-def create_access_token(
+def _prepare_access_token(
     config: OAuthConfig,
     server_url: str,
     *,
@@ -567,9 +600,7 @@ def create_access_token(
     grant_id: str,
     scope: str = "mcp",
     token_mode: str = "standard",
-) -> str:
-    if config.store is None:
-        raise OAuthServiceError("OAuth authorization store is not configured.")
+) -> AccessTokenIssue:
     now = int(time.time())
     expires_at = now + config.token_ttl
     jti = str(uuid.uuid4())
@@ -593,20 +624,52 @@ def create_access_token(
         algorithm="HS256",
         headers={"kid": kid},
     )
+    return AccessTokenIssue(
+        token=token,
+        jti=jti,
+        client_id=client_id,
+        grant_id=grant_id,
+        signing_kid=kid,
+        scopes=scope,
+        issued_at=now,
+        expires_at=expires_at,
+        token_mode=token_mode,
+    )
+
+
+def create_access_token(
+    config: OAuthConfig,
+    server_url: str,
+    *,
+    client_id: str,
+    grant_id: str,
+    scope: str = "mcp",
+    token_mode: str = "standard",
+) -> str:
+    if config.store is None:
+        raise OAuthServiceError("OAuth authorization store is not configured.")
+    issue = _prepare_access_token(
+        config,
+        server_url,
+        client_id=client_id,
+        grant_id=grant_id,
+        scope=scope,
+        token_mode=token_mode,
+    )
     try:
         config.store.record_access_token(
-            jti,
-            grant_id,
-            client_id,
-            kid,
-            scope,
-            issued_at=now,
-            expires_at=expires_at,
-            token_mode=token_mode,
+            issue.jti,
+            issue.grant_id,
+            issue.client_id,
+            issue.signing_kid,
+            issue.scopes,
+            issued_at=issue.issued_at,
+            expires_at=issue.expires_at,
+            token_mode=issue.token_mode,
         )
     except OAuthStoreError as exc:
         raise OAuthServiceError("OAuth access-token state could not be persisted.") from exc
-    return token
+    return issue.token
 
 
 def authenticate_access_token(

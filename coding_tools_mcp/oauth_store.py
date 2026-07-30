@@ -25,10 +25,22 @@ class OAuthStoreError(RuntimeError):
     """OAuth persistence cannot safely serve an authorization decision."""
 
 
+class RefreshTokenClientMismatchError(OAuthStoreError):
+    """A refresh token is bound to a different authenticated client."""
+
+
 @dataclass(frozen=True)
 class RefreshTokenResult:
     family_id: str
     token: str
+    client_id: str
+    grant_id: str
+    scopes: str
+
+
+@dataclass(frozen=True)
+class RefreshTokenBinding:
+    family_id: str
     client_id: str
     grant_id: str
     scopes: str
@@ -783,34 +795,59 @@ class OAuthAuthorizationStore:
         if not jti:
             raise ValueError("Access-token jti must not be empty.")
         with self._transaction("access-token recording", immediate=True) as conn:
-            conn.execute(
-                """
-                INSERT INTO oauth_access_tokens(
-                    jti, grant_id, client_id, signing_kid, scopes,
-                    token_mode, issued_at, expires_at
-                ) VALUES(?,?,?,?,?,?,?,?)
-                """,
-                (
-                    jti,
-                    grant_id,
-                    client_id,
-                    signing_kid,
-                    scopes,
-                    token_mode,
-                    issued_at,
-                    expires_at,
-                ),
-            )
-            self._audit(
+            self._record_access_token_in_transaction(
                 conn,
-                "access_token_issued",
-                client_id=client_id,
-                grant_id=grant_id,
-                token_id=jti,
-                key_id=signing_kid,
-                actor_kind="server",
-                details={"mode": token_mode},
+                jti,
+                grant_id,
+                client_id,
+                signing_kid,
+                scopes,
+                issued_at=issued_at,
+                expires_at=expires_at,
+                token_mode=token_mode,
             )
+
+    def _record_access_token_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        jti: str,
+        grant_id: str,
+        client_id: str,
+        signing_kid: str,
+        scopes: str,
+        *,
+        issued_at: float,
+        expires_at: float,
+        token_mode: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO oauth_access_tokens(
+                jti, grant_id, client_id, signing_kid, scopes,
+                token_mode, issued_at, expires_at
+            ) VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (
+                jti,
+                grant_id,
+                client_id,
+                signing_kid,
+                scopes,
+                token_mode,
+                issued_at,
+                expires_at,
+            ),
+        )
+        self._audit(
+            conn,
+            "access_token_issued",
+            client_id=client_id,
+            grant_id=grant_id,
+            token_id=jti,
+            key_id=signing_kid,
+            actor_kind="server",
+            details={"mode": token_mode},
+        )
 
     def active_access_token_identity(
         self,
@@ -959,6 +996,19 @@ class OAuthAuthorizationStore:
             )
         return family_id, token
 
+    def refresh_token_binding(self, token: str) -> RefreshTokenBinding | None:
+        digest = self._refresh_hash(token)
+        with self._connection("refresh-token binding") as conn:
+            row = self._refresh_token_row(conn, digest)
+            if row is None:
+                return None
+            return RefreshTokenBinding(
+                family_id=str(row["family_id"]),
+                client_id=str(row["client_id"]),
+                grant_id=str(row["grant_id"]),
+                scopes=str(row["scopes"]),
+            )
+
     def rotate_refresh_token(
         self,
         token: str,
@@ -968,118 +1018,194 @@ class OAuthAuthorizationStore:
         now = time.time()
         digest = self._refresh_hash(token)
         with self._transaction("refresh-token rotation", immediate=True) as conn:
-            row = conn.execute(
-                """
-                SELECT t.token_id, t.family_id, t.used_at,
-                       t.revoked_at AS token_revoked, t.replacement_token_id,
-                       t.expires_at AS token_expires_at,
-                       f.grant_id, f.client_id, f.scopes,
-                       f.expires_at AS family_expires_at,
-                       f.revoked_at AS family_revoked,
-                       g.enabled AS grant_enabled, g.revoked_at AS grant_revoked,
-                       c.enabled AS client_enabled, c.revoked_at AS client_revoked
-                FROM oauth_refresh_tokens t
-                JOIN oauth_refresh_token_families f ON f.family_id=t.family_id
-                JOIN oauth_grants g ON g.grant_id=f.grant_id
-                JOIN oauth_clients c ON c.client_id=f.client_id
-                WHERE t.token_hash=?
-                """,
-                (digest,),
-            ).fetchone()
+            row = self._refresh_token_row(conn, digest)
+            return self._rotate_refresh_token_in_transaction(
+                conn,
+                row,
+                expires_at=expires_at,
+                now=now,
+            )
+
+    def rotate_refresh_token_and_record_access_token(
+        self,
+        token: str,
+        *,
+        expected_client_id: str,
+        refresh_expires_at: float,
+        access_jti: str,
+        access_signing_kid: str,
+        access_scopes: str,
+        access_issued_at: float,
+        access_expires_at: float,
+        token_mode: str = "standard",
+    ) -> RefreshTokenResult | None:
+        if not expected_client_id:
+            raise ValueError("Expected OAuth client id must not be empty.")
+        if not access_jti:
+            raise ValueError("Access-token jti must not be empty.")
+        now = time.time()
+        digest = self._refresh_hash(token)
+        with self._transaction("refresh-token exchange", immediate=True) as conn:
+            row = self._refresh_token_row(conn, digest)
             if row is None:
                 return None
-            already_used = (
-                row["used_at"] is not None
-                or row["token_revoked"] is not None
-                or row["replacement_token_id"] is not None
-            )
-            if already_used:
-                if row["replacement_token_id"] is not None and row["family_revoked"] is None:
-                    conn.execute(
-                        """
-                        UPDATE oauth_refresh_token_families
-                        SET revoked_at=?, revoke_reason='refresh_token_reuse'
-                        WHERE family_id=?
-                        """,
-                        (now, row["family_id"]),
-                    )
-                    conn.execute(
-                        """
-                        UPDATE oauth_refresh_tokens
-                        SET revoked_at=COALESCE(revoked_at,?),
-                            reuse_detected_at=CASE WHEN token_id=? THEN ? ELSE reuse_detected_at END
-                        WHERE family_id=?
-                        """,
-                        (now, row["token_id"], now, row["family_id"]),
-                    )
-                    self._audit(
-                        conn,
-                        "refresh_token_reuse",
-                        client_id=row["client_id"],
-                        grant_id=row["grant_id"],
-                        token_id=row["family_id"],
-                        actor_kind="server",
-                        details={"severity": "high"},
-                    )
-                return None
-            valid = (
-                row["token_expires_at"] > now
-                and row["family_expires_at"] > now
-                and row["family_revoked"] is None
-                and bool(row["grant_enabled"])
-                and row["grant_revoked"] is None
-                and bool(row["client_enabled"])
-                and row["client_revoked"] is None
-            )
-            if not valid:
-                return None
-            new_token = secrets.token_urlsafe(48)
-            new_id = str(uuid.uuid4())
-            new_expiry = min(expires_at, float(row["family_expires_at"]))
-            if new_expiry <= now:
-                return None
-            conn.execute(
-                """
-                INSERT INTO oauth_refresh_tokens(
-                    token_id, family_id, token_hash, issued_at, expires_at
-                ) VALUES(?,?,?,?,?)
-                """,
-                (
-                    new_id,
-                    row["family_id"],
-                    self._refresh_hash(new_token),
-                    now,
-                    new_expiry,
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE oauth_refresh_tokens
-                SET used_at=?, revoked_at=?, replacement_token_id=?
-                WHERE token_id=?
-                """,
-                (now, now, new_id, row["token_id"]),
-            )
-            conn.execute(
-                "UPDATE oauth_refresh_token_families SET last_used_at=? WHERE family_id=?",
-                (now, row["family_id"]),
-            )
-            self._audit(
+            stored_client_id = str(row["client_id"])
+            if not secrets.compare_digest(stored_client_id, expected_client_id):
+                raise RefreshTokenClientMismatchError(
+                    "Refresh token is bound to a different OAuth client."
+                )
+            stored_scopes = str(row["scopes"])
+            if stored_scopes != access_scopes:
+                raise OAuthStoreError(
+                    "Access-token scopes do not match the refresh-token family."
+                )
+            rotated = self._rotate_refresh_token_in_transaction(
                 conn,
-                "refresh_token_rotated",
-                client_id=row["client_id"],
-                grant_id=row["grant_id"],
-                token_id=row["family_id"],
-                actor_kind="server",
-                details={},
+                row,
+                expires_at=refresh_expires_at,
+                now=now,
             )
-            return RefreshTokenResult(
+            if rotated is None:
+                return None
+            self._record_access_token_in_transaction(
+                conn,
+                access_jti,
+                rotated.grant_id,
+                rotated.client_id,
+                access_signing_kid,
+                rotated.scopes,
+                issued_at=access_issued_at,
+                expires_at=access_expires_at,
+                token_mode=token_mode,
+            )
+            return rotated
+
+    @staticmethod
+    def _refresh_token_row(
+        conn: sqlite3.Connection,
+        digest: str,
+    ) -> sqlite3.Row | None:
+        return conn.execute(
+            """
+            SELECT t.token_id, t.family_id, t.used_at,
+                   t.revoked_at AS token_revoked, t.replacement_token_id,
+                   t.expires_at AS token_expires_at,
+                   f.grant_id, f.client_id, f.scopes,
+                   f.expires_at AS family_expires_at,
+                   f.revoked_at AS family_revoked,
+                   g.enabled AS grant_enabled, g.revoked_at AS grant_revoked,
+                   c.enabled AS client_enabled, c.revoked_at AS client_revoked
+            FROM oauth_refresh_tokens t
+            JOIN oauth_refresh_token_families f ON f.family_id=t.family_id
+            JOIN oauth_grants g ON g.grant_id=f.grant_id
+            JOIN oauth_clients c ON c.client_id=f.client_id
+            WHERE t.token_hash=?
+            """,
+            (digest,),
+        ).fetchone()
+
+    def _rotate_refresh_token_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        row: sqlite3.Row | None,
+        *,
+        expires_at: float,
+        now: float,
+    ) -> RefreshTokenResult | None:
+        if row is None:
+            return None
+        already_used = (
+            row["used_at"] is not None
+            or row["token_revoked"] is not None
+            or row["replacement_token_id"] is not None
+        )
+        if already_used:
+            if row["replacement_token_id"] is not None and row["family_revoked"] is None:
+                conn.execute(
+                    """
+                    UPDATE oauth_refresh_token_families
+                    SET revoked_at=?, revoke_reason='refresh_token_reuse'
+                    WHERE family_id=?
+                    """,
+                    (now, row["family_id"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE oauth_refresh_tokens
+                    SET revoked_at=COALESCE(revoked_at,?),
+                        reuse_detected_at=CASE WHEN token_id=? THEN ? ELSE reuse_detected_at END
+                    WHERE family_id=?
+                    """,
+                    (now, row["token_id"], now, row["family_id"]),
+                )
+                self._audit(
+                    conn,
+                    "refresh_token_reuse",
+                    client_id=row["client_id"],
+                    grant_id=row["grant_id"],
+                    token_id=row["family_id"],
+                    actor_kind="server",
+                    details={"severity": "high"},
+                )
+            return None
+        valid = (
+            row["token_expires_at"] > now
+            and row["family_expires_at"] > now
+            and row["family_revoked"] is None
+            and bool(row["grant_enabled"])
+            and row["grant_revoked"] is None
+            and bool(row["client_enabled"])
+            and row["client_revoked"] is None
+        )
+        if not valid:
+            return None
+        new_token = secrets.token_urlsafe(48)
+        new_id = str(uuid.uuid4())
+        new_expiry = min(expires_at, float(row["family_expires_at"]))
+        if new_expiry <= now:
+            return None
+        conn.execute(
+            """
+            INSERT INTO oauth_refresh_tokens(
+                token_id, family_id, token_hash, issued_at, expires_at
+            ) VALUES(?,?,?,?,?)
+            """,
+            (
+                new_id,
                 row["family_id"],
-                new_token,
-                row["client_id"],
-                row["grant_id"],
-                row["scopes"],
-            )
+                self._refresh_hash(new_token),
+                now,
+                new_expiry,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE oauth_refresh_tokens
+            SET used_at=?, revoked_at=?, replacement_token_id=?
+            WHERE token_id=?
+            """,
+            (now, now, new_id, row["token_id"]),
+        )
+        conn.execute(
+            "UPDATE oauth_refresh_token_families SET last_used_at=? WHERE family_id=?",
+            (now, row["family_id"]),
+        )
+        self._audit(
+            conn,
+            "refresh_token_rotated",
+            client_id=row["client_id"],
+            grant_id=row["grant_id"],
+            token_id=row["family_id"],
+            actor_kind="server",
+            details={},
+        )
+        return RefreshTokenResult(
+            str(row["family_id"]),
+            new_token,
+            str(row["client_id"]),
+            str(row["grant_id"]),
+            str(row["scopes"]),
+        )
 
     def refresh_family_is_revoked(self, family_id: str) -> bool:
         with self._connection("refresh-family query") as conn:

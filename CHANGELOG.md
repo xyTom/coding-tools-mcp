@@ -44,12 +44,13 @@
   upstream namespace collisions, and invalid Gateway credential references fail
   closed.
 
-### Known issue
+### Fixed
 
-- Refresh-token rotation and access-token metadata insertion are separate
-  transactions. If rotation succeeds but access-token persistence fails, no
-  bearer is returned and the client must reauthorize; this is an availability
-  risk, not a credential-disclosure path.
+- Refresh-token rotation, replacement-token insertion, access-token metadata,
+  family timestamps, and both issuance audits now commit in one SQLite
+  transaction. If access-token persistence or auditing fails, the whole exchange
+  rolls back, the original refresh token remains usable, and no replacement or
+  access-token metadata is left behind.
 
 ## 0.2.2 - 2026-07-28
 

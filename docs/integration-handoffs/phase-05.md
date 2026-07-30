@@ -87,11 +87,11 @@ No Admin, WebUI, desktop, tool-registry, workspace-binding, or transport archite
 - This is the Phase 01 platform baseline and is not a Phase 05 regression.
 - Final integrated Linux CI must execute those bodies before release.
 
-## Remaining Risks
+## Remaining Risks at Phase 05 Completion
 
 - Authorization codes remain intentionally short-lived and process-local.
 - Signing-key rotation/revocation is integrated as a service but has no Admin or WebUI endpoint in this phase.
-- Refresh rotation and access-token metadata insertion are individually transactional but not one cross-operation SQLite transaction. If access-token persistence fails after a successful refresh rotation, the request fails closed and the client must reauthorize.
+- At the original Phase 05 handoff, Refresh rotation and access-token metadata insertion were individually transactional but not one cross-operation SQLite transaction. This historical risk was resolved after Phase 12 by the supplemental Refresh atomicity fix: rotation, replacement, access-token metadata, family updates, and audits now commit or roll back together.
 - The OAuth Server Secret Vault cryptographic format still requires the dedicated security review already recorded in Phase 03.
 
 ## Phase 06 Preconditions

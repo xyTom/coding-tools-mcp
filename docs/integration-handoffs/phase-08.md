@@ -139,7 +139,7 @@ No OAuth Store schema, Refresh transaction, Admin frontend asset bundle, tool re
 - Admin token rotation is operator-driven through environment/settings/Secret Vault configuration and restart; no online token-rotation endpoint was added.
 - Secret names are visible to authenticated administrators, but values remain non-readable.
 - Gateway and Settings changes deliberately require restart; this preserves Phase 07 snapshot invariants.
-- Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remains unchanged.
+- At Phase 08 completion, Phase 05's Refresh rotation/access-token insertion cross-transaction availability risk remained unchanged. It was resolved after Phase 12 by the supplemental atomic Refresh exchange fix.
 - The server Secret Vault cryptographic format still requires the separate security review recorded in Phase 03.
 
 ## Phase 09 Preconditions
