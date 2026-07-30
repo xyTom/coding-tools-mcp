@@ -33,6 +33,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
+from .admin import (
+    ADMIN_API_PREFIX,
+    SERVER_SECRET_VAULT_FILENAME,
+    AdminService,
+    AdminServiceError,
+    AdminUnavailableError,
+    gateway_file_revision,
+)
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
@@ -62,7 +70,11 @@ from .oauth import (
 )
 from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
 from .secret_vault import SecretVault, SecretVaultError
-from .settings_definition import normalize_oauth_client_workspace_bindings
+from .settings_definition import (
+    SettingsValidationError,
+    normalize_allowed_origins,
+    normalize_oauth_client_workspace_bindings,
+)
 from .settings_store import (
     ServerSettingsStore,
     SettingsStoreError,
@@ -111,6 +123,7 @@ from .workspace_binding import (
     WorkspaceBindingError,
     WorkspaceBindingResolver,
 )
+from .webui import admin_console_html
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 
 
@@ -745,35 +758,25 @@ def json_response_payload(payload: Any) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-@functools.lru_cache(maxsize=8)
-def _configured_allowed_origins(raw: str) -> frozenset[str]:
-    return frozenset(item.strip().rstrip("/") for item in raw.split(",") if item.strip())
+_ACTIVE_ALLOWED_ORIGINS: frozenset[str] = frozenset()
+
+
+def configure_allowed_origins(value: Any) -> frozenset[str]:
+    global _ACTIVE_ALLOWED_ORIGINS
+    normalized = frozenset(normalize_allowed_origins(value))
+    _ACTIVE_ALLOWED_ORIGINS = normalized
+    return normalized
 
 
 def is_allowed_origin(origin: str) -> bool:
-    # Authentication does not replace browser Origin validation.
+    # Authentication does not replace browser Origin validation. The same
+    # canonical validator is used for startup and Admin settings writes.
     try:
-        parsed = urllib.parse.urlparse(origin)
-    except ValueError:
+        normalized_values = normalize_allowed_origins([origin])
+        parsed = urllib.parse.urlsplit(normalized_values[0])
+    except (IndexError, SettingsValidationError, ValueError):
         return False
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in {"", "/"}
-        or parsed.params
-        or parsed.query
-        or parsed.fragment
-    ):
-        return False
-    try:
-        _ = parsed.port
-    except ValueError:
-        return False
-    normalized = origin.rstrip("/")
-    configured = _configured_allowed_origins(os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS", ""))
-    return parsed.hostname in {"localhost", "127.0.0.1", "::1"} or normalized in configured
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"} or normalized_values[0] in _ACTIVE_ALLOWED_ORIGINS
 
 
 def is_loopback_bind_host(host: str) -> bool:
@@ -4813,15 +4816,173 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             head_only=head_only,
         )
 
+    def _admin_service(self) -> AdminService | None:
+        service = getattr(self.server, "admin_service", None)  # type: ignore[attr-defined]
+        return service if isinstance(service, AdminService) else None
+
+    def _is_admin_authorized(self) -> bool:
+        configured = getattr(self.server, "admin_token", None)  # type: ignore[attr-defined]
+        if not isinstance(configured, str) or not configured:
+            return False
+        explicit = self.headers.get("X-Admin-Token", "").strip()
+        bearer = self.headers.get("Authorization", "").strip()
+        candidates = [explicit]
+        if bearer.startswith("Bearer "):
+            candidates.append(bearer.removeprefix("Bearer ").strip())
+        return any(value and secrets.compare_digest(value, configured) for value in candidates)
+
+    def _read_admin_json(self) -> dict[str, Any] | None:
+        if self.command in {"GET", "HEAD", "DELETE"}:
+            return {}
+        if self.headers.get_content_type().lower() != "application/json":
+            self.send_json({"error": {"code": "invalid_content_type", "message": "Content-Type must be application/json"}}, status=415)
+            return None
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self.send_json({"error": {"code": "invalid_request", "message": "Content-Length is required"}}, status=411)
+            return None
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self.send_json({"error": {"code": "invalid_request", "message": "Content-Length must be an integer"}}, status=400)
+            return None
+        if length < 0 or length > MAX_HTTP_REQUEST_BYTES:
+            self.send_json({"error": {"code": "invalid_request", "message": "Admin request body size is invalid"}}, status=413)
+            return None
+        try:
+            value = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_json({"error": {"code": "invalid_json", "message": "Body must be valid JSON"}}, status=400)
+            return None
+        if not isinstance(value, dict):
+            self.send_json({"error": {"code": "invalid_request", "message": "Body must be a JSON object"}}, status=400)
+            return None
+        return value
+
+    def handle_admin_request(self, method: str, *, head_only: bool = False) -> None:
+        service = self._admin_service()
+        if service is None:
+            self.send_json({"error": "Unknown endpoint"}, status=404, head_only=head_only)
+            return
+        origin = self.headers.get("Origin")
+        if origin and not is_allowed_origin(origin):
+            self.send_json({"error": {"code": "origin_denied", "message": "Origin denied"}}, status=403, head_only=head_only)
+            return
+        if not self._is_admin_authorized():
+            self.send_json(
+                {"error": {"code": "admin_auth_required", "message": "Admin authentication is required"}},
+                status=401,
+                extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-admin"'},
+                head_only=head_only,
+            )
+            return
+        body = self._read_admin_json()
+        if body is None:
+            return
+        parsed = urllib.parse.urlsplit(self.path)
+        query = {key: values[-1] for key, values in urllib.parse.parse_qs(parsed.query).items() if values}
+        try:
+            payload = service.dispatch(method, posixpath.normpath(parsed.path), body, query)
+        except AdminUnavailableError as exc:
+            self.send_json(
+                {
+                    "error": {
+                        "code": exc.code,
+                        "message": "An Admin backing service is unavailable.",
+                    }
+                },
+                status=exc.status,
+                head_only=head_only,
+            )
+            return
+        except AdminServiceError as exc:
+            self.send_json(
+                {"error": {"code": exc.code, "message": str(exc)}},
+                status=exc.status,
+                head_only=head_only,
+            )
+            return
+        except (OAuthStoreError, SecretVaultError, SettingsStoreError):
+            self.send_json(
+                {
+                    "error": {
+                        "code": "admin_unavailable",
+                        "message": "An Admin backing service is unavailable.",
+                    }
+                },
+                status=503,
+                head_only=head_only,
+            )
+            return
+        except Exception:  # noqa: BLE001 - Admin responses must remain redacted.
+            self.send_json(
+                {
+                    "error": {
+                        "code": "admin_internal_error",
+                        "message": "The Admin request could not be completed.",
+                    }
+                },
+                status=500,
+                head_only=head_only,
+            )
+            return
+        self.send_json(payload, head_only=head_only)
+
     def do_GET(self) -> None:
+        normalized = posixpath.normpath(self.path.split("?", 1)[0])
+        if normalized == "/admin":
+            if self._admin_service() is None:
+                self.send_json({"error": "Unknown endpoint"}, status=404)
+                return
+            origin = self.headers.get("Origin")
+            if origin and not is_allowed_origin(origin):
+                self.send_json(
+                    {"error": {"code": "origin_denied", "message": "Origin denied"}},
+                    status=403,
+                )
+                return
+            if not self._is_admin_authorized():
+                self.send_json(
+                    {"error": {"code": "admin_auth_required", "message": "Admin authentication is required"}},
+                    status=401,
+                    extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-admin"'},
+                )
+                return
+            body = admin_console_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("GET")
+            return
         self.handle_metadata_request(head_only=False)
 
     def do_HEAD(self) -> None:
+        normalized = posixpath.normpath(self.path.split("?", 1)[0])
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("GET", head_only=True)
+            return
         self.handle_metadata_request(head_only=True)
+
+    def do_PUT(self) -> None:
+        normalized = posixpath.normpath(self.path.split("?", 1)[0])
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("PUT")
+            return
+        self.send_json({"error": "Unknown endpoint"}, status=404)
 
     def do_DELETE(self) -> None:
         request_path = self.path.split("?", 1)[0]
-        if posixpath.normpath(request_path) != MCP_ENDPOINT_PATH:
+        normalized = posixpath.normpath(request_path)
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("DELETE")
+            return
+        if normalized != MCP_ENDPOINT_PATH:
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
         if not self.is_authorized():
@@ -4854,7 +5015,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         request_path = self.path.split("?", 1)[0]
-        if posixpath.normpath(request_path) not in {
+        normalized = posixpath.normpath(request_path)
+        if not normalized.startswith(ADMIN_API_PREFIX) and normalized not in {
+            "/admin",
             MCP_ENDPOINT_PATH,
             "/.well-known/mcp.json",
             "/.well-known/mcp/server-card.json",
@@ -4871,7 +5034,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "Origin denied"}, status=403)
             return
         self.send_response(204)
-        self.send_header("Allow", "GET, HEAD, POST, DELETE, OPTIONS")
+        self.send_header("Allow", "GET, HEAD, POST, PUT, DELETE, OPTIONS")
         self.send_cors_headers()
         self.end_headers()
 
@@ -4911,6 +5074,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         request_path = self.path.split("?", 1)[0]
         normalized = posixpath.normpath(request_path)
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("POST")
+            return
         if normalized == "/oauth/authorize":
             self.handle_oauth_authorize_post()
             return
@@ -5542,10 +5708,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if origin and is_allowed_origin(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, DELETE, OPTIONS")
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Accept, Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id",
+                "Accept, Authorization, X-Admin-Token, Content-Type, MCP-Protocol-Version, Mcp-Session-Id",
             )
 
     def send_json(
@@ -5580,10 +5746,15 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         handler: type[MCPHandler],
         control_runtime: Runtime,
         runtime_factory: Any,
+        *,
+        admin_service: AdminService | None = None,
+        admin_token: str | None = None,
     ) -> None:
         super().__init__(address, handler)
         self.control_runtime = control_runtime
         self.sessions = HTTPSessionManager(runtime_factory)
+        self.admin_service = admin_service
+        self.admin_token = admin_token or None
 
     def server_close(self) -> None:
         self.sessions.close()
@@ -5789,27 +5960,75 @@ def load_workspace_startup(
     return config_dir, settings, catalog
 
 
-def load_upstream_startup(
-    args: argparse.Namespace,
-    config_dir: Path,
-) -> UpstreamConfigSnapshot:
+def upstream_config_path(args: argparse.Namespace, config_dir: Path) -> Path:
     explicit = (
         getattr(args, "upstream_config", None)
         or os.environ.get(f"{ENV_PREFIX}_UPSTREAM_CONFIG")
         or None
     )
-    if explicit:
-        return load_upstream_config_snapshot(Path(str(explicit)))
-    default_path = config_dir / UPSTREAM_CONFIG_FILENAME
-    if not default_path.exists():
+    return Path(str(explicit)).expanduser() if explicit else config_dir / UPSTREAM_CONFIG_FILENAME
+
+
+def load_upstream_startup(
+    args: argparse.Namespace,
+    config_dir: Path,
+) -> UpstreamConfigSnapshot:
+    path = upstream_config_path(args, config_dir)
+    explicit = bool(
+        getattr(args, "upstream_config", None)
+        or os.environ.get(f"{ENV_PREFIX}_UPSTREAM_CONFIG")
+    )
+    if not path.exists() and not explicit:
         return UpstreamConfigSnapshot.empty()
-    return load_upstream_config_snapshot(default_path)
+    return load_upstream_config_snapshot(path)
 
 
-def build_upstream_manager(snapshot: UpstreamConfigSnapshot) -> UpstreamManager:
+def upstream_secret_resolver(
+    snapshot: UpstreamConfigSnapshot,
+    vault: SecretVault,
+) -> Callable[[str], str] | None:
+    refs: set[str] = set()
+    for config in snapshot.configs:
+        for value in config.env.values():
+            if isinstance(value, dict):
+                secret_ref = value.get("secret_ref")
+                if isinstance(secret_ref, str) and secret_ref:
+                    refs.add(secret_ref)
+    if not refs:
+        return vault.get_secret if vault.enabled() else None
+    if not vault.enabled():
+        raise SecretVaultError(
+            "Gateway secret_ref requires CODING_TOOLS_MCP_SECRETS_KEY and the server Secret Vault."
+        )
+    for ref in sorted(refs):
+        vault.get_secret(ref)
+    return vault.get_secret
+
+
+def load_upstream_startup_with_revision(
+    args: argparse.Namespace,
+    config_dir: Path,
+) -> tuple[UpstreamConfigSnapshot, str]:
+    path = upstream_config_path(args, config_dir)
+    before = gateway_file_revision(path)
+    snapshot = load_upstream_startup(args, config_dir)
+    after = gateway_file_revision(path)
+    if before != after:
+        raise UpstreamConfigError(
+            "Gateway configuration changed while the startup snapshot was being created."
+        )
+    return snapshot, before
+
+
+def build_upstream_manager(
+    snapshot: UpstreamConfigSnapshot,
+    *,
+    secret_resolver: Callable[[str], str] | None = None,
+) -> UpstreamManager:
     return UpstreamManager.from_snapshot(
         snapshot,
         protocol_version=PROTOCOL_VERSION,
+        secret_resolver=secret_resolver,
         reserved_names=TOOL_REGISTRY,
     )
 
@@ -5843,6 +6062,48 @@ def apply_oauth_workspace_bindings(
                     )
 
 
+def active_settings_payload(
+    startup_settings: dict[str, Any],
+    workspace_catalog: WorkspaceCatalog,
+    args: argparse.Namespace,
+    runtime_policy: RuntimePolicy,
+    allowed_origins: frozenset[str],
+) -> dict[str, Any]:
+    active = dict(startup_settings)
+    active.update(workspace_catalog.settings_payload())
+    active.update(
+        {
+            "workspace": str(workspace_catalog.default().root),
+            "host": str(args.host),
+            "port": int(args.port),
+            "permission_mode": runtime_policy.permission_mode,
+            "shell_env_inherit": runtime_policy.shell_env_policy.inherit,
+            "allowed_origins": sorted(allowed_origins),
+        }
+    )
+    return active
+
+
+def resolve_admin_token(
+    args: argparse.Namespace,
+    startup_settings: dict[str, Any],
+    vault: SecretVault,
+) -> str | None:
+    direct = (
+        getattr(args, "admin_token", None)
+        or os.environ.get(f"{ENV_PREFIX}_ADMIN_TOKEN")
+        or None
+    )
+    if direct:
+        return str(direct)
+    secret_ref = startup_settings.get("admin_token_secret_ref")
+    if not secret_ref:
+        return None
+    if not isinstance(secret_ref, str):
+        raise SecretVaultError("admin_token_secret_ref must be a string.")
+    return vault.get_secret(secret_ref)
+
+
 class BoundRuntimeFactory:
     def __init__(
         self,
@@ -5853,6 +6114,7 @@ class BoundRuntimeFactory:
         auth_token: str | None,
         oauth_config: OAuthConfig | None,
         upstream_snapshot: UpstreamConfigSnapshot | None = None,
+        upstream_secret_resolver: Callable[[str], str] | None = None,
     ) -> None:
         self.args = args
         self.runtime_policy = runtime_policy
@@ -5860,6 +6122,7 @@ class BoundRuntimeFactory:
         self.auth_token = auth_token
         self.oauth_config = oauth_config
         self.upstream_snapshot = upstream_snapshot or UpstreamConfigSnapshot.empty()
+        self.upstream_secret_resolver = upstream_secret_resolver
         self._project_contexts: dict[tuple[str, str], ProjectContext] = {}
         self._lock = threading.Lock()
 
@@ -5876,7 +6139,10 @@ class BoundRuntimeFactory:
     def __call__(self, context: AuthorizationContext) -> Runtime:
         binding = self.resolver.resolve_http(context.method, context.oauth_identity)
         try:
-            upstream_manager = build_upstream_manager(self.upstream_snapshot)
+            upstream_manager = build_upstream_manager(
+                self.upstream_snapshot,
+                secret_resolver=self.upstream_secret_resolver,
+            )
         except UpstreamConfigError as exc:
             raise RuntimeError("Upstream Gateway initialization failed.") from exc
         try:
@@ -5911,7 +6177,14 @@ def run_http(args: argparse.Namespace) -> int:
             startup_settings.get("oauth_client_workspace_bindings"),
             workspace_catalog,
         )
-        upstream_snapshot = load_upstream_startup(args, config_dir)
+        upstream_snapshot, active_gateway_revision = load_upstream_startup_with_revision(
+            args,
+            config_dir,
+        )
+        allowed_origin_source = startup_settings.get("allowed_origins")
+        if allowed_origin_source is None:
+            allowed_origin_source = os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS", "")
+        allowed_origins = configure_allowed_origins(allowed_origin_source)
     except (
         SettingsStoreError,
         UpstreamConfigError,
@@ -5919,6 +6192,15 @@ def run_http(args: argparse.Namespace) -> int:
         ValueError,
     ) as exc:
         print(f"ERROR: Startup configuration is unavailable: {exc}", file=sys.stderr)
+        return 2
+    server_vault = SecretVault(
+        config_dir / SERVER_SECRET_VAULT_FILENAME,
+        os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"),
+    )
+    try:
+        gateway_secret_resolver = upstream_secret_resolver(upstream_snapshot, server_vault)
+    except SecretVaultError as exc:
+        print(f"ERROR: Gateway credentials are unavailable: {exc}", file=sys.stderr)
         return 2
     workspace_resolver = WorkspaceBindingResolver(workspace_catalog)
 
@@ -6044,7 +6326,10 @@ def run_http(args: argparse.Namespace) -> int:
         "control",
     )
     try:
-        control_upstream = build_upstream_manager(upstream_snapshot)
+        control_upstream = build_upstream_manager(
+            upstream_snapshot,
+            secret_resolver=gateway_secret_resolver,
+        )
     except UpstreamConfigError as exc:
         print(f"ERROR: Upstream Gateway configuration is unavailable: {exc}", file=sys.stderr)
         return 2
@@ -6066,9 +6351,51 @@ def run_http(args: argparse.Namespace) -> int:
         auth_token=auth_token,
         oauth_config=oauth_config,
         upstream_snapshot=upstream_snapshot,
+        upstream_secret_resolver=gateway_secret_resolver,
     )
 
-    server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime, runtime_factory)
+    try:
+        admin_token = resolve_admin_token(args, startup_settings, server_vault)
+    except SecretVaultError as exc:
+        runtime.close()
+        print(f"ERROR: Admin authentication is unavailable: {exc}", file=sys.stderr)
+        return 2
+    admin_service: AdminService | None = None
+    if admin_token:
+        gateway_path = upstream_config_path(args, config_dir)
+        try:
+            admin_active_settings = active_settings_payload(
+                startup_settings,
+                workspace_catalog,
+                args,
+                runtime_policy,
+                allowed_origins,
+            )
+            if oauth_config is not None and oauth_config.server_url is not None:
+                admin_active_settings["oauth_server_url"] = oauth_config.server_url
+            admin_service = AdminService(
+                settings_store=ServerSettingsStore(config_dir / SERVER_SETTINGS_FILENAME),
+                active_settings=admin_active_settings,
+                fallback_workspace=workspace_catalog.default().root,
+                gateway_path=gateway_path,
+                active_gateway_revision=active_gateway_revision,
+                secret_vault=server_vault,
+                oauth_store=oauth_config.store if oauth_config is not None else None,
+                active_gateway_status=runtime.upstream_manager.status_payload,
+            )
+        except (AdminServiceError, OSError, SecretVaultError, SettingsStoreError) as exc:
+            runtime.close()
+            print(f"ERROR: Admin service is unavailable: {exc}", file=sys.stderr)
+            return 2
+
+    server = RuntimeHTTPServer(
+        (args.host, args.port),
+        MCPHandler,
+        runtime,
+        runtime_factory,
+        admin_service=admin_service,
+        admin_token=admin_token,
+    )
     if oauth_config:
         url_label = oauth_config.server_url or "dynamic request URL"
         suffix = " + bearer" if runtime.auth_token else ""
@@ -6094,7 +6421,15 @@ def run_stdio(args: argparse.Namespace) -> int:
         config_dir, _settings, workspace_catalog = load_workspace_startup(args)
         binding = WorkspaceBindingResolver(workspace_catalog).resolve_stdio()
         upstream_snapshot = load_upstream_startup(args, config_dir)
-        upstream_manager = build_upstream_manager(upstream_snapshot)
+        server_vault = SecretVault(
+            config_dir / SERVER_SECRET_VAULT_FILENAME,
+            os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"),
+        )
+        gateway_secret_resolver = upstream_secret_resolver(upstream_snapshot, server_vault)
+        upstream_manager = build_upstream_manager(
+            upstream_snapshot,
+            secret_resolver=gateway_secret_resolver,
+        )
     except (
         SettingsStoreError,
         UpstreamConfigError,
@@ -6143,6 +6478,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--auth-token",
         default=None,
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
+    )
+    parser.add_argument(
+        "--admin-token",
+        default=None,
+        help=(
+            "enable the authenticated Admin API with a dedicated token; defaults to "
+            f"{ENV_PREFIX}_ADMIN_TOKEN"
+        ),
     )
     parser.add_argument(
         "--oauth-mode",

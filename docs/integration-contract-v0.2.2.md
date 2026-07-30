@@ -114,6 +114,38 @@ must never describe this switch as safe or genuinely read-only.
   configuration, discovery, visibility, routing, and annotations contain no
   `tool_profile` control path.
 
+## Authenticated Admin API
+
+- The Admin API is enabled only when a dedicated Admin token is configured.
+  Ordinary MCP bearer credentials and OAuth access tokens do not imply Admin
+  authority. The same HTTP Authorization header may carry the dedicated token,
+  but it is compared only with the Admin credential; `X-Admin-Token` is also
+  accepted for explicit management clients.
+- HTTP handlers authenticate, parse JSON, and dispatch to the Admin service.
+  They contain no SQL and do not implement independent Settings, OAuth,
+  Workspace, Gateway, Secret Vault, or CORS validation rules.
+- Settings responses separate active startup values, persisted values, and the
+  exact restart-required field list. Settings and Gateway writes require the
+  revision read by the caller; stale revisions return a conflict instead of
+  overwriting newer configuration.
+- All responses are redacted. Client-secret digests, bearer or refresh token
+  material, signing-key secret references, Vault values, and upstream
+  credentials are not returned.
+- OAuth management addresses Clients, Grants, Access Token JTIs, Refresh
+  Families, and Signing Key KIDs by exact ID. Disable/revoke operations are
+  idempotent and return an affected count plus the audit event ID when a state
+  transition occurred.
+- Workspace add/disable/default/check operations reuse the validated Workspace
+  Catalog and never accept an arbitrary path for a check request.
+- Gateway writes validate and persist configuration only. They set
+  `restart_required` and do not start, stop, reload, or mutate any existing
+  Runtime or Session snapshot.
+- Gateway `secret_ref` values resolve only through the server Secret Vault.
+  Missing Vault configuration, an incorrect key, or an unknown reference fails
+  closed during startup and Admin validation.
+- Allowed origins use `normalize_allowed_origins` for startup, Admin validation,
+  persistence, and HTTP request checks.
+
 ## Telemetry and secret-store boundaries
 
 - Integration preserves the upstream v0.2.2 telemetry default: anonymous
@@ -211,6 +243,21 @@ The following block is consumed by the Phase 02 contract tests.
     "remote_workspace_boundary_claim": false,
     "session_identity_mutation": false,
     "tool_profile_controls": false
+  },
+  "admin_api": {
+    "phase": 8,
+    "authentication": "dedicated_admin_token",
+    "ordinary_mcp_bearer_is_admin": false,
+    "handler_sql": false,
+    "responses_redacted": true,
+    "settings_views": ["active", "persisted", "pending_restart"],
+    "stale_update": "revision_conflict",
+    "gateway_change": "persist_and_restart_only",
+    "gateway_dynamic_reload": false,
+    "gateway_secret_ref": "server_secret_vault_fail_closed",
+    "oauth_actions": "exact_id_idempotent_affected_count_audit_event",
+    "workspace_validation": "workspace_catalog",
+    "allowed_origins_source": "coding_tools_mcp.settings_definition.normalize_allowed_origins"
   },
   "telemetry": {
     "default_policy": "upstream_v0.2.2",

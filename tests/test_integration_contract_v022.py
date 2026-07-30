@@ -5,6 +5,8 @@ import json
 import re
 import sqlite3
 import unittest
+
+from coding_tools_mcp.admin import AdminService
 from pathlib import Path
 from contextlib import closing
 from tempfile import TemporaryDirectory
@@ -160,6 +162,28 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertEqual(workspace["invalid_mapping"], "fail_closed")
         self.assertEqual(telemetry, {"default_policy": "upstream_v0.2.2", "change_during_integration": False})
         self.assertIs(secret_stores["shared"], False)
+
+    def test_phase08_admin_contract_is_machine_readable(self) -> None:
+        admin = self.contract["admin_api"]
+        self.assertEqual(admin["phase"], 8)
+        self.assertEqual(admin["authentication"], "dedicated_admin_token")
+        self.assertIs(admin["ordinary_mcp_bearer_is_admin"], False)
+        self.assertIs(admin["handler_sql"], False)
+        self.assertIs(admin["responses_redacted"], True)
+        self.assertEqual(
+            admin["settings_views"],
+            ["active", "persisted", "pending_restart"],
+        )
+        self.assertEqual(admin["stale_update"], "revision_conflict")
+        self.assertEqual(admin["gateway_change"], "persist_and_restart_only")
+        self.assertIs(admin["gateway_dynamic_reload"], False)
+        self.assertEqual(
+            admin["allowed_origins_source"],
+            "coding_tools_mcp.settings_definition.normalize_allowed_origins",
+        )
+        source = inspect.getsource(AdminService)
+        self.assertNotRegex(source, r"\b(?:SELECT|INSERT|UPDATE|DELETE FROM|PRAGMA)\b")
+        self.assertNotIn("reload_upstream", source)
 
     def test_phase03_settings_migration_drops_tool_profile(self) -> None:
         migration = self.contract["legacy_tool_profile_migration"]
