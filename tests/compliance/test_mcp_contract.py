@@ -59,7 +59,41 @@ class MCPContractTests(ComplianceTestCase):
         self.assertEqual(len(first), len({tool["name"] for tool in first}), "tool names must be unique")
         self.assertTrue({tool["name"] for tool in first} >= set(REQUIRED_TOOLS))
 
-    def test_http_sessions_isolate_cwd_and_process_sessions(self) -> None:
+    def test_command_handles_have_no_legacy_session_aliases(self) -> None:
+        tools = {str(tool.get("name")): tool for tool in self.client.list_tools()}
+        self.assertIn("kill_command", tools)
+        self.assertNotIn("kill_session", tools)
+        for name in ("write_stdin", "kill_command"):
+            schema = tools[name]["inputSchema"]
+            properties = schema.get("properties", {})
+            self.assertIn("command_id", properties)
+            self.assertNotIn("session_id", properties)
+            self.assertIn("command_id", schema.get("required", []))
+
+        try:
+            legacy = self.client.call_tool("write_stdin", {"session_id": "legacy", "chars": ""})
+        except MCPError:
+            pass
+        else:
+            self.assertTrue(legacy.get("isError"), legacy)
+
+    def test_high_confusion_tools_include_model_ready_examples(self) -> None:
+        tools = {str(tool.get("name")): tool for tool in self.client.list_tools()}
+        expected_fragments = {
+            "set_default_cwd": ("session", "workdir", '"path":"src"'),
+            "apply_patch": ("*** Begin Patch", "*** Update File"),
+            "exec_command": ("workdir", "command_id", '"yield_time_ms":30000'),
+            "write_stdin": ("command_id", '"chars":""'),
+            "kill_command": ("command_id", '"signal":"KILL"'),
+            "read_output": ("command:abc:stdout", '"offset":0'),
+        }
+        for name, fragments in expected_fragments.items():
+            description = str(tools[name].get("description", ""))
+            for fragment in fragments:
+                with self.subTest(tool=name, fragment=fragment):
+                    self.assertIn(fragment, description)
+
+    def test_http_sessions_isolate_cwd_but_share_workspace_commands(self) -> None:
         self.client.call_tool("set_default_cwd", {"path": "src"})
         with MCPClient(self.workspace.root, url=self.client.url) as sibling:
             sibling_cwd = self.assert_tool_success(sibling.call_tool("get_default_cwd", {}))
@@ -70,13 +104,37 @@ class MCPContractTests(ComplianceTestCase):
                 "exec_command",
                 {"cmd": "sleep 1", "timeout_ms": 5000, "yield_time_ms": 0},
             )
-            session_id = self.assert_tool_success(started).get("session_id")
-            denied = sibling.call_tool("write_stdin", {"session_id": session_id, "chars": "", "yield_time_ms": 0})
-            self.assertTrue(denied.get("isError"), denied)
-            self.client.call_tool("kill_session", {"session_id": session_id, "signal": "KILL"})
+            payload = self.assert_tool_success(started)
+            command_id = payload.get("command_id")
+            self.assertIsInstance(command_id, str)
+            polled = self.assert_tool_success(
+                sibling.call_tool("write_stdin", {"command_id": command_id, "chars": "", "yield_time_ms": 0})
+            )
+            self.assertEqual(polled.get("command_id"), command_id)
+            sibling.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
 
         original_cwd = self.assert_tool_success(self.client.call_tool("get_default_cwd", {}))
         self.assertEqual(original_cwd.get("default_cwd"), "src")
+
+    def test_http_session_delete_does_not_terminate_workspace_command(self) -> None:
+        with MCPClient(self.workspace.root, url=self.client.url) as owner:
+            started = self.assert_tool_success(
+                owner.call_tool(
+                    "exec_command",
+                    {"cmd": "sleep 5", "timeout_ms": 10000, "yield_time_ms": 0},
+                )
+            )
+            command_id = started.get("command_id")
+            self.assertIsInstance(command_id, str)
+
+        polled = self.assert_tool_success(
+            self.client.call_tool("write_stdin", {"command_id": command_id, "chars": "", "yield_time_ms": 0})
+        )
+        self.assertEqual(polled.get("status"), "running")
+        killed = self.assert_tool_success(
+            self.client.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
+        )
+        self.assertIn(killed.get("status"), {"killed", "exited"})
 
     def test_tools_list_excludes_forbidden_product_layer_tools(self) -> None:
         names = {str(tool.get("name", "")) for tool in self.client.list_tools()}
@@ -115,7 +173,7 @@ class MCPContractTests(ComplianceTestCase):
             "apply_patch": (False, True, False, False),
             "exec_command": (False, True, False, True),
             "write_stdin": (False, False, False, False),
-            "kill_session": (False, True, False, False),
+            "kill_command": (False, True, False, False),
             "read_output": (True, False, True, False),
             "git_status": (True, False, True, False),
             "git_diff": (True, False, True, False),

@@ -34,7 +34,7 @@ REQUIRED_TOOLS = (
     "apply_patch",
     "exec_command",
     "write_stdin",
-    "kill_session",
+    "kill_command",
     "read_output",
     "git_status",
     "git_diff",

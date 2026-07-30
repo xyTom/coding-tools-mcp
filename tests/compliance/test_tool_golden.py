@@ -305,20 +305,20 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             {"cmd": "python -c \"import urllib.request; urllib.request.urlopen('https://example.com')\""},
         )
 
-    def test_write_stdin_kill_session_git_status_and_git_diff(self) -> None:
+    def test_write_stdin_kill_command_git_status_and_git_diff(self) -> None:
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
                 {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
             )
             payload = self.assert_tool_success(started)
-            session_id = payload.get("session_id")
-            self.assertIsInstance(session_id, str, f"long-running command must return session_id: {payload!r}")
+            command_id = payload.get("command_id")
+            self.assertIsInstance(command_id, str, f"long-running command must return command_id: {payload!r}")
             self.assertIn("ready", self.tool_text(started))
-            hello = client.call_tool("write_stdin", {"session_id": session_id, "chars": "hello\n"})
+            hello = client.call_tool("write_stdin", {"command_id": command_id, "chars": "hello\n"})
             self.assertIn("echo:hello", self.tool_text(hello))
-            client.call_tool("write_stdin", {"session_id": session_id, "chars": "exit\n"})
-            killed = client.call_tool("kill_session", {"session_id": session_id})
+            client.call_tool("write_stdin", {"command_id": command_id, "chars": "exit\n"})
+            killed = client.call_tool("kill_command", {"command_id": command_id})
             self.assertIn("content", killed)
 
         self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH}))

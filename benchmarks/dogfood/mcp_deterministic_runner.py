@@ -207,11 +207,11 @@ class ToolAdapter:
             args["argv"] = shlex.split(command)
         return args
 
-    def write_stdin_args(self, session_id: str, chars: str) -> dict[str, Any]:
-        return self._args("write_stdin", {"session_id": session_id, "sessionId": session_id, "chars": chars, "input": chars})
+    def write_stdin_args(self, command_id: str, chars: str) -> dict[str, Any]:
+        return self._args("write_stdin", {"command_id": command_id, "chars": chars})
 
-    def kill_session_args(self, session_id: str) -> dict[str, Any]:
-        return self._args("kill_session", {"session_id": session_id, "sessionId": session_id})
+    def kill_command_args(self, command_id: str) -> dict[str, Any]:
+        return self._args("kill_command", {"command_id": command_id})
 
     def git_diff_args(self, path: str | None = None) -> dict[str, Any]:
         if path is None:
@@ -320,17 +320,17 @@ class DogfoodRunner:
                 tty=True,
             ),
         )
-        session_id = find_session_id(started)
-        case.add_check("exec_command returns session_id", bool(session_id), summarize(started))
-        if not session_id:
+        command_id = find_command_id(started)
+        case.add_check("exec_command returns command_id", bool(command_id), summarize(started))
+        if not command_id:
             return case.finalize()
-        hello = self.call("write_stdin", self.adapter.write_stdin_args(session_id, "hello\n"))
+        hello = self.call("write_stdin", self.adapter.write_stdin_args(command_id, "hello\n"))
         case.add_check("write_stdin accepts hello", not is_error_result(hello), summarize(hello))
-        exit_reply = self.call("write_stdin", self.adapter.write_stdin_args(session_id, "exit\n"))
+        exit_reply = self.call("write_stdin", self.adapter.write_stdin_args(command_id, "exit\n"))
         case.add_check("write_stdin accepts exit", not is_error_result(exit_reply), summarize(exit_reply))
-        killed = self.call("kill_session", self.adapter.kill_session_args(session_id), expected_rejection=True)
+        killed = self.call("kill_command", self.adapter.kill_command_args(command_id), expected_rejection=True)
         case.add_check(
-            "kill_session terminates or reports already closed",
+            "kill_command terminates or reports already closed",
             not is_error_result(killed) or rejected_as_expected(killed),
             summarize(killed),
         )
@@ -497,16 +497,16 @@ def command_passed(result: dict[str, Any]) -> bool:
     return "js ok" in text or "OK" in text
 
 
-def find_session_id(result: dict[str, Any]) -> str | None:
+def find_command_id(result: dict[str, Any]) -> str | None:
     parsed = parse_text_json(result)
     for source in (result, parsed):
-        for key in ("session_id", "sessionId", "session"):
+        for key in ("command_id",):
             value = source.get(key)
             if isinstance(value, str) and value:
                 return value
     text = result_text(result)
-    match = re.search(r'"?(session_id|sessionId)"?\s*[:=]\s*"([^"]+)"', text)
-    return match.group(2) if match else None
+    match = re.search(r'"?command_id"?\s*[:=]\s*"([^"]+)"', text)
+    return match.group(1) if match else None
 
 
 def summarize(result: dict[str, Any], limit: int = 180) -> str:
@@ -569,7 +569,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- First patch success rate: `{metrics.get('first_patch_success_rate', 0)}` "
             f"across `{metrics.get('first_patch_attempts', 0)}` attempts",
             f"- All case assertions passed: `{metrics.get('all_cases_passed', False)}`",
-            f"- Session poll calls: `{metrics.get('session_poll_count', 0)}`",
+            f"- Command poll calls: `{metrics.get('command_poll_count', 0)}`",
             f"- Tool latency p50/p95: `{metrics.get('tool_latency_p50_ms', 0)} / {metrics.get('tool_latency_p95_ms', 0)} ms`",
         ]
     )
@@ -635,7 +635,7 @@ def efficiency_metrics(
             else 0.0
         ),
         "all_cases_passed": bool(cases and completed == len(cases)),
-        "session_poll_count": sum(
+        "command_poll_count": sum(
             call.tool == "write_stdin" and not str(call.arguments.get("chars", ""))
             for call in calls
         ),
@@ -693,7 +693,7 @@ def main(argv: list[str] | None = None) -> int:
             "apply_patch",
             "exec_command",
             "write_stdin",
-            "kill_session",
+            "kill_command",
             "git_diff",
         ]
         missing = adapter.missing(required)

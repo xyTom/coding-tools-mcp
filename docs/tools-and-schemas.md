@@ -11,8 +11,9 @@ The default catalog contains exactly 20 tools:
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
 - `check_exec_environment`: lightweight execution policy and Landlock status.
-- `get_default_cwd`: inspect this MCP runtime's relative-path base.
-- `set_default_cwd`: change this MCP runtime's relative-path base.
+- `get_default_cwd`: inspect this MCP transport session's relative-path base.
+- `set_default_cwd`: change this MCP transport session's relative-path base;
+  prefer explicit `path`/`workdir` when reconnects are possible.
 - `read_file`: stream a bounded UTF-8 range without loading the whole file.
 - `list_dir`: list immediate or bounded-recursive directory entries.
 - `list_files`: iterate files with glob, ignore, hidden-file, sort, and cap
@@ -20,8 +21,8 @@ The default catalog contains exactly 20 tools:
 - `search_text`: literal or regex search; ripgrep stops after the result cap.
 - `apply_patch`: stage and atomically commit add/update/delete/move envelopes.
 - `exec_command`: run a bounded command and wait up to 10 seconds by default.
-- `write_stdin`: poll or interact with a running command session.
-- `kill_session`: terminate one runtime-owned command session.
+- `write_stdin`: poll or interact with a running command.
+- `kill_command`: terminate one runtime-owned command.
 - `read_output`: page retained stdout or stderr using absolute byte offsets.
 - `git_status`: structured working-tree status.
 - `git_diff`: bounded unified staged/unstaged diff.
@@ -80,17 +81,52 @@ Files are prepared in their destination directories, fsynced, baseline-checked,
 and installed with atomic replacement. Multi-file failure restores prior files.
 Mode bits, BOM, and newline style are preserved; moves inherit source mode.
 
+## Model-ready examples
+
+Use explicit paths for multi-call workflows:
+
+```json
+{"cmd":"pytest -q","workdir":".","yield_time_ms":30000}
+```
+
+If the result is still running, copy its `command_id` exactly:
+
+```json
+{"command_id":"abc","chars":"","yield_time_ms":10000}
+```
+
+Terminate that command when needed:
+
+```json
+{"command_id":"abc","signal":"KILL"}
+```
+
+Page a truncated stream using the returned reference:
+
+```json
+{"output_ref":"command:abc:stdout","offset":0,"limit":4096}
+```
+
+`set_default_cwd` is only a session-local convenience:
+
+```json
+{"path":"src"}
+```
+
+It may reset after the client reconnects. `exec_command.workdir` and each
+file/Git tool's `path` argument are the reliable source of truth.
+
 ## Command and output behavior
 
 `exec_command` and `write_stdin` default `yield_time_ms` to `10000`. Short
 commands ordinarily return `status: "exited"` in one call. A still-running
-command returns a `session_id` and machine-readable `next_action` for
+command returns a `command_id` and a machine-readable `next_action` for
 `write_stdin` with empty `chars`.
 
 Only truncated terminal output returns a `read_output` next action by default.
-`output_ref` values are `session:<id>:stdout` or `session:<id>:stderr`; offsets
+`output_ref` values are `command:<id>:stdout` or `command:<id>:stderr`; offsets
 are stream-specific absolute byte positions. Runtime limits bound active
-commands, retained completed sessions, per-session output, total output, and
+commands, retained completed commands, per-command output, total output, and
 retention time.
 
 Use `tty: true` only when a program requires a terminal. POSIX receives a real

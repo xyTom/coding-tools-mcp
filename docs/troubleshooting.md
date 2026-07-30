@@ -14,7 +14,7 @@ If an older client or server reports `SANDBOX_UNAVAILABLE` as an error, upgrade 
 
 ## Command Hangs Or Times Out
 
-If the result returns `status: "running"`, poll with `write_stdin` using empty `chars`, or terminate with `kill_session`. Session deadlines still apply when the client stops polling.
+If the result returns `status: "running"`, poll with `write_stdin` using empty `chars`, or terminate with `kill_command`. Command deadlines still apply when the client stops polling.
 
 ## Permission Elicitation Is Unsupported
 

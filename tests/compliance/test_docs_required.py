@@ -59,7 +59,7 @@ class RequiredDocsTests(unittest.TestCase):
     def test_docs_contain_required_operational_topics(self) -> None:
         expectations = {
             "README.md": ["Quickstart", "Safety Boundary", "Dogfood", "SWE-bench"],
-            "SECURITY.md": ["Linux Landlock", "Environment Scrubbing", "Session Lifecycle"],
+            "SECURITY.md": ["Linux Landlock", "Environment Scrubbing", "Command Lifecycle"],
             "COMPLIANCE.md": ["make compliance", "required_tools", "not_measured"],
             "BENCHMARK.md": ["make dogfood-smoke", "make benchmark-latency", "PREFLIGHT_ONLY", "swebench-official-attempt"],
             "docs/ci-and-tests.md": ["make ci", "workflow", "swebench-lite"],

@@ -44,7 +44,7 @@ class WindowsProcessSmokeTests(unittest.TestCase):
                 payload = structured_payload(result)
                 self.assertEqual(payload.get("error", {}).get("code"), "TTY_UNSUPPORTED")
 
-    def test_windows_force_kill_cleans_background_session(self) -> None:
+    def test_windows_force_kill_cleans_background_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             command = subprocess.list2cmdline(
@@ -66,14 +66,14 @@ class WindowsProcessSmokeTests(unittest.TestCase):
                     ),
                 )
                 self.assertEqual(started.get("status"), "running", started)
-                session_id = started.get("session_id")
-                self.assertIsInstance(session_id, str, started)
+                command_id = started.get("command_id")
+                self.assertIsInstance(command_id, str, started)
 
                 killed = assert_tool_success(
                     self,
                     client.call_tool(
-                        "kill_session",
-                        {"session_id": session_id, "signal": "KILL", "wait_ms": 5000},
+                        "kill_command",
+                        {"command_id": command_id, "signal": "KILL", "wait_ms": 5000},
                     ),
                 )
                 self.assertIn(killed.get("status"), {"killed", "exited"}, killed)

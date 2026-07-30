@@ -59,11 +59,11 @@ from .patching import (
 )
 from .processes import (
     HARD_KILL_SIGNAL,
-    SESSION_BUFFER_BYTES,
-    ExecSession,
+    COMMAND_BUFFER_BYTES,
+    CommandRun,
     spawn_process,
     start_reader_threads,
-    start_session_watchdog,
+    start_command_watchdog,
     terminate_process_group,
 )
 from .protocol import (
@@ -167,8 +167,8 @@ PERMISSION_MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
     ),
 }
 PERMISSION_MODE_CHOICES = tuple(PERMISSION_MODE_CAPABILITIES)
-# Documented kill_session status enum; guarded by test_schema_drift.
-KILL_SESSION_STATUSES = ("terminated", "killed", "exited", "terminating", "not_found")
+# Documented kill_command status enum; guarded by test_schema_drift.
+KILL_COMMAND_STATUSES = ("terminated", "killed", "exited", "terminating", "not_found")
 POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM"}
 # Not POSIX core, but inherited under inherit="core" so git helper subprocesses and
 # exec_command share the host's global git config (e.g. safe.directory entries).
@@ -185,9 +185,9 @@ DESTRUCTIVE_RE = re.compile(
 )
 MAX_HTTP_REQUEST_BYTES = 1_048_576
 EXEC_PREVIEW_BYTES = 4096
-MAX_ACTIVE_EXEC_SESSIONS = 16
-MAX_RETAINED_OUTPUT_SESSIONS = 32
-COMPLETED_SESSION_TTL_SECONDS = 300
+MAX_ACTIVE_COMMANDS = 16
+MAX_RETAINED_OUTPUT_COMMANDS = 32
+COMPLETED_COMMAND_TTL_SECONDS = 300
 MAX_RUNTIME_OUTPUT_BYTES = 16 * 1024 * 1024
 SHELL_CONTROL_TOKENS = {"|", "||", "&", "&&", ";", "(", ")"}
 REDIRECTION_TOKENS = {">", ">>", "<", "<>", ">&", "<&", "&>", "&>>"}
@@ -566,13 +566,19 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "get_default_cwd": ToolSpec(
         title="Get default cwd",
-        description="Return the current default cwd inside the workspace.",
+        description=(
+            "Return the current MCP transport session's default cwd. This value is session-local and may "
+            "reset after a reconnect."
+        ),
         read_only=True,
         idempotent=True,
     ),
     "set_default_cwd": ToolSpec(
         title="Set default cwd",
-        description="Set the default cwd for relative tool paths inside the workspace.",
+        description=(
+            "Set the default cwd only for the current MCP transport session. Prefer explicit path/workdir "
+            "arguments when calls must survive reconnects. Example: {\"path\":\"src\"}."
+        ),
         idempotent=True,
     ),
     "read_file": ToolSpec(
@@ -601,12 +607,19 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
-        description="Stage, validate, and atomically replace files from a patch envelope inside the workspace.",
+        description=(
+            "Stage, validate, and atomically apply a patch envelope. Example: "
+            "*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+new\n*** End Patch"
+        ),
         destructive=True,
     ),
     "exec_command": ToolSpec(
         title="Execute command",
-        description="Run a bounded command in the workspace under runtime policy.",
+        description=(
+            "Run a bounded command under runtime policy. Pass workdir explicitly for reconnect-safe paths. "
+            "A still-running command returns command_id. Example: "
+            "{\"cmd\":\"pytest -q\",\"workdir\":\".\",\"yield_time_ms\":30000}."
+        ),
         destructive=True,
         open_world=True,
         error_status="failed",
@@ -614,18 +627,24 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "write_stdin": ToolSpec(
         title="Write stdin",
         description=(
-            "Poll or interact with a running command session. Pass empty chars to wait for more output; "
-            "pass non-empty chars to write to stdin."
+            "Poll or interact with a running command by command_id. Empty chars wait for output; non-empty "
+            "chars writes to stdin. Example: {\"command_id\":\"abc\",\"chars\":\"\",\"yield_time_ms\":10000}."
         ),
     ),
-    "kill_session": ToolSpec(
-        title="Kill session",
-        description="Terminate a server-managed running command session.",
+    "kill_command": ToolSpec(
+        title="Kill command",
+        description=(
+            "Terminate a server-managed command by command_id. Example: "
+            "{\"command_id\":\"abc\",\"signal\":\"KILL\"}."
+        ),
         destructive=True,
     ),
     "read_output": ToolSpec(
         title="Read output",
-        description="Read retained stdout or stderr by output_ref with per-stream byte offset pagination.",
+        description=(
+            "Read retained command output using an output_ref returned by exec_command/write_stdin. "
+            "Example: {\"output_ref\":\"command:abc:stdout\",\"offset\":0,\"limit\":4096}."
+        ),
         read_only=True,
         idempotent=True,
     ),
@@ -1201,6 +1220,40 @@ class Workspace:
         return {path for path in completed.stdout.split("\0") if path}
 
 
+class WorkspaceCommandManager:
+    """Own commands for one workspace independently of MCP transport sessions."""
+
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace.expanduser().resolve(strict=True)
+        self.server_instance_id = secrets.token_urlsafe(12)
+        self.runtime_dir = runtime_dir_for_workspace(self.workspace, self.server_instance_id)
+        self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(
+            self.workspace, self.server_instance_id
+        )
+        self.commands: dict[str, CommandRun] = {}
+        self.output_commands: dict[str, CommandRun] = {}
+        self.lock = threading.Lock()
+        self.starting_commands = 0
+        self.closed = False
+
+    def close(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            commands = list(self.commands.values())
+            self.commands.clear()
+            self.output_commands.clear()
+        for command in commands:
+            command.refresh_status()
+            if command.process.poll() is None:
+                terminate_process_group(command.process, signal.SIGTERM)
+            command.drain_readers()
+        shutil.rmtree(self.runtime_dir, ignore_errors=True)
+        if self.fallback_runtime_dir is not None:
+            shutil.rmtree(self.fallback_runtime_dir, ignore_errors=True)
+
+
 class Runtime:
     def __init__(
         self,
@@ -1215,6 +1268,7 @@ class Runtime:
         project_context: ProjectContext | None = None,
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
+        command_manager: WorkspaceCommandManager | None = None,
     ) -> None:
         self.workspace = Workspace(workspace)
         self.enable_view_image = enable_view_image
@@ -1256,14 +1310,18 @@ class Runtime:
         self.allow_network = allow_network or self.capabilities.network
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
-        self.server_instance_id = secrets.token_urlsafe(12)
-        self._set_runtime_dir(runtime_dir_for_workspace(self.workspace.root, self.server_instance_id))
-        self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(self.workspace.root, self.server_instance_id)
+        self.command_manager = command_manager or WorkspaceCommandManager(self.workspace.root)
+        if self.command_manager.workspace != self.workspace.root:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "command_manager belongs to a different workspace.",
+                category="validation",
+            )
+        self._owns_command_manager = command_manager is None
+        self.server_instance_id = self.command_manager.server_instance_id
+        self._set_runtime_dir(self.command_manager.runtime_dir)
+        self.fallback_runtime_dir = self.command_manager.fallback_runtime_dir
         self.default_cwd = self.workspace.root
-        self.sessions: dict[str, ExecSession] = {}
-        self.output_sessions: dict[str, ExecSession] = {}
-        self.sessions_lock = threading.Lock()
-        self.starting_sessions = 0
         self._closed = False
         self.http_session_id = secrets.token_urlsafe(24)
         self.protocol_version = PROTOCOL_VERSION
@@ -1276,8 +1334,8 @@ class Runtime:
         self.project_context: ProjectContext = (
             project_context if project_context is not None else load_project_context(self.workspace.root)
         )
-        self.request_sessions: dict[str | int, str] = {}
-        self.request_sessions_lock = threading.Lock()
+        self.request_commands: dict[str | int, str] = {}
+        self.request_commands_lock = threading.Lock()
         self.request_context = threading.local()
         self.initialized = False
         self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
@@ -1290,20 +1348,32 @@ class Runtime:
         self.cache_dir = self.runtime_dir / "cache"
 
     def close(self) -> None:
-        with self.sessions_lock:
-            if self._closed:
-                return
-            self._closed = True
-            sessions = list(self.sessions.values())
-            self.sessions.clear()
-            self.output_sessions.clear()
-        for session in sessions:
-            session.refresh_status()
-            if session.process.poll() is None:
-                terminate_process_group(session.process, signal.SIGTERM)
-            session.drain_readers()
-        shutil.rmtree(self.runtime_dir, ignore_errors=True)
+        if self._closed:
+            return
+        self._closed = True
+        if self._owns_command_manager:
+            self.command_manager.close()
         self.telemetry.finish()
+
+    @property
+    def commands(self) -> dict[str, CommandRun]:
+        return self.command_manager.commands
+
+    @property
+    def output_commands(self) -> dict[str, CommandRun]:
+        return self.command_manager.output_commands
+
+    @property
+    def commands_lock(self) -> threading.Lock:
+        return self.command_manager.lock
+
+    @property
+    def starting_commands(self) -> int:
+        return self.command_manager.starting_commands
+
+    @starting_commands.setter
+    def starting_commands(self, value: int) -> None:
+        self.command_manager.starting_commands = value
 
     def _ensure_runtime_dirs(self) -> None:
         candidates = [self.runtime_dir]
@@ -1481,8 +1551,8 @@ class Runtime:
                 payload = handler(args)
             finally:
                 if request_id is not None:
-                    with self.request_sessions_lock:
-                        self.request_sessions.pop(request_id, None)
+                    with self.request_commands_lock:
+                        self.request_commands.pop(request_id, None)
                 self.request_context.request_id = None
             payload.setdefault("ok", True)
             self.emit_tool_trace(name, args, payload, started_at)
@@ -1592,7 +1662,7 @@ class Runtime:
             "status": payload.get("status"),
             "error_code": error.get("code"),
             "duration_ms": duration_ms,
-            "session_id": payload.get("session_id"),
+            "command_id": payload.get("command_id"),
             "truncated": payload.get("truncated"),
             "args": redact_for_trace(args),
         }
@@ -2221,7 +2291,7 @@ class Runtime:
             )
 
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._prune_sessions()
+        self._prune_commands()
         cmd = str(args.get("cmd", ""))
         if not cmd:
             raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
@@ -2259,24 +2329,24 @@ class Runtime:
                 if exc.code != "SANDBOX_UNAVAILABLE":
                     raise
                 landlock_warning = landlock_unavailable_warning(exc)
-        with self.sessions_lock:
-            if self._closed:
+        with self.commands_lock:
+            if self._closed or self.command_manager.closed:
                 if landlock_fd is not None:
                     os.close(landlock_fd)
-                raise ToolFailure("SESSION_CLOSED", "Runtime is closed.", category="runtime")
-            if len(self.sessions) + self.starting_sessions >= MAX_ACTIVE_EXEC_SESSIONS:
+                raise ToolFailure("COMMAND_CLOSED", "Workspace command manager is closed.", category="runtime")
+            if len(self.commands) + self.starting_commands >= MAX_ACTIVE_COMMANDS:
                 if landlock_fd is not None:
                     os.close(landlock_fd)
                 raise ToolFailure(
-                    "SESSION_LIMIT_REACHED",
+                    "COMMAND_LIMIT_REACHED",
                     "Too many commands are already running or starting.",
                     category="runtime",
                     retryable=True,
-                    details={"max_active_sessions": MAX_ACTIVE_EXEC_SESSIONS},
+                    details={"max_active_commands": MAX_ACTIVE_COMMANDS},
                 )
-            self.starting_sessions += 1
+            self.starting_commands += 1
         process: subprocess.Popen[bytes] | None = None
-        session: ExecSession | None = None
+        command: CommandRun | None = None
         registered = False
         slot_released = False
         try:
@@ -2288,24 +2358,24 @@ class Runtime:
                 tty=tty,
                 popen_kwargs=popen_extra,
             )
-            session = self._make_session(
+            command = self._make_command(
                 process,
                 timeout_at=deadline,
                 warnings=[landlock_warning] if landlock_warning else None,
                 pty_master_fd=pty_master_fd,
             )
-            with self.sessions_lock:
-                self.starting_sessions -= 1
+            with self.commands_lock:
+                self.starting_commands -= 1
                 slot_released = True
-                if not self._closed:
-                    self.sessions[session.session_id] = session
+                if not self._closed and not self.command_manager.closed:
+                    self.commands[command.command_id] = command
                     registered = True
             if not registered:
-                raise ToolFailure("SESSION_CLOSED", "Runtime closed while the command was starting.", category="runtime")
+                raise ToolFailure("COMMAND_CLOSED", "Runtime closed while the command was starting.", category="runtime")
         except Exception:
-            with self.sessions_lock:
+            with self.commands_lock:
                 if not registered and not slot_released:
-                    self.starting_sessions -= 1
+                    self.starting_commands -= 1
             if process is not None and process.poll() is None:
                 terminate_process_group(process, signal.SIGTERM)
             raise
@@ -2315,48 +2385,48 @@ class Runtime:
                     os.close(landlock_fd)
                 except OSError:
                     pass
-        assert session is not None
+        assert command is not None
         request_id = getattr(self.request_context, "request_id", None)
         if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
-            with self.request_sessions_lock:
-                self.request_sessions[request_id] = session.session_id
-        start_reader_threads(session)
-        start_session_watchdog(session)
+            with self.request_commands_lock:
+                self.request_commands[request_id] = command.command_id
+        start_reader_threads(command)
+        start_command_watchdog(command)
         try:
             if stdin_text:
-                session.write_input(stdin_text.encode("utf-8"))
+                command.write_input(stdin_text.encode("utf-8"))
         except ToolFailure:
             if process.poll() is None:
                 raise
         finally:
             if not tty:
-                session.close_stdin()
+                command.close_stdin()
         initial_wait = max(0, min(yield_ms, 30000)) / 1000.0
 
         def finish() -> dict[str, Any]:
             # snapshot_since_cursor owns the status mapping (running/exited/
             # terminated/timeout) so exec, polling, and kill paths agree.
-            payload = session.snapshot_since_cursor(max_output_bytes)
+            payload = command.snapshot_since_cursor(max_output_bytes)
             payload["elapsed_ms"] = int((time.time() - start) * 1000)
             self._add_exec_diagnostics(payload)
-            return self._format_session_output(session, payload, args)
+            return self._format_command_output(command, payload, args)
 
         while True:
             if process.poll() is not None:
-                session.refresh_status()
-                session.drain_readers()
+                command.refresh_status()
+                command.drain_readers()
                 return finish()
             now = time.time()
             if not tty and now >= deadline:
-                session.timed_out = True
+                command.timed_out = True
                 terminate_process_group(process, signal.SIGTERM)
-                session.refresh_status()
-                session.drain_readers()
+                command.refresh_status()
+                command.drain_readers()
                 return finish()
-            with session.lock:
+            with command.lock:
                 tty_has_initial_output = bool(
-                    len(session.stdout) > session.stdout_cursor
-                    or len(session.stderr) > session.stderr_cursor
+                    len(command.stdout) > command.stdout_cursor
+                    or len(command.stderr) > command.stderr_cursor
                 )
             if now - start >= initial_wait or (tty and tty_has_initial_output):
                 return finish()
@@ -2596,93 +2666,93 @@ class Runtime:
             if is_core_command_env_name(str(key))
         }
 
-    def _make_session(
+    def _make_command(
         self,
         process: subprocess.Popen[bytes],
         *,
         timeout_at: float | None = None,
         warnings: list[str] | None = None,
         pty_master_fd: int | None = None,
-    ) -> ExecSession:
-        return ExecSession(
-            session_id=secrets.token_urlsafe(18),
+    ) -> CommandRun:
+        return CommandRun(
+            command_id=secrets.token_urlsafe(18),
             process=process,
             timeout_at=timeout_at,
             warnings=warnings or [],
             pty_master_fd=pty_master_fd,
         )
 
-    def _remember_output_session(self, session: ExecSession) -> None:
-        session.refresh_status()
-        with self.sessions_lock:
-            self.output_sessions.pop(session.session_id, None)
-            self.output_sessions[session.session_id] = session
+    def _remember_output_command(self, command: CommandRun) -> None:
+        command.refresh_status()
+        with self.commands_lock:
+            self.output_commands.pop(command.command_id, None)
+            self.output_commands[command.command_id] = command
             self._evict_retained_locked()
 
     def _retained_output_bytes_locked(self) -> int:
-        return sum(session.retained_bytes for session in self.sessions.values()) + sum(
-            session.retained_bytes for session in self.output_sessions.values()
+        return sum(command.retained_bytes for command in self.commands.values()) + sum(
+            command.retained_bytes for command in self.output_commands.values()
         )
 
     def _evict_retained_locked(self) -> None:
         retained = self._retained_output_bytes_locked()
-        while self.output_sessions and (
-            len(self.output_sessions) > MAX_RETAINED_OUTPUT_SESSIONS
+        while self.output_commands and (
+            len(self.output_commands) > MAX_RETAINED_OUTPUT_COMMANDS
             or retained > MAX_RUNTIME_OUTPUT_BYTES
         ):
-            oldest = self.output_sessions.pop(next(iter(self.output_sessions)))
+            oldest = self.output_commands.pop(next(iter(self.output_commands)))
             retained -= oldest.retained_bytes
 
-    def _complete_session(self, session: ExecSession) -> None:
-        session.refresh_status()
-        if session.process.poll() is None:
+    def _complete_command(self, command: CommandRun) -> None:
+        command.refresh_status()
+        if command.process.poll() is None:
             return
-        with self.sessions_lock:
-            self.sessions.pop(session.session_id, None)
-        self._remember_output_session(session)
+        with self.commands_lock:
+            self.commands.pop(command.command_id, None)
+        self._remember_output_command(command)
 
-    def _prune_sessions(self) -> None:
-        with self.sessions_lock:
-            active = list(self.sessions.values())
-        for session in active:
-            session.refresh_status()
-            if session.process.poll() is not None:
-                self._complete_session(session)
-        cutoff = time.time() - COMPLETED_SESSION_TTL_SECONDS
-        with self.sessions_lock:
+    def _prune_commands(self) -> None:
+        with self.commands_lock:
+            active = list(self.commands.values())
+        for command in active:
+            command.refresh_status()
+            if command.process.poll() is not None:
+                self._complete_command(command)
+        cutoff = time.time() - COMPLETED_COMMAND_TTL_SECONDS
+        with self.commands_lock:
             expired = [
-                session_id
-                for session_id, session in self.output_sessions.items()
-                if session.completed_at is not None and session.completed_at < cutoff
+                command_id
+                for command_id, command in self.output_commands.items()
+                if command.completed_at is not None and command.completed_at < cutoff
             ]
-            for session_id in expired:
-                self.output_sessions.pop(session_id, None)
+            for command_id in expired:
+                self.output_commands.pop(command_id, None)
             self._evict_retained_locked()
 
-    def _get_output_session(self, session_id: str) -> ExecSession:
-        self._prune_sessions()
-        with self.sessions_lock:
-            session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
-        if session is None:
-            raise ToolFailure("SESSION_NOT_FOUND", "Output session not found.", category="runtime")
-        return session
+    def _get_output_command(self, command_id: str) -> CommandRun:
+        self._prune_commands()
+        with self.commands_lock:
+            command = self.commands.get(command_id) or self.output_commands.get(command_id)
+        if command is None:
+            raise ToolFailure("COMMAND_NOT_FOUND", "Output command not found.", category="runtime")
+        return command
 
-    def _format_session_output(self, session: ExecSession, payload: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    def _format_command_output(self, command: CommandRun, payload: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         terminal = payload.get("status") != "running"
         if terminal:
-            self._complete_session(session)
+            self._complete_command(command)
         if payload.get("status") == "running":
             payload["next_action"] = {
                 "tool": "write_stdin",
                 "arguments": {
-                    "session_id": session.session_id,
+                    "command_id": command.command_id,
                     "chars": "",
                     "yield_time_ms": 10000,
                 },
             }
         output_refs = {
-            "stdout": f"session:{session.session_id}:stdout",
-            "stderr": f"session:{session.session_id}:stderr",
+            "stdout": f"command:{command.command_id}:stdout",
+            "stderr": f"command:{command.command_id}:stderr",
         }
         truncated_streams: list[str] = []
         for stream in ("stdout", "stderr"):
@@ -2704,7 +2774,7 @@ class Runtime:
             if not truncated_streams:
                 truncated_streams.append(output_stream)
             if terminal:
-                self._remember_output_session(session)
+                self._remember_output_command(command)
             payload["output_ref"] = output_ref
             payload["output_stream"] = output_stream
             payload["output_refs"] = output_refs
@@ -2724,8 +2794,8 @@ class Runtime:
                 category="validation",
             )
         if terminal and not truncated:
-            self._remember_output_session(session)
-        payload["summary"] = self._session_output_summary(session, payload)
+            self._remember_output_command(command)
+        payload["summary"] = self._command_output_summary(command, payload)
         payload["output_ref"] = output_ref
         payload["output_stream"] = output_stream
         payload["output_refs"] = output_refs
@@ -2752,7 +2822,7 @@ class Runtime:
         }
         if verbosity == "preview":
             preview_limit = int(args.get("preview_bytes", EXEC_PREVIEW_BYTES))
-            preview, preview_truncated = truncate_bytes(session.retained_output_bytes(), preview_limit)
+            preview, preview_truncated = truncate_bytes(command.retained_output_bytes(), preview_limit)
             compact["preview"] = preview
             compact["preview_truncated"] = preview_truncated
             compact["truncated"] = bool(compact.get("truncated") or preview_truncated)
@@ -2760,7 +2830,7 @@ class Runtime:
                 preview_streams = [
                     stream
                     for stream in ("stdout", "stderr")
-                    if session.retained_stream_bytes(stream)[2] > 0
+                    if command.retained_stream_bytes(stream)[2] > 0
                 ]
                 compact["truncated_output_streams"] = preview_streams
                 preview_actions = [read_output_action(output_refs[stream]) for stream in preview_streams]
@@ -2769,8 +2839,8 @@ class Runtime:
                     compact["next_action"] = preview_actions[0]
         return compact
 
-    def _session_output_summary(self, session: ExecSession, payload: dict[str, Any]) -> str:
-        retained = session.retained_output_bytes().decode("utf-8", errors="replace")
+    def _command_output_summary(self, command: CommandRun, payload: dict[str, Any]) -> str:
+        retained = command.retained_output_bytes().decode("utf-8", errors="replace")
         lines = retained.splitlines()
         tail = next((line.strip() for line in reversed(lines) if line.strip()), "")
         if len(tail) > 120:
@@ -2785,15 +2855,15 @@ class Runtime:
 
     def read_output(self, args: dict[str, Any]) -> dict[str, Any]:
         output_ref = str(args.get("output_ref", ""))
-        match = re.fullmatch(r"session:([^:]+):(full|stdout|stderr)", output_ref)
+        match = re.fullmatch(r"command:([^:]+):(full|stdout|stderr)", output_ref)
         if not match:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                "output_ref must look like session:<id>:stdout or session:<id>:stderr.",
+                "output_ref must look like command:<id>:stdout or command:<id>:stderr.",
                 category="validation",
             )
-        session = self._get_output_session(match.group(1))
-        session.refresh_status()
+        command = self._get_output_command(match.group(1))
+        command.refresh_status()
         ref_stream = match.group(2)
         requested_stream = str(args.get("stream", "") or "")
         if requested_stream and requested_stream not in {"stdout", "stderr"}:
@@ -2801,10 +2871,10 @@ class Runtime:
         if ref_stream in {"stdout", "stderr"} and requested_stream and requested_stream != ref_stream:
             raise ToolFailure("INVALID_ARGUMENT", "stream does not match output_ref.", category="validation")
         stream = ref_stream if ref_stream in {"stdout", "stderr"} else requested_stream or "stdout"
-        data, retained_start_offset, total_stream_bytes, dropped_bytes = session.retained_stream_bytes(stream)
+        data, retained_start_offset, total_stream_bytes, dropped_bytes = command.retained_stream_bytes(stream)
         requested_offset = max(0, int(args.get("offset", 0)))
         offset = max(requested_offset, retained_start_offset)
-        limit = max(1, min(int(args.get("limit", EXEC_PREVIEW_BYTES)), SESSION_BUFFER_BYTES))
+        limit = max(1, min(int(args.get("limit", EXEC_PREVIEW_BYTES)), COMMAND_BUFFER_BYTES))
         buffer_offset = max(0, offset - retained_start_offset)
         chunk = data[buffer_offset : buffer_offset + limit]
         next_offset = offset + len(chunk) if offset + len(chunk) < total_stream_bytes else None
@@ -2813,12 +2883,12 @@ class Runtime:
         if omitted_bytes:
             warnings.append(f"{stream} offset skipped dropped bytes")
         if dropped_bytes:
-            warnings.append(f"older {stream} output was dropped from the rolling session buffer")
+            warnings.append(f"older {stream} output was dropped from the rolling command buffer")
         if ref_stream == "full":
             warnings.append("legacy full output_ref defaults to stdout; use output_refs for stable stream paging")
         result = {
             "output_ref": output_ref,
-            "stream_output_ref": f"session:{session.session_id}:{stream}",
+            "stream_output_ref": f"command:{command.command_id}:{stream}",
             "stream": stream,
             "offset": offset,
             "requested_offset": requested_offset,
@@ -2828,8 +2898,8 @@ class Runtime:
             "total_retained_bytes": len(data),
             "retained_start_offset": retained_start_offset,
             "total_stream_bytes": total_stream_bytes,
-            "stdout_dropped_bytes": session.stdout_dropped_bytes,
-            "stderr_dropped_bytes": session.stderr_dropped_bytes,
+            "stdout_dropped_bytes": command.stdout_dropped_bytes,
+            "stderr_dropped_bytes": command.stderr_dropped_bytes,
             "stream_dropped_bytes": dropped_bytes,
             "omitted_bytes": omitted_bytes,
             "truncated": next_offset is not None,
@@ -2843,23 +2913,23 @@ class Runtime:
         return result
 
     def write_stdin(self, args: dict[str, Any]) -> dict[str, Any]:
-        session_id = str(args.get("session_id", ""))
-        session = self._get_session(session_id)
-        session.refresh_status()
+        command_id = str(args.get("command_id", ""))
+        command = self._get_command(command_id)
+        command.refresh_status()
         chars = str(args.get("chars", ""))
-        if session.process.poll() is not None:
+        if command.process.poll() is not None:
             if chars:
-                raise ToolFailure("SESSION_CLOSED", "Session is closed; stdin write blocked.", category="runtime")
-            payload = session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
-            return self._format_session_output(session, payload, args)
+                raise ToolFailure("COMMAND_CLOSED", "Command is closed; stdin write blocked.", category="runtime")
+            payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+            return self._format_command_output(command, payload, args)
         if chars:
-            session.write_input(chars.encode("utf-8"))
+            command.write_input(chars.encode("utf-8"))
         wait_until = time.time() + (int(args.get("yield_time_ms", 10000)) / 1000.0)
         first_output_at: float | None = None
-        while time.time() < wait_until and session.process.poll() is None:
+        while time.time() < wait_until and command.process.poll() is None:
             time.sleep(0.02)
-            with session.lock:
-                has_new_output = len(session.stdout) > session.stdout_cursor or len(session.stderr) > session.stderr_cursor
+            with command.lock:
+                has_new_output = len(command.stdout) > command.stdout_cursor or len(command.stderr) > command.stderr_cursor
                 if has_new_output and not chars:
                     break
                 if has_new_output and chars:
@@ -2867,21 +2937,21 @@ class Runtime:
                         first_output_at = time.time()
                     if time.time() - first_output_at >= 0.05:
                         break
-        payload = session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
-        return self._format_session_output(session, payload, args)
+        payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+        return self._format_command_output(command, payload, args)
 
-    def _wait_for_session_exit(self, session: ExecSession, wait_seconds: float) -> bool:
+    def _wait_for_command_exit(self, command: CommandRun, wait_seconds: float) -> bool:
         try:
-            session.process.wait(timeout=max(0.0, wait_seconds))
+            command.process.wait(timeout=max(0.0, wait_seconds))
         except subprocess.TimeoutExpired:
             pass
-        session.refresh_status()
-        session.drain_readers()
-        return session.process.poll() is not None
+        command.refresh_status()
+        command.drain_readers()
+        return command.process.poll() is not None
 
-    def kill_session(self, args: dict[str, Any]) -> dict[str, Any]:
-        session_id = str(args.get("session_id", ""))
-        session = self._get_session(session_id)
+    def kill_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        command_id = str(args.get("command_id", ""))
+        command = self._get_command(command_id)
         signal_name = str(args.get("signal", "TERM"))
         force = signal_name == "KILL"
         signum = {"TERM": signal.SIGTERM, "KILL": HARD_KILL_SIGNAL, "INT": signal.SIGINT}.get(
@@ -2889,14 +2959,14 @@ class Runtime:
             signal.SIGTERM,
         )
         evict = True
-        if session.process.poll() is None:
-            session.terminating = True
-            terminate_process_group(session.process, signum, force=force)
-            exited = self._wait_for_session_exit(session, int(args.get("wait_ms", 5000)) / 1000.0)
+        if command.process.poll() is None:
+            command.terminating = True
+            terminate_process_group(command.process, signum, force=force)
+            exited = self._wait_for_command_exit(command, int(args.get("wait_ms", 5000)) / 1000.0)
             if not exited and not force:
                 force = True
-                terminate_process_group(session.process, HARD_KILL_SIGNAL, force=True)
-                exited = self._wait_for_session_exit(session, int(args.get("kill_wait_ms", 2000)) / 1000.0)
+                terminate_process_group(command.process, HARD_KILL_SIGNAL, force=True)
+                exited = self._wait_for_command_exit(command, int(args.get("kill_wait_ms", 2000)) / 1000.0)
             if exited:
                 killed = True
                 status = "killed" if force else "terminated"
@@ -2908,41 +2978,41 @@ class Runtime:
             killed = False
             status = "exited"
         signal_sent = "SIGKILL" if force else signal.Signals(signum).name
-        payload = session.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+        payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
         payload.update({"killed": killed, "status": status, "evicted": evict, "signal_sent": signal_sent})
-        payload = self._format_session_output(session, payload, args)
+        payload = self._format_command_output(command, payload, args)
         if status == "terminating":
             warnings = list(payload.get("warnings", []))
-            warnings.append("Process did not exit after TERM/SIGKILL; session retained for retry or watchdog cleanup.")
+            warnings.append("Process did not exit after TERM/SIGKILL; command retained for retry or watchdog cleanup.")
             payload["warnings"] = warnings
-            payload["next_action"] = "retry kill_session or wait for watchdog cleanup"
+            payload["next_action"] = "retry kill_command or wait for watchdog cleanup"
         if evict:
-            with self.sessions_lock:
-                self.sessions.pop(session_id, None)
+            with self.commands_lock:
+                self.commands.pop(command_id, None)
         return payload
 
-    def cancel_session(self, session_id: str) -> None:
-        with self.sessions_lock:
-            session = self.sessions.pop(session_id, None)
-        if session is None:
+    def cancel_command(self, command_id: str) -> None:
+        with self.commands_lock:
+            command = self.commands.pop(command_id, None)
+        if command is None:
             return
-        session.refresh_status()
-        if session.process.poll() is None:
-            terminate_process_group(session.process, signal.SIGTERM)
+        command.refresh_status()
+        if command.process.poll() is None:
+            terminate_process_group(command.process, signal.SIGTERM)
 
     def cancel_request(self, request_id: str | int) -> None:
-        with self.request_sessions_lock:
-            session_id = self.request_sessions.get(request_id)
-        if session_id is not None:
-            self.cancel_session(session_id)
+        with self.request_commands_lock:
+            command_id = self.request_commands.get(request_id)
+        if command_id is not None:
+            self.cancel_command(command_id)
 
-    def _get_session(self, session_id: str) -> ExecSession:
-        self._prune_sessions()
-        with self.sessions_lock:
-            session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
-        if session is None:
-            raise ToolFailure("SESSION_NOT_FOUND", "Session not found; stdin access denied.", category="not_found")
-        return session
+    def _get_command(self, command_id: str) -> CommandRun:
+        self._prune_commands()
+        with self.commands_lock:
+            command = self.commands.get(command_id) or self.output_commands.get(command_id)
+        if command is None:
+            raise ToolFailure("COMMAND_NOT_FOUND", "Command not found; stdin access denied.", category="not_found")
+        return command
 
     def git_status(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
@@ -4518,25 +4588,25 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "write_stdin": object_schema(
             {
-                "session_id": {**string, "minLength": 1},
+                "command_id": {**string, "minLength": 1},
                 "chars": {**string, "default": ""},
                 "yield_time_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 10000},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
                 "verbosity": {**string, "enum": ["summary", "preview", "full"]},
                 "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
             },
-            ["session_id"],
+            ["command_id"],
         ),
-        "kill_session": object_schema(
+        "kill_command": object_schema(
             {
-                "session_id": {**string, "minLength": 1},
+                "command_id": {**string, "minLength": 1},
                 "signal": {**string, "enum": ["TERM", "KILL", "INT"], "default": "TERM"},
                 "wait_ms": {**integer, "minimum": 0, "maximum": 30000, "default": 5000},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
                 "verbosity": {**string, "enum": ["summary", "preview", "full"]},
                 "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
             },
-            ["session_id"],
+            ["command_id"],
         ),
         "read_output": object_schema(
             {
@@ -5334,6 +5404,7 @@ def build_runtime(
     emit_warning: bool = True,
     project_context: ProjectContext | None = None,
     transport: str = "stdio",
+    command_manager: WorkspaceCommandManager | None = None,
 ) -> Runtime:
     workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
     runtime = Runtime(
@@ -5347,6 +5418,7 @@ def build_runtime(
         project_context=project_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
         transport=transport,
+        command_manager=command_manager,
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
@@ -5484,6 +5556,7 @@ def run_http(args: argparse.Namespace) -> int:
             emit_warning=False,
             project_context=runtime.project_context,
             transport="http",
+            command_manager=runtime.command_manager,
         )
 
     server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime, runtime_factory)

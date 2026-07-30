@@ -37,33 +37,33 @@ class RuntimeSemanticsTests(ComplianceTestCase):
                                 continue
                             self.assertTrue(read.get("isError"), f"deleted path should be unreadable: {deleted}")
 
-    def test_session_semantics_match_runtime_exec_and_stdin(self) -> None:
+    def test_command_semantics_match_runtime_exec_and_stdin(self) -> None:
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
                 {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
             )
             payload = self.assert_tool_success(started)
-            session_id = payload.get("session_id")
-            self.assertIsInstance(session_id, str)
-            output = client.call_tool("write_stdin", {"session_id": session_id, "chars": "compat\n"})
+            command_id = payload.get("command_id")
+            self.assertIsInstance(command_id, str)
+            output = client.call_tool("write_stdin", {"command_id": command_id, "chars": "compat\n"})
             self.assertIn("echo:compat", self.tool_text(output))
-            client.call_tool("write_stdin", {"session_id": session_id, "chars": "exit\n"})
+            client.call_tool("write_stdin", {"command_id": command_id, "chars": "exit\n"})
 
-    def test_missing_and_closed_sessions_return_structured_errors(self) -> None:
-        self.assert_denied_or_permission_required("write_stdin", {"session_id": "missing-session", "chars": "hello\n"})
+    def test_missing_and_closed_commands_return_structured_errors(self) -> None:
+        self.assert_denied_or_permission_required("write_stdin", {"command_id": "missing-command", "chars": "hello\n"})
         with self.session_for_fixture("long-running-project") as (_workspace, client):
             started = client.call_tool(
                 "exec_command",
                 {"cmd": "python repl.py", "tty": True, "timeout_ms": 1000, "max_output_bytes": 4096},
             )
-            session_id = self.assert_tool_success(started).get("session_id")
-            client.call_tool("kill_session", {"session_id": session_id})
+            command_id = self.assert_tool_success(started).get("command_id")
+            client.call_tool("kill_command", {"command_id": command_id})
             try:
-                closed = client.call_tool("write_stdin", {"session_id": session_id, "chars": "after-close\n"})
+                closed = client.call_tool("write_stdin", {"command_id": command_id, "chars": "after-close\n"})
             except MCPError:
                 return
-            self.assertTrue(closed.get("isError"), f"write to closed session must fail: {closed!r}")
+            self.assertTrue(closed.get("isError"), f"write to closed command must fail: {closed!r}")
 
     def test_view_image_semantics_when_p1_tool_is_present(self) -> None:
         with self.session_for_fixture("image-project") as (_workspace, client):

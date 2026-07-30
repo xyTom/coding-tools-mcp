@@ -13,7 +13,7 @@
 
 Coding Tools MCP 是一个**模型中立的编程运行时**，通过
 [Model Context Protocol](https://modelcontextprotocol.io) 对外提供服务：
-文件读取与搜索、结构化多文件补丁、命令执行、交互式会话、git 操作——
+文件读取与搜索、结构化多文件补丁、命令执行、交互式命令、git 操作——
 一个服务器，任何 MCP 客户端都能驱动。Claude Desktop、Claude Code、Cursor、
 Cline，或你自己写的 agent，拿到的都是同一套久经考验的 20 个工具：
 限定在单一工作区内，由权限模式层层把关。
@@ -107,9 +107,9 @@ coding-tools-mcp-desktop
 按工作区管理配置、一键启停服务器与隧道、凭证设置带剪贴板助手、实时健康
 检查。支持英文与简体中文。
 
-**6. 保持一个活着的交互式会话。**`exec_command` 在真实 PTY 下启动 REPL 或
+**6. 保持一个活着的交互式命令。**`exec_command` 在真实 PTY 下启动 REPL 或
 调试器；`write_stdin` 跨轮次喂输入；`read_output` 分页读取长输出；
-`kill_session` 干净收尾。长时进程是一等公民，配有会话看门狗与有界缓冲。
+`kill_command` 干净收尾。长时进程是一等公民，配有命令看门狗与有界缓冲。
 
 **7. 给自研 agent 装上生产级的"手"。**用 Anthropic SDK 或任何框架搭 agent
 循环？别再手写文件和执行工具——对着这个服务器讲 MCP，整个安全边界直接
@@ -124,7 +124,7 @@ coding-tools-mcp-desktop
 | 分组 | 工具 |
 | --- | --- |
 | 文件与搜索 | `read_file` · `list_dir` · `list_files` · `search_text` · `apply_patch` · `view_image` |
-| 执行 | `exec_command` · `write_stdin` · `read_output` · `kill_session` · `request_permissions` |
+| 执行 | `exec_command` · `write_stdin` · `read_output` · `kill_command` · `request_permissions` |
 | Git | `git_status` · `git_diff` · `git_log` · `git_show` · `git_blame` |
 | 运行时 | `server_info` · `check_exec_environment` · `get_default_cwd` · `set_default_cwd` |
 

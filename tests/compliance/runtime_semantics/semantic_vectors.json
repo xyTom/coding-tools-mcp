@@ -56,22 +56,22 @@
       "expect_success": false
     }
   ],
-  "exec_session": [
+  "exec_command": [
     {
-      "name": "long_running_process_returns_session_id",
+      "name": "long_running_process_returns_command_id",
       "tool": "exec_command",
       "arguments": {
         "cmd": "python repl.py",
         "tty": true,
         "timeout_ms": 1000
       },
-      "expect_session": true
+      "expect_command": true
     },
     {
-      "name": "write_stdin_rejects_missing_session",
+      "name": "write_stdin_rejects_missing_command",
       "tool": "write_stdin",
       "arguments": {
-        "session_id": "missing-session",
+        "command_id": "missing-command",
         "chars": "hello\n"
       },
       "expect_success": false

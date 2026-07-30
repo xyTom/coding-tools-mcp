@@ -186,14 +186,14 @@ class SecurityComplianceTests(ComplianceTestCase):
             },
         )
         payload = self.assert_tool_success(started)
-        session_id = payload.get("session_id")
-        self.assertIsInstance(session_id, str, f"running command should expose a session id: {payload!r}")
+        command_id = payload.get("command_id")
+        self.assertIsInstance(command_id, str, f"running command should expose a command id: {payload!r}")
 
         try:
             time.sleep(0.35)
             polled = self.client.call_tool(
                 "write_stdin",
-                {"session_id": session_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 4096},
+                {"command_id": command_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 4096},
             )
             poll_payload = self.assert_tool_success(polled)
             self.assertNotEqual(
@@ -206,8 +206,8 @@ class SecurityComplianceTests(ComplianceTestCase):
                 f"timeout should be explicit after deadline: {poll_payload!r}",
             )
         finally:
-            if isinstance(session_id, str):
-                self.client.call_tool("kill_session", {"session_id": session_id, "signal": "KILL"})
+            if isinstance(command_id, str):
+                self.client.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
 
     def test_exec_command_timeout_is_enforced_without_client_polling(self) -> None:
         started = self.client.call_tool(
@@ -221,13 +221,13 @@ class SecurityComplianceTests(ComplianceTestCase):
             },
         )
         payload = self.assert_tool_success(started)
-        session_id = payload.get("session_id")
-        self.assertIsInstance(session_id, str, payload)
+        command_id = payload.get("command_id")
+        self.assertIsInstance(command_id, str, payload)
 
         time.sleep(0.35)
         polled = self.client.call_tool(
             "write_stdin",
-            {"session_id": session_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 4096},
+            {"command_id": command_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 4096},
         )
         poll_payload = self.assert_tool_success(polled)
         self.assertEqual(poll_payload.get("status"), "timeout", poll_payload)
@@ -245,17 +245,17 @@ class SecurityComplianceTests(ComplianceTestCase):
             },
         )
         payload = self.assert_tool_success(started)
-        session_id = payload.get("session_id")
-        self.assertIsInstance(session_id, str, payload)
+        command_id = payload.get("command_id")
+        self.assertIsInstance(command_id, str, payload)
         time.sleep(0.5)
         polled = self.client.call_tool(
             "write_stdin",
-            {"session_id": session_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 1024},
+            {"command_id": command_id, "chars": "", "yield_time_ms": 0, "max_output_bytes": 1024},
         )
         poll_payload = self.assert_tool_success(polled)
         self.assertGreater(poll_payload.get("stdout_dropped_bytes", 0), 0, poll_payload)
         self.assertTrue(poll_payload.get("truncated"), poll_payload)
-        self.client.call_tool("kill_session", {"session_id": session_id, "signal": "KILL"})
+        self.client.call_tool("kill_command", {"command_id": command_id, "signal": "KILL"})
 
     def test_sensitive_environment_is_not_leaked_to_child_processes(self) -> None:
         result = self.client.call_tool(

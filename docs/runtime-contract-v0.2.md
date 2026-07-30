@@ -23,9 +23,11 @@ below. Unless that switch is set, the annotations in this document are what
 - Streamable HTTP uses `POST /mcp`. `DELETE /mcp` terminates the selected
   `Mcp-Session-Id`. Because this server does not provide an SSE stream,
   `GET /mcp` and `HEAD /mcp` return `405`.
-- Each successful HTTP `initialize` creates an independent runtime. Its cwd,
-  process sessions, retained output, and runtime directories are not shared
-  with other MCP sessions.
+- Each successful HTTP `initialize` creates an independent transport runtime.
+  Its default cwd and request context are not shared with other MCP sessions.
+  Commands and retained output are workspace resources, so another
+  authenticated client for the same workspace can continue a command using
+  the `command_id` returned by `exec_command`.
 - Subsequent HTTP messages must include the returned `Mcp-Session-Id` and the
   negotiated `MCP-Protocol-Version`. Unknown or expired sessions return `404`.
 - JSON-RPC batches are rejected. Cancellation uses
@@ -110,7 +112,7 @@ Tool failures keep the same envelope with `isError: true`, a readable error in
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -120,19 +122,19 @@ Malformed JSON-RPC uses standard protocol errors: parse `-32700`, invalid
 request `-32600`, unknown method `-32601`, invalid params/tool `-32602`, and
 unexpected server failure `-32603`.
 
-## Process lifecycle
+## Command lifecycle
 
-`exec_command`, `write_stdin`, `read_output`, and `kill_session` are always in
+`exec_command`, `write_stdin`, `read_output`, and `kill_command` are always in
 the catalog. `exec_command` and `write_stdin` default to a 10-second yield. A
 short command normally finishes in one call. A running command returns:
 
 ```json
 {
   "status": "running",
-  "session_id": "...",
+  "command_id": "...",
   "next_action": {
     "tool": "write_stdin",
-    "arguments": {"session_id": "...", "chars": "", "yield_time_ms": 10000}
+    "arguments": {"command_id": "...", "chars": "", "yield_time_ms": 10000}
   }
 }
 ```
@@ -143,8 +145,8 @@ Its offsets are absolute and independent for stdout and stderr. A single
 truncated stream is selected by `next_action`; when both streams are truncated,
 `next_actions` contains one executable `read_output` call for each stream.
 
-Active processes, completed-output sessions, per-session bytes, and total
-runtime bytes are bounded. Completed sessions have a TTL. POSIX `tty=true` uses
+Active processes, completed-output commands, per-command bytes, and total
+runtime bytes are bounded. Completed commands have a TTL. POSIX `tty=true` uses
 a real pseudo-terminal; Windows reports `TTY_UNSUPPORTED` in this build instead
 of pretending pipes are a TTY.
 
@@ -198,13 +200,20 @@ Inputs: none.
 
 Annotations: `{"title":"Get default cwd","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
+Returns the default cwd for the current MCP transport session. It may reset to
+the workspace root after a reconnect.
+
 ### set_default_cwd
 
 Inputs: `"path"`.
 
 Annotations: `{"title":"Set default cwd","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
-Changes only this MCP runtime's navigation base; it does not modify files.
+Changes only the current MCP transport session's navigation base; it does not
+modify files. Reliable multi-call workflows should pass `path` or `workdir`
+explicitly instead of depending on this value surviving a reconnect.
+
+Example: `{"path":"src"}`.
 
 ### read_file
 
@@ -247,6 +256,15 @@ Annotations: `{"title":"Apply patch","readOnlyHint":false,"destructiveHint":true
 Supports `*** Add File`, `*** Update File`, `*** Delete File`, and
 `*** Move to` inside a `*** Begin Patch` / `*** End Patch` envelope.
 
+```text
+*** Begin Patch
+*** Update File: app.py
+@@
+-old
++new
+*** End Patch
+```
+
 ### exec_command
 
 Inputs: `"cmd"`, `"workdir"`, `"cwd"`, `"timeout_ms"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`, `"stdin"`, `"tty"`, `"env"`.
@@ -257,27 +275,36 @@ Statuses are `exited`, `running`, `timeout`, `terminated`, or `failed`.
 Launch/policy failures use the error envelope with `status: "failed"`; signal
 exits use `terminated`. Ordinary non-zero exit codes still use `exited`.
 
+Example: `{"cmd":"pytest -q","workdir":".","yield_time_ms":30000}`.
+
 ### write_stdin
 
-Inputs: `"session_id"`, `"chars"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`.
+Inputs: `"command_id"`, `"chars"`, `"yield_time_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`.
 
 Annotations: `{"title":"Write stdin","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
 
-Poll or interact with a command session. Pass empty `chars` to wait for output.
+Poll or interact with a command. Pass empty `chars` to wait for output.
 
-### kill_session
+Poll example: `{"command_id":"abc","chars":"","yield_time_ms":10000}`.
+Input example: `{"command_id":"abc","chars":"yes\n"}`.
 
-Inputs: `"session_id"`, `"signal"`, `"wait_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`.
+### kill_command
 
-Annotations: `{"title":"Kill session","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
+Inputs: `"command_id"`, `"signal"`, `"wait_ms"`, `"max_output_bytes"`, `"verbosity"`, `"preview_bytes"`.
+
+Annotations: `{"title":"Kill command","readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":false}`.
 
 Statuses are `["terminated", "killed", "exited", "terminating", "not_found"]`.
+
+Example: `{"command_id":"abc","signal":"KILL"}`.
 
 ### read_output
 
 Inputs: `"output_ref"`, `"stream"`, `"offset"`, `"limit"`.
 
 Annotations: `{"title":"Read output","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Example: `{"output_ref":"command:abc:stdout","offset":0,"limit":4096}`.
 
 ### git_status
 

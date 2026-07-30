@@ -23,7 +23,7 @@ The default catalog contains 20 tools:
   `set_default_cwd`
 - workspace inspection: `read_file`, `list_dir`, `list_files`, `search_text`
 - mutation: `apply_patch`
-- processes: `exec_command`, `write_stdin`, `read_output`, `kill_session`
+- processes: `exec_command`, `write_stdin`, `read_output`, `kill_command`
 - Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`
 - policy/image: `request_permissions`, `view_image`
 
@@ -50,9 +50,10 @@ files and atomic replacement, preserve mode/BOM/newlines, detect stale
 baselines, and roll back multi-file failures. Filesystem rollback failure is
 reported explicitly rather than hidden.
 
-Command sessions use a 10-second default yield, real POSIX PTYs, bounded active
-and retained-session stores, per-session and runtime output budgets, TTL cleanup,
-and explicit `next_action` objects for polling or truncated output.
+Commands use a 10-second default yield, real POSIX PTYs, bounded active and
+retained-command stores, per-command and runtime output budgets, TTL cleanup,
+and explicit `next_action` objects for polling or truncated output. Command
+handles are `command_id` values and are distinct from HTTP `Mcp-Session-Id`.
 
 ## Security boundary
 

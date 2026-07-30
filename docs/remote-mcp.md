@@ -118,10 +118,13 @@ Mcp-Session-Id: <returned-id>
 MCP-Protocol-Version: 2025-11-25
 ```
 
-Each ID owns a separate cwd, command-session table, output cache, and runtime
-directory. A second client cannot read or mutate the first client's state.
-`DELETE /mcp` with the session header terminates that one runtime. Sessions are
-bounded and expire after inactivity.
+Each ID owns separate transport-local state such as the default cwd and request
+context. Commands are workspace resources instead, so another
+authenticated client connected to the same workspace can continue a command
+using the `command_id` returned by `exec_command`. `DELETE /mcp` terminates only
+the selected transport runtime; it does not terminate workspace commands. HTTP
+sessions are bounded and expire after inactivity, while commands keep their own
+existing timeout, count, output, and retention limits.
 
 This implementation returns `405` for `GET /mcp` because it does not provide an
 SSE stream. It rejects JSON-RPC batches and accepts standard

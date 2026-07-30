@@ -197,10 +197,10 @@ def _render_exec(payload: dict[str, Any]) -> str:
     summary = payload.get("summary")
     if len(sections) == 1 and isinstance(summary, str) and summary:
         sections.append(summary)
-    session_id = payload.get("session_id")
-    if payload.get("status") == "running" and session_id:
+    command_id = payload.get("command_id")
+    if payload.get("status") == "running" and command_id:
         sections.append(
-            f'Session still running; poll with write_stdin(session_id="{session_id}", chars="", yield_time_ms=10000).'
+            f'Command still running; poll with write_stdin(command_id="{command_id}", chars="", yield_time_ms=10000).'
         )
     if payload.get("truncated"):
         continuations = _render_exec_continuations(payload)
@@ -228,7 +228,7 @@ def _render_read_output(payload: dict[str, Any]) -> str:
 def _render_kill(payload: dict[str, Any]) -> str:
     signal_sent = payload.get("signal_sent")
     suffix = f" (signal {signal_sent})" if isinstance(signal_sent, str) and signal_sent else ""
-    return f"Session {payload.get('session_id', '')}: {payload.get('status', 'completed')}{suffix}."
+    return f"Command {payload.get('command_id', '')}: {payload.get('status', 'completed')}{suffix}."
 
 
 def _render_git_status(payload: dict[str, Any]) -> str:
@@ -397,7 +397,7 @@ _RENDERERS = {
     "apply_patch": _render_patch,
     "exec_command": _render_exec,
     "write_stdin": _render_exec,
-    "kill_session": _render_kill,
+    "kill_command": _render_kill,
     "read_output": _render_read_output,
     "git_status": _render_git_status,
     "git_diff": _render_git_diff,

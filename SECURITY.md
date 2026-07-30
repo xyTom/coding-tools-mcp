@@ -4,7 +4,7 @@ This project exposes local coding-runtime primitives over MCP. The intended boun
 
 ## Current Implementation Caution
 
-The current compliance suite covers workspace traversal, symlink escape, direct and interpreter-mediated outside reads, direct syscall outside reads and writes on Landlock-capable Linux hosts, risky environment variables, network-looking commands, destructive commands, shell-expansion gating, output caps, and session deadlines. Even so, `exec_command` must not be treated as a complete OS/container sandbox. It launches host processes and still relies on platform support plus command classification for non-filesystem risks.
+The current compliance suite covers workspace traversal, symlink escape, direct and interpreter-mediated outside reads, direct syscall outside reads and writes on Landlock-capable Linux hosts, risky environment variables, network-looking commands, destructive commands, shell-expansion gating, output caps, and command deadlines. Even so, `exec_command` must not be treated as a complete OS/container sandbox. It launches host processes and still relies on platform support plus command classification for non-filesystem risks.
 
 For production, expose the server only to trusted local clients, bind HTTP to loopback, and run it inside an external container or sandbox with no host secrets, no broad filesystem mounts, and network egress disabled by policy.
 
@@ -65,9 +65,9 @@ Operators should choose one of three permission modes:
 
 `--allow-network` remains a compatibility flag to open only the network-looking command gate. `--dangerously-skip-all-permissions` remains a compatibility alias for dangerous mode.
 
-## Session Lifecycle
+## Command Lifecycle
 
-Persistent command sessions use opaque server-owned IDs. `write_stdin` requires a live session. `kill_session` terminates only server-managed process groups. Deadlines continue to apply even if the client stops polling, and output buffers are bounded with dropped-byte metadata.
+Persistent commands use opaque server-owned IDs. `write_stdin` requires a live command. `kill_command` terminates only server-managed process groups. Deadlines continue to apply even if the client stops polling, and output buffers are bounded with dropped-byte metadata.
 
 ## HTTP Exposure
 
