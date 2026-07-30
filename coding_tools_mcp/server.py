@@ -4931,8 +4931,15 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return True
         if self.runtime.oauth_config is not None and header.startswith("Bearer "):
             token = header[len("Bearer "):]
-            if validate_access_token(token, self.runtime.oauth_config, self.oauth_base_url()):
-                return True
+            try:
+                if validate_access_token(
+                    token,
+                    self.runtime.oauth_config,
+                    self.oauth_base_url(),
+                ):
+                    return True
+            except OAuthStoreError:
+                self.log_error("OAuth bearer validation unavailable; request denied")
         return False
 
     def oauth_base_url(self) -> str:

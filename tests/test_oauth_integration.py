@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import threading
 import urllib.error
@@ -10,10 +11,11 @@ import urllib.request
 import jwt
 import sqlite3
 import unittest
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Iterator
+from unittest.mock import patch
 
 from coding_tools_mcp.oauth import (
     PersistentOAuthClientRegistry,
@@ -22,7 +24,7 @@ from coding_tools_mcp.oauth import (
     oauth_signing_kid,
     validate_access_token,
 )
-from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
+from coding_tools_mcp.oauth_store import OAuthAuthorizationStore, OAuthStoreError
 from coding_tools_mcp.server import (
     MCPHandler,
     Runtime,
@@ -183,6 +185,79 @@ class PersistentAccessTokenTests(unittest.TestCase):
             self.assertTrue(validate_access_token(third, config, "https://mcp.example"))
             config.store.set_client_enabled("token-agent", False, reason="test")
             self.assertFalse(validate_access_token(third, config, "https://mcp.example"))
+
+
+class BearerFailClosedTests(unittest.TestCase):
+    def test_store_failure_denies_bearer_without_logging_token(self) -> None:
+        with oauth_root() as root:
+            config, _created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password="synthetic-authorize-password",
+                server_url=None,
+                token_ttl=86_400,
+                client_id="bearer-agent",
+                redirect_uris=("http://127.0.0.1/callback",),
+            )
+            grant_id = create_authorization_grant(
+                config,
+                client_id="bearer-agent",
+                redirect_uri="http://127.0.0.1/callback",
+                scopes="mcp",
+            )
+            kid = oauth_signing_kid(config)
+            config.store.register_signing_key(
+                kid,
+                hashlib.sha256(config.token_secret).hexdigest(),
+                secret_ref="oauth/token-secret",
+            )
+            runtime = Runtime(root, oauth_config=config, transport="http")
+            server = RuntimeHTTPServer(
+                ("127.0.0.1", 0),
+                MCPHandler,
+                runtime,
+                lambda: Runtime(root, oauth_config=config, transport="http"),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            token = create_access_token(
+                config,
+                base,
+                client_id="bearer-agent",
+                grant_id=grant_id,
+            )
+
+            def ping() -> int:
+                request = urllib.request.Request(
+                    f"{base}/mcp",
+                    data=b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}',
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "MCP-Protocol-Version": "2025-06-18",
+                    },
+                    method="POST",
+                )
+                return urllib.request.urlopen(request, timeout=5).status
+
+            try:
+                self.assertEqual(ping(), 200)
+                captured = io.StringIO()
+                with patch.object(
+                    config.store,
+                    "access_token_is_active",
+                    side_effect=OAuthStoreError("synthetic database failure"),
+                ), redirect_stderr(captured):
+                    with self.assertRaises(urllib.error.HTTPError) as caught:
+                        ping()
+                self.assertEqual(caught.exception.code, 401)
+                self.assertIn("validation unavailable", captured.getvalue())
+                self.assertNotIn(token, captured.getvalue())
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
 
 class PersistentOAuthCompositionTests(unittest.TestCase):

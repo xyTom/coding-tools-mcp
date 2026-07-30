@@ -418,10 +418,7 @@ def validate_access_token(token: str, config: OAuthConfig, server_url: str) -> b
         return False
     if claims.get("sub") != grant_id:
         return False
-    try:
-        return config.store.access_token_is_active(jti)
-    except OAuthStoreError:
-        return False
+    return config.store.access_token_is_active(jti)
 
 
 def _secret_digest(secret: str) -> str:
