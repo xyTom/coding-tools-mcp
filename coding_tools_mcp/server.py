@@ -5094,10 +5094,16 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if _p("response_type") != "code":
             self._send_html("<h2>Error</h2><p>response_type must be 'code'</p>", status=400)
             return
-        if cfg.registry.get(client_id) is None:
+        try:
+            client = cfg.registry.get(client_id)
+            redirect_allowed = cfg.registry.accepts_redirect(client_id, redirect_uri)
+        except OAuthStoreError:
+            self._send_html("<h2>Error</h2><p>OAuth persistence is unavailable</p>", status=503)
+            return
+        if client is None:
             self._send_html("<h2>Error</h2><p>Unknown client_id</p>", status=400)
             return
-        if not cfg.registry.accepts_redirect(client_id, redirect_uri):
+        if not redirect_allowed:
             self._send_html("<h2>Error</h2><p>redirect_uri is not registered for this client</p>", status=400)
             return
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
@@ -5140,7 +5146,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 error=error,
             ), status=status)
 
-        if cfg.registry.get(client_id) is None or not cfg.registry.accepts_redirect(client_id, redirect_uri):
+        try:
+            client = cfg.registry.get(client_id)
+            redirect_allowed = cfg.registry.accepts_redirect(client_id, redirect_uri)
+        except OAuthStoreError:
+            fail("OAuth persistence is unavailable", status=503)
+            return
+        if client is None or not redirect_allowed:
             fail("Invalid client or redirect URI")
             return
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
@@ -5197,9 +5209,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "unsupported_grant_type"}, status=400)
             return
 
-        def _err(error: str, description: str) -> None:
+        def _err(error: str, description: str, *, status: int = 400) -> None:
             self.log_message("OAuth token error: %s - %s", error, description)
-            self.send_json({"error": error, "error_description": description}, status=400)
+            self.send_json(
+                {"error": error, "error_description": description},
+                status=status,
+            )
 
         body = self._read_oauth_body()
         if body is None:
@@ -5254,7 +5269,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 _err("invalid_grant", "Invalid, expired, or reused refresh token")
                 return
             except OAuthServiceError:
-                _err("server_error", "Refresh-token persistence is unavailable")
+                _err(
+                    "server_error",
+                    "Refresh-token persistence is unavailable",
+                    status=503,
+                )
                 return
             self.send_json(response)
             return
@@ -5262,10 +5281,20 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             supported = ", ".join(OAUTH_GRANT_TYPES_SUPPORTED)
             _err("unsupported_grant_type", f"Supported grant types: {supported}")
             return
-        if cfg.registry.get(client_id) is None:
+        try:
+            client = cfg.registry.get(client_id)
+            authenticated = cfg.registry.authenticates(
+                client_id,
+                client_secret,
+                presented_auth_method,
+            )
+        except OAuthStoreError:
+            _err("server_error", "OAuth client registry is unavailable", status=503)
+            return
+        if client is None:
             _err("invalid_client", "Unknown client_id")
             return
-        if not cfg.registry.authenticates(client_id, client_secret, presented_auth_method):
+        if not authenticated:
             _err("invalid_client", "Invalid client_secret")
             return
         if not code:
@@ -5316,7 +5345,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 scopes="mcp",
             )
         except OAuthServiceError:
-            _err("server_error", "OAuth token state could not be persisted")
+            _err(
+                "server_error",
+                "OAuth token state could not be persisted",
+                status=503,
+            )
             return
         self.send_json(
             {
@@ -5349,6 +5382,15 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         try:
             registered = cfg.registry.register(metadata)
+        except OAuthStoreError:
+            self.send_json(
+                {
+                    "error": "server_error",
+                    "error_description": "OAuth persistence is unavailable",
+                },
+                status=503,
+            )
+            return
         except ValueError as exc:
             self.send_json({"error": "invalid_client_metadata", "error_description": str(exc)}, status=400)
             return
@@ -5630,7 +5672,13 @@ def run_http(args: argparse.Namespace) -> int:
                 client_secret=client_secret,
                 redirect_uris=redirect_uris,
             )
-        except (OSError, OAuthStoreError, SecretVaultError, ValueError) as exc:
+        except (
+            OSError,
+            OAuthServiceError,
+            OAuthStoreError,
+            SecretVaultError,
+            ValueError,
+        ) as exc:
             print(f"ERROR: OAuth persistence is unavailable: {exc}", file=sys.stderr)
             return 2
         if password_created:
