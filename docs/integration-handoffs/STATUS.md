@@ -5,7 +5,7 @@
 | 02 | complete | 3d8b54c | phase-02.md |
 | 03 | complete | aa3a0f4 | phase-03.md |
 | 04 | complete | 16032c4 | phase-04.md |
-| 05 | pending | - | - |
+| 05 | complete | 6297e4a..24c50a6 | phase-05.md |
 | 06 | pending | - | - |
 | 07 | pending | - | - |
 | 08 | pending | - | - |
