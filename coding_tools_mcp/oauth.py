@@ -7,6 +7,7 @@ import secrets
 import threading
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -202,6 +203,8 @@ class OAuthConfig:
     store: OAuthAuthorizationStore | None = None
     secret_vault: SecretVault | None = None
     refresh_token_ttl: int = 60 * 60 * 24 * 90
+    signing_kid: str | None = None
+    signing_keys: dict[str, bytes] = field(default_factory=dict)
     pending_codes: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_codes_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -311,36 +314,114 @@ def valid_pkce_challenge(code_challenge: str) -> bool:
     return re.fullmatch(r"[A-Za-z0-9_-]{43}", code_challenge) is not None
 
 
-def create_access_token(config: OAuthConfig, server_url: str, *, client_id: str) -> str:
+def oauth_signing_kid(config: OAuthConfig) -> str:
+    return config.signing_kid or f"key-{hashlib.sha256(config.token_secret).hexdigest()[:16]}"
+
+
+def _oauth_signing_key(config: OAuthConfig, kid: str) -> bytes | None:
+    if kid in config.signing_keys:
+        return config.signing_keys[kid]
+    if secrets.compare_digest(kid, oauth_signing_kid(config)):
+        return config.token_secret
+    return None
+
+
+def create_access_token(
+    config: OAuthConfig,
+    server_url: str,
+    *,
+    client_id: str,
+    grant_id: str,
+    scope: str = "mcp",
+    token_mode: str = "standard",
+) -> str:
+    if config.store is None:
+        raise OAuthServiceError("OAuth authorization store is not configured.")
     now = int(time.time())
-    return jwt.encode(
+    expires_at = now + config.token_ttl
+    jti = str(uuid.uuid4())
+    kid = oauth_signing_kid(config)
+    key = _oauth_signing_key(config, kid)
+    if key is None:
+        raise OAuthServiceError("OAuth signing key is unavailable.")
+    token = jwt.encode(
         {
             "iss": server_url,
             "aud": server_url,
-            "sub": client_id,
+            "sub": grant_id,
             "client_id": client_id,
+            "grant_id": grant_id,
             "iat": now,
-            "exp": now + config.token_ttl,
-            "scope": "mcp",
+            "exp": expires_at,
+            "scope": scope,
+            "jti": jti,
         },
-        config.token_secret,
+        key,
         algorithm="HS256",
+        headers={"kid": kid},
     )
+    try:
+        config.store.record_access_token(
+            jti,
+            grant_id,
+            client_id,
+            kid,
+            scope,
+            issued_at=now,
+            expires_at=expires_at,
+            token_mode=token_mode,
+        )
+    except OAuthStoreError as exc:
+        raise OAuthServiceError("OAuth access-token state could not be persisted.") from exc
+    return token
 
 
 def validate_access_token(token: str, config: OAuthConfig, server_url: str) -> bool:
+    if config.store is None:
+        return False
     try:
+        header = jwt.get_unverified_header(token)
+        kid = header.get("kid")
+        if not isinstance(kid, str):
+            return False
+        key = _oauth_signing_key(config, kid)
+        if key is None:
+            return False
         claims = jwt.decode(
             token,
-            config.token_secret,
+            key,
             algorithms=["HS256"],
             audience=server_url,
             issuer=server_url,
+            options={
+                "require": [
+                    "iss",
+                    "aud",
+                    "client_id",
+                    "grant_id",
+                    "iat",
+                    "exp",
+                    "jti",
+                ]
+            },
         )
     except jwt.PyJWTError:
         return False
     client_id = claims.get("client_id")
-    return isinstance(client_id, str) and config.registry.get(client_id) is not None
+    grant_id = claims.get("grant_id")
+    jti = claims.get("jti")
+    if not isinstance(client_id, str) or not client_id:
+        return False
+    if not isinstance(grant_id, str) or not grant_id:
+        return False
+    if not isinstance(jti, str) or not jti:
+        return False
+    if claims.get("sub") != grant_id:
+        return False
+    try:
+        return config.store.access_token_is_active(jti)
+    except OAuthStoreError:
+        return False
 
 
 def _secret_digest(secret: str) -> str:

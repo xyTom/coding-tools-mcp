@@ -5258,8 +5258,21 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             _err("invalid_grant", "PKCE verification failed")
             return
 
+        grant_id = code_data.get("grant_id")
+        if not isinstance(grant_id, str) or not grant_id:
+            _err("server_error", "Authorization grant is unavailable")
+            return
         server_url = resource
-        access_token = create_access_token(cfg, server_url, client_id=client_id)
+        try:
+            access_token = create_access_token(
+                cfg,
+                server_url,
+                client_id=client_id,
+                grant_id=grant_id,
+            )
+        except OAuthServiceError:
+            _err("server_error", "Access-token state could not be persisted")
+            return
         self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
 
     def handle_oauth_register(self) -> None:

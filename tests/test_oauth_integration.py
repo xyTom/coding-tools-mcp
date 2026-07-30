@@ -6,6 +6,8 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import jwt
 import sqlite3
 import unittest
 from contextlib import closing, contextmanager
@@ -13,7 +15,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Iterator
 
-from coding_tools_mcp.oauth import PersistentOAuthClientRegistry
+from coding_tools_mcp.oauth import (
+    PersistentOAuthClientRegistry,
+    create_access_token,
+    create_authorization_grant,
+    oauth_signing_kid,
+    validate_access_token,
+)
 from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
 from coding_tools_mcp.server import (
     MCPHandler,
@@ -91,6 +99,90 @@ class PersistentOAuthClientRegistryTests(unittest.TestCase):
                 hashlib.sha256(b"synthetic-client-secret").hexdigest(),
             )
             self.assertNotIn("synthetic-client-secret", str(record))
+
+
+class PersistentAccessTokenTests(unittest.TestCase):
+    def test_jti_kid_and_revocation_state_are_enforced(self) -> None:
+        with oauth_root() as root:
+            config, _created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password="synthetic-authorize-password",
+                server_url="https://mcp.example",
+                token_ttl=86_400,
+                client_id="token-agent",
+                redirect_uris=("http://127.0.0.1/callback",),
+            )
+            grant_id = create_authorization_grant(
+                config,
+                client_id="token-agent",
+                redirect_uri="http://127.0.0.1/callback",
+                scopes="mcp",
+            )
+            kid = oauth_signing_kid(config)
+            config.store.register_signing_key(
+                kid,
+                hashlib.sha256(config.token_secret).hexdigest(),
+                secret_ref="oauth/token-secret",
+            )
+            token = create_access_token(
+                config,
+                "https://mcp.example",
+                client_id="token-agent",
+                grant_id=grant_id,
+            )
+            header = jwt.get_unverified_header(token)
+            claims = jwt.decode(
+                token,
+                config.token_secret,
+                algorithms=["HS256"],
+                audience="https://mcp.example",
+                issuer="https://mcp.example",
+            )
+            self.assertEqual(header["kid"], kid)
+            self.assertEqual(claims["client_id"], "token-agent")
+            self.assertEqual(claims["grant_id"], grant_id)
+            self.assertEqual(claims["sub"], grant_id)
+            self.assertTrue(claims["jti"])
+            persisted = config.store.list_access_tokens("token-agent")
+            self.assertEqual(persisted[0]["jti"], claims["jti"])
+            self.assertNotIn(token, str(persisted))
+            self.assertTrue(validate_access_token(token, config, "https://mcp.example"))
+
+            config.store.revoke_access_token(claims["jti"], reason="test")
+            self.assertFalse(validate_access_token(token, config, "https://mcp.example"))
+
+            second_grant = create_authorization_grant(
+                config,
+                client_id="token-agent",
+                redirect_uri="http://127.0.0.1/callback",
+                scopes="mcp",
+            )
+            second = create_access_token(
+                config,
+                "https://mcp.example",
+                client_id="token-agent",
+                grant_id=second_grant,
+            )
+            self.assertTrue(validate_access_token(second, config, "https://mcp.example"))
+            config.store.revoke_grant(second_grant, reason="test")
+            self.assertFalse(validate_access_token(second, config, "https://mcp.example"))
+
+            third_grant = create_authorization_grant(
+                config,
+                client_id="token-agent",
+                redirect_uri="http://127.0.0.1/callback",
+                scopes="mcp",
+            )
+            third = create_access_token(
+                config,
+                "https://mcp.example",
+                client_id="token-agent",
+                grant_id=third_grant,
+            )
+            self.assertTrue(validate_access_token(third, config, "https://mcp.example"))
+            config.store.set_client_enabled("token-agent", False, reason="test")
+            self.assertFalse(validate_access_token(third, config, "https://mcp.example"))
 
 
 class PersistentOAuthCompositionTests(unittest.TestCase):
