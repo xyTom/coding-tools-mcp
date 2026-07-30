@@ -14,6 +14,10 @@ from coding_tools_mcp.oauth import (
 )
 from coding_tools_mcp.protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS
 from coding_tools_mcp.server import MCPHandler, Runtime, TOOL_REGISTRY, build_parser
+from coding_tools_mcp.settings_definition import (
+    LEGACY_TOOL_PROFILE_WARNING,
+    migrate_persisted_settings,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,9 +151,19 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertEqual(telemetry, {"default_policy": "upstream_v0.2.2", "change_during_integration": False})
         self.assertIs(secret_stores["shared"], False)
 
-    @unittest.skip("Phase 03: replace this skip after settings migration drops legacy tool_profile values")
     def test_phase03_settings_migration_drops_tool_profile(self) -> None:
-        self.fail("Phase 03 must bind the documented migration cases to the settings implementation")
+        migration = self.contract["legacy_tool_profile_migration"]
+        for case in migration["cases"]:
+            value = case["input"]["tool_profile"]
+            migrated, warnings = migrate_persisted_settings({"tool_profile": value})
+            with self.subTest(tool_profile=value):
+                self.assertNotIn("tool_profile", migrated)
+                self.assertEqual(warnings, (LEGACY_TOOL_PROFILE_WARNING,))
+                self.assertEqual(case["output"]["catalog"], "fixed")
+                self.assertEqual(
+                    case["output"]["warning"],
+                    LEGACY_TOOL_PROFILE_WARNING,
+                )
 
     @unittest.skip("Phase 04: replace this skip after the persistent OAuth Store and migrations are ported")
     def test_phase04_oauth_store_reopens_after_idempotent_migration(self) -> None:
