@@ -5,7 +5,7 @@
 | 02 | complete | 3d8b54c | phase-02.md |
 | 03 | complete | aa3a0f4 | phase-03.md |
 | 04 | complete | 16032c4 | phase-04.md |
-| 05 | complete | 6297e4a..24c50a6 | phase-05.md |
+| 05 | complete | 6297e4a..24c50a6 + 31add85 | phase-05.md + phase-05-refresh-atomicity.md |
 | 06 | complete | 7a5ae53 | phase-06.md |
 | 07 | complete | ce21704 | phase-07.md |
 | 08 | complete | 1928783 | phase-08.md |
