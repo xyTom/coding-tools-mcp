@@ -4124,7 +4124,10 @@ def open_landlock_ruleset(workspace: Path, read_roots: list[str], *, write_roots
 
 def add_landlock_path(ruleset_fd: int, path: Path, allowed_access: int, *, required: bool = True) -> None:
     try:
-        fd = os.open(path, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+        fd = os.open(
+            path,
+            getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0),
+        )
     except OSError as exc:
         if required:
             raise ToolFailure(

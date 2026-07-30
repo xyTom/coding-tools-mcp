@@ -16,6 +16,26 @@ SESSION_BUFFER_BYTES = 524_288
 HARD_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
+def _terminate_windows_process_tree(process: subprocess.Popen[bytes]) -> bool:
+    try:
+        completed = subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if completed.returncode != 0:
+        return False
+    try:
+        process.wait(timeout=2)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return True
+
+
 def terminate_process_group(
     process: subprocess.Popen[bytes],
     signum: signal.Signals,
@@ -23,15 +43,18 @@ def terminate_process_group(
     force: bool = False,
 ) -> None:
     if not hasattr(os, "killpg"):
-        if os.name == "nt" and not force:
-            event = getattr(signal, "CTRL_BREAK_EVENT", None)
-            if event is not None:
-                try:
-                    process.send_signal(event)
-                    process.wait(timeout=1)
-                    return
-                except Exception:
-                    pass
+        if os.name == "nt":
+            if not force:
+                event = getattr(signal, "CTRL_BREAK_EVENT", None)
+                if event is not None:
+                    try:
+                        process.send_signal(event)
+                        process.wait(timeout=1)
+                        return
+                    except Exception:
+                        pass
+            if _terminate_windows_process_tree(process):
+                return
         try:
             if force:
                 process.kill()
@@ -87,10 +110,11 @@ def spawn_process(
             details={"platform": os.name, "retry_hint": "Run the command without tty=true."},
         )
     try:
-        import pty
-
-        master_fd, slave_fd = pty.openpty()
-    except (ImportError, OSError) as exc:
+        openpty = getattr(os, "openpty", None)
+        if openpty is None:
+            raise OSError("POSIX pseudo-terminal support is unavailable.")
+        master_fd, slave_fd = openpty()
+    except OSError as exc:
         raise ToolFailure(
             "TTY_UNSUPPORTED",
             "A POSIX pseudo-terminal could not be created.",
