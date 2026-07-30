@@ -3,8 +3,10 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import sqlite3
 import unittest
 from pathlib import Path
+from contextlib import closing
 from tempfile import TemporaryDirectory
 
 from coding_tools_mcp.oauth import (
@@ -13,6 +15,7 @@ from coding_tools_mcp.oauth import (
     OAuthClientRegistry,
 )
 from coding_tools_mcp.protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS
+from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
 from coding_tools_mcp.server import MCPHandler, Runtime, TOOL_REGISTRY, build_parser
 from coding_tools_mcp.settings_definition import (
     LEGACY_TOOL_PROFILE_WARNING,
@@ -165,9 +168,33 @@ class IntegrationContractTests(unittest.TestCase):
                     LEGACY_TOOL_PROFILE_WARNING,
                 )
 
-    @unittest.skip("Phase 04: replace this skip after the persistent OAuth Store and migrations are ported")
     def test_phase04_oauth_store_reopens_after_idempotent_migration(self) -> None:
-        self.fail("Phase 04 must prove reopen persistence and repeatable transactional migration")
+        oauth = self.contract["oauth"]
+        self.assertEqual(oauth["persistent_store_phase"], 4)
+        self.assertEqual(oauth["migration"], "idempotent_transactional")
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oauth.sqlite3"
+            first = OAuthAuthorizationStore(path, pepper=b"contract-pepper" * 2)
+            first.upsert_client(
+                "contract-agent",
+                redirect_uri="http://127.0.0.1/callback",
+                scopes="mcp",
+            )
+            first.register_signing_key(
+                "contract-key",
+                "contract-fingerprint",
+                secret_ref="oauth-signing/contract-key",
+            )
+            grant_id = first.create_grant("contract-agent", "mcp")
+
+            second = OAuthAuthorizationStore(path, pepper=b"contract-pepper" * 2)
+            third = OAuthAuthorizationStore(path, pepper=b"contract-pepper" * 2)
+            self.assertEqual(second.get_client("contract-agent")["client_id"], "contract-agent")
+            self.assertEqual(third.get_grant(grant_id)["client_id"], "contract-agent")
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("PRAGMA journal_mode=DELETE")
+                conn.commit()
 
     @unittest.skip("Phase 06: replace this skip after Agent-to-Workspace binding occurs at HTTP initialize")
     def test_phase06_http_session_binding_is_immutable_and_fails_closed(self) -> None:
