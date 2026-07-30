@@ -55,6 +55,14 @@ class OAuthClient:
         return secrets.compare_digest(self.secret_digest, _secret_digest(secret))
 
 
+@dataclass(frozen=True)
+class OAuthIdentity:
+    client_id: str
+    grant_id: str
+    workspace_id: str
+    jti: str
+
+
 class OAuthClientRegistry:
     """Thread-safe RFC 7591 client registry for one server process."""
 
@@ -601,17 +609,21 @@ def create_access_token(
     return token
 
 
-def validate_access_token(token: str, config: OAuthConfig, server_url: str) -> bool:
+def authenticate_access_token(
+    token: str,
+    config: OAuthConfig,
+    server_url: str,
+) -> OAuthIdentity | None:
     if config.store is None:
-        return False
+        return None
     try:
         header = jwt.get_unverified_header(token)
         kid = header.get("kid")
         if not isinstance(kid, str):
-            return False
+            return None
         key = _oauth_signing_key(config, kid)
         if key is None:
-            return False
+            return None
         claims = jwt.decode(
             token,
             key,
@@ -631,19 +643,33 @@ def validate_access_token(token: str, config: OAuthConfig, server_url: str) -> b
             },
         )
     except jwt.PyJWTError:
-        return False
+        return None
     client_id = claims.get("client_id")
     grant_id = claims.get("grant_id")
     jti = claims.get("jti")
     if not isinstance(client_id, str) or not client_id:
-        return False
+        return None
     if not isinstance(grant_id, str) or not grant_id:
-        return False
+        return None
     if not isinstance(jti, str) or not jti:
-        return False
+        return None
     if claims.get("sub") != grant_id:
-        return False
-    return config.store.access_token_is_active(jti)
+        return None
+    persisted = config.store.active_access_token_identity(jti)
+    if persisted is None:
+        return None
+    if persisted["client_id"] != client_id or persisted["grant_id"] != grant_id:
+        return None
+    return OAuthIdentity(
+        client_id=client_id,
+        grant_id=grant_id,
+        workspace_id=persisted["workspace_id"],
+        jti=jti,
+    )
+
+
+def validate_access_token(token: str, config: OAuthConfig, server_url: str) -> bool:
+    return authenticate_access_token(token, config, server_url) is not None
 
 
 def _secret_digest(secret: str) -> str:

@@ -812,15 +812,20 @@ class OAuthAuthorizationStore:
                 details={"mode": token_mode},
             )
 
-    def access_token_is_active(self, jti: str, *, now: float | None = None) -> bool:
+    def active_access_token_identity(
+        self,
+        jti: str,
+        *,
+        now: float | None = None,
+    ) -> dict[str, str] | None:
         checked_at = time.time() if now is None else now
         with self._transaction("access-token query") as conn:
             row = conn.execute(
                 """
-                SELECT t.expires_at, t.revoked_at,
+                SELECT t.expires_at, t.revoked_at, t.client_id, t.grant_id,
                        c.enabled AS client_enabled, c.revoked_at AS client_revoked,
                        g.enabled AS grant_enabled, g.revoked_at AS grant_revoked,
-                       k.status AS key_status
+                       g.workspace_id AS workspace_id, k.status AS key_status
                 FROM oauth_access_tokens t
                 JOIN oauth_clients c ON c.client_id=t.client_id
                 JOIN oauth_grants g ON g.grant_id=t.grant_id
@@ -830,7 +835,8 @@ class OAuthAuthorizationStore:
                 (jti,),
             ).fetchone()
             if row is None:
-                return False
+                return None
+            workspace_id = row["workspace_id"]
             active = (
                 row["expires_at"] > checked_at
                 and row["revoked_at"] is None
@@ -839,17 +845,28 @@ class OAuthAuthorizationStore:
                 and bool(row["grant_enabled"])
                 and row["grant_revoked"] is None
                 and row["key_status"] in {"active", "retired"}
+                and isinstance(workspace_id, str)
+                and bool(workspace_id)
             )
-            if active:
-                conn.execute(
-                    """
-                    UPDATE oauth_access_tokens
-                    SET last_used_at=?
-                    WHERE jti=? AND (last_used_at IS NULL OR last_used_at < ?)
-                    """,
-                    (checked_at, jti, checked_at - 60),
-                )
-            return active
+            if not active:
+                return None
+            conn.execute(
+                """
+                UPDATE oauth_access_tokens
+                SET last_used_at=?
+                WHERE jti=? AND (last_used_at IS NULL OR last_used_at < ?)
+                """,
+                (checked_at, jti, checked_at - 60),
+            )
+            return {
+                "client_id": str(row["client_id"]),
+                "grant_id": str(row["grant_id"]),
+                "workspace_id": workspace_id,
+                "jti": jti,
+            }
+
+    def access_token_is_active(self, jti: str, *, now: float | None = None) -> bool:
+        return self.active_access_token_identity(jti, now=now) is not None
 
     def revoke_access_token(self, jti: str, *, reason: str = "administrator") -> bool:
         with self._transaction("access-token revocation", immediate=True) as conn:

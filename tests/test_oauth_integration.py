@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 from coding_tools_mcp.oauth import (
     PersistentOAuthClientRegistry,
+    authenticate_access_token,
     create_access_token,
     create_authorization_grant,
     oauth_signing_kid,
@@ -163,6 +164,12 @@ class PersistentAccessTokenTests(unittest.TestCase):
             persisted = config.store.list_access_tokens("token-agent")
             self.assertEqual(persisted[0]["jti"], claims["jti"])
             self.assertNotIn(token, str(persisted))
+            identity = authenticate_access_token(token, config, "https://mcp.example")
+            self.assertIsNotNone(identity)
+            self.assertEqual(identity.client_id, "token-agent")
+            self.assertEqual(identity.grant_id, grant_id)
+            self.assertEqual(identity.workspace_id, "default")
+            self.assertEqual(identity.jti, claims["jti"])
             self.assertTrue(validate_access_token(token, config, "https://mcp.example"))
 
             config.store.revoke_access_token(claims["jti"], reason="test")
@@ -260,7 +267,7 @@ class BearerFailClosedTests(unittest.TestCase):
                 captured = io.StringIO()
                 with patch.object(
                     config.store,
-                    "access_token_is_active",
+                    "active_access_token_identity",
                     side_effect=OAuthStoreError("synthetic database failure"),
                 ), redirect_stderr(captured):
                     with self.assertRaises(urllib.error.HTTPError) as caught:
