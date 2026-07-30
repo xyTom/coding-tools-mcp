@@ -41,6 +41,7 @@ class OAuthClient:
     token_endpoint_auth_method: str
     client_name: str | None = None
     secret_digest: str | None = None
+    workspace_id: str | None = None
     issued_at: int = field(default_factory=lambda: int(time.time()))
 
     def accepts_redirect(self, redirect_uri: str) -> bool:
@@ -122,8 +123,14 @@ class PersistentOAuthClientRegistry(OAuthClientRegistry):
     falling back to an in-memory registry.
     """
 
-    def __init__(self, store: OAuthAuthorizationStore) -> None:
+    def __init__(
+        self,
+        store: OAuthAuthorizationStore,
+        *,
+        registration_workspace_id: str | None = "default",
+    ) -> None:
         self.store = store
+        self.registration_workspace_id = registration_workspace_id
 
     def add_preregistered(
         self,
@@ -131,9 +138,11 @@ class PersistentOAuthClientRegistry(OAuthClientRegistry):
         redirect_uris: tuple[str, ...],
         *,
         client_secret: str | None,
+        workspace_id: str | None = None,
     ) -> None:
         redirects = validate_redirect_uris(list(redirect_uris))
         method = "client_secret_post" if client_secret is not None else "none"
+        resolved_workspace_id = workspace_id or self.registration_workspace_id
         self.store.upsert_client(
             client_id,
             display_name=client_id,
@@ -144,6 +153,7 @@ class PersistentOAuthClientRegistry(OAuthClientRegistry):
             client_secret_digest=(
                 _secret_digest(client_secret) if client_secret is not None else None
             ),
+            workspace_id=resolved_workspace_id,
         )
 
     def register(self, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -169,6 +179,7 @@ class PersistentOAuthClientRegistry(OAuthClientRegistry):
             client_type="confidential" if client_secret is not None else "public_pkce",
             token_endpoint_auth_method=client.token_endpoint_auth_method,
             client_secret_digest=client.secret_digest,
+            workspace_id=self.registration_workspace_id,
         )
         return _registration_response(client, grant_types, response_types, client_secret)
 
@@ -192,6 +203,11 @@ class PersistentOAuthClientRegistry(OAuthClientRegistry):
             token_endpoint_auth_method=method,
             client_name=str(record.get("display_name") or client_id),
             secret_digest=digest,
+            workspace_id=(
+                str(record["workspace_id"])
+                if isinstance(record.get("workspace_id"), str) and record["workspace_id"]
+                else None
+            ),
             issued_at=int(created_at) if isinstance(created_at, (int, float)) else int(time.time()),
         )
 

@@ -37,7 +37,7 @@ class RefreshTokenResult:
 class OAuthAuthorizationStore:
     """SQLite-backed authorization metadata with fail-closed helpers."""
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: str | Path, *, pepper: bytes) -> None:
         if not isinstance(pepper, bytes) or not pepper:
@@ -124,6 +124,21 @@ class OAuthAuthorizationStore:
                         "UPDATE oauth_clients SET redirect_uris_json=? WHERE client_id=?",
                         (json.dumps([row["redirect_uri"]]), row["client_id"]),
                     )
+                conn.execute("PRAGMA user_version = 3")
+                current = 3
+            if current == 3:
+                client_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(oauth_clients)").fetchall()
+                }
+                grant_columns = {
+                    str(row["name"])
+                    for row in conn.execute("PRAGMA table_info(oauth_grants)").fetchall()
+                }
+                if "workspace_id" not in client_columns:
+                    conn.execute("ALTER TABLE oauth_clients ADD COLUMN workspace_id TEXT")
+                if "workspace_id" not in grant_columns:
+                    conn.execute("ALTER TABLE oauth_grants ADD COLUMN workspace_id TEXT")
                 conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     @classmethod
@@ -239,6 +254,14 @@ class OAuthAuthorizationStore:
         return client_id
 
     @staticmethod
+    def validate_workspace_id(workspace_id: str) -> str:
+        if not isinstance(workspace_id, str) or not 1 <= len(workspace_id) <= 128:
+            raise ValueError("Workspace id must contain 1-128 characters.")
+        if not all(char.isalnum() or char in "._-" for char in workspace_id):
+            raise ValueError("Workspace id contains unsupported characters.")
+        return workspace_id
+
+    @staticmethod
     def validate_redirect_uri(value: str) -> str:
         from urllib.parse import urlsplit, urlunsplit
 
@@ -270,8 +293,11 @@ class OAuthAuthorizationStore:
         client_type: str = "public_pkce",
         token_endpoint_auth_method: str = "none",
         client_secret_digest: str | None = None,
+        workspace_id: str | None = None,
     ) -> None:
         client_id = self.validate_client_id(client_id)
+        if workspace_id is not None:
+            workspace_id = self.validate_workspace_id(workspace_id)
         if redirect_uris is not None and redirect_uri is not None:
             raise ValueError("Specify redirect_uri or redirect_uris, not both.")
         raw_redirects = list(redirect_uris) if redirect_uris is not None else [redirect_uri]
@@ -308,7 +334,7 @@ class OAuthAuthorizationStore:
         with self._transaction("client upsert", immediate=True) as conn:
             existing = conn.execute(
                 """
-                SELECT redirect_uri, redirect_uris_json, enabled
+                SELECT redirect_uri, redirect_uris_json, enabled, workspace_id
                 FROM oauth_clients WHERE client_id = ?
                 """,
                 (client_id,),
@@ -335,8 +361,8 @@ class OAuthAuthorizationStore:
                         client_id, display_name, client_type, redirect_uri,
                         allowed_scopes, created_at, updated_at, first_authorized_at,
                         redirect_uris_json, token_endpoint_auth_method,
-                        client_secret_digest
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                        client_secret_digest, workspace_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         client_id,
@@ -350,6 +376,7 @@ class OAuthAuthorizationStore:
                         redirects_json,
                         token_endpoint_auth_method,
                         client_secret_digest,
+                        workspace_id,
                     ),
                 )
                 self._audit(
@@ -357,7 +384,10 @@ class OAuthAuthorizationStore:
                     "client_authorized",
                     client_id=client_id,
                     actor_kind="user",
-                    details={"redirect_uris": list(normalized_redirects)},
+                    details={
+                        "redirect_uris": list(normalized_redirects),
+                        "workspace_id": workspace_id,
+                    },
                 )
                 return
             if not bool(existing["enabled"]):
@@ -367,7 +397,7 @@ class OAuthAuthorizationStore:
                 UPDATE oauth_clients
                 SET display_name=?, client_type=?, allowed_scopes=?, updated_at=?,
                     redirect_uris_json=?, token_endpoint_auth_method=?,
-                    client_secret_digest=?
+                    client_secret_digest=?, workspace_id=COALESCE(?, workspace_id)
                 WHERE client_id=?
                 """,
                 (
@@ -378,6 +408,7 @@ class OAuthAuthorizationStore:
                     redirects_json,
                     token_endpoint_auth_method,
                     client_secret_digest,
+                    workspace_id,
                     client_id,
                 ),
             )
@@ -389,6 +420,34 @@ class OAuthAuthorizationStore:
                 (client_id,),
             ).fetchone()
         return self._client_payload(row) if row is not None else None
+
+    def set_client_workspace(self, client_id: str, workspace_id: str) -> bool:
+        client_id = self.validate_client_id(client_id)
+        workspace_id = self.validate_workspace_id(workspace_id)
+        with self._transaction("client workspace binding", immediate=True) as conn:
+            row = conn.execute(
+                "SELECT enabled, revoked_at, workspace_id FROM oauth_clients WHERE client_id=?",
+                (client_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            if not bool(row["enabled"]) or row["revoked_at"] is not None:
+                raise OAuthStoreError("OAuth client is not active.")
+            if row["workspace_id"] == workspace_id:
+                return True
+            now = time.time()
+            conn.execute(
+                "UPDATE oauth_clients SET workspace_id=?, updated_at=? WHERE client_id=?",
+                (workspace_id, now, client_id),
+            )
+            self._audit(
+                conn,
+                "client_workspace_bound",
+                client_id=client_id,
+                actor_kind="admin",
+                details={"workspace_id": workspace_id},
+            )
+            return True
 
     def set_client_enabled(
         self,
@@ -457,7 +516,7 @@ class OAuthAuthorizationStore:
         grant_id = str(uuid.uuid4())
         with self._transaction("grant creation", immediate=True) as conn:
             client = conn.execute(
-                "SELECT enabled, revoked_at FROM oauth_clients WHERE client_id=?",
+                "SELECT enabled, revoked_at, workspace_id FROM oauth_clients WHERE client_id=?",
                 (client_id,),
             ).fetchone()
             if (
@@ -466,13 +525,16 @@ class OAuthAuthorizationStore:
                 or client["revoked_at"] is not None
             ):
                 raise OAuthStoreError("OAuth client is not active.")
+            workspace_id = client["workspace_id"]
+            if not isinstance(workspace_id, str) or not workspace_id:
+                raise OAuthStoreError("OAuth client has no authorized Workspace binding.")
             conn.execute(
                 """
                 INSERT INTO oauth_grants(
-                    grant_id, client_id, scopes, created_at, updated_at
-                ) VALUES(?,?,?,?,?)
+                    grant_id, client_id, scopes, workspace_id, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?)
                 """,
-                (grant_id, client_id, scopes, now, now),
+                (grant_id, client_id, scopes, workspace_id, now, now),
             )
             self._audit(
                 conn,
@@ -480,7 +542,7 @@ class OAuthAuthorizationStore:
                 client_id=client_id,
                 grant_id=grant_id,
                 actor_kind="user",
-                details={"scopes": scopes},
+                details={"scopes": scopes, "workspace_id": workspace_id},
             )
         return grant_id
 

@@ -62,6 +62,7 @@ def prepared_store(
         display_name="Agent A",
         redirect_uri="http://127.0.0.1/callback",
         scopes="mcp",
+        workspace_id="workspace-a",
     )
     store.register_signing_key(
         "key-a",
@@ -172,6 +173,38 @@ class OAuthStoreTests(unittest.TestCase):
             self.assertIn("redirect_uris_json", client_columns)
             self.assertIn("token_endpoint_auth_method", client_columns)
             self.assertIn("client_secret_digest", client_columns)
+            self.assertEqual(version, OAuthAuthorizationStore.SCHEMA_VERSION)
+
+    def test_workspace_binding_migration_is_explicit_and_grants_freeze_it(self) -> None:
+        with oauth_root() as root:
+            path = root / "oauth.sqlite3"
+            store = OAuthAuthorizationStore(path, pepper=PEPPER)
+            store.upsert_client(
+                "workspace-agent",
+                redirect_uri="http://127.0.0.1/callback",
+                scopes="mcp",
+            )
+            with self.assertRaisesRegex(OAuthStoreError, "no authorized Workspace binding"):
+                store.create_grant("workspace-agent", "mcp")
+            self.assertTrue(store.set_client_workspace("workspace-agent", "workspace-a"))
+            grant_id = store.create_grant("workspace-agent", "mcp")
+            self.assertEqual(store.get_client("workspace-agent")["workspace_id"], "workspace-a")
+            self.assertEqual(store.get_grant(grant_id)["workspace_id"], "workspace-a")
+
+            self.assertTrue(store.set_client_workspace("workspace-agent", "workspace-b"))
+            second_grant = store.create_grant("workspace-agent", "mcp")
+            self.assertEqual(store.get_grant(grant_id)["workspace_id"], "workspace-a")
+            self.assertEqual(store.get_grant(second_grant)["workspace_id"], "workspace-b")
+            with closing(sqlite3.connect(path)) as conn:
+                client_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(oauth_clients)")
+                }
+                grant_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(oauth_grants)")
+                }
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+            self.assertIn("workspace_id", client_columns)
+            self.assertIn("workspace_id", grant_columns)
             self.assertEqual(version, OAuthAuthorizationStore.SCHEMA_VERSION)
 
     def test_confidential_client_metadata_round_trips_without_plaintext_secret(self) -> None:

@@ -181,6 +181,7 @@ class IntegrationContractTests(unittest.TestCase):
                 "contract-agent",
                 redirect_uri="http://127.0.0.1/callback",
                 scopes="mcp",
+                workspace_id="contract-workspace",
             )
             first.register_signing_key(
                 "contract-key",
