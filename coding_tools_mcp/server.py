@@ -44,11 +44,15 @@ from .oauth import (
     MAX_PENDING_CODES,
     OAUTH_TOKEN_TTL_SECONDS,
     OAuthConfig,
+    PersistentOAuthClientRegistry,
     create_access_token,
     valid_pkce_challenge,
     validate_access_token,
     verify_pkce,
 )
+from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from .secret_vault import SecretVault, SecretVaultError
+from .settings_store import default_settings_dir
 from .patching import (
     AtomicPatchCommitter,
     FileBaseline,
@@ -5364,6 +5368,113 @@ def build_runtime(
 
 
 AUTH_MODE_CHOICES = ("bearer", "noauth", "oauth")
+OAUTH_DB_FILENAME = "oauth.sqlite3"
+OAUTH_SECRET_VAULT_FILENAME = "oauth-secrets.json"
+OAUTH_PASSWORD_SECRET = "oauth/authorization-password"
+OAUTH_TOKEN_SECRET = "oauth/token-secret"
+OAUTH_REFRESH_PEPPER_SECRET = "oauth/refresh-pepper"
+
+
+def _vault_secret(
+    vault: SecretVault,
+    name: str,
+    *,
+    generated_value: Callable[[], str],
+) -> tuple[str, bool]:
+    if name in vault.list_names():
+        return vault.get_secret(name), False
+    value = generated_value()
+    vault.set_secret(name, value)
+    return value, True
+
+
+def _hex_secret(
+    vault: SecretVault,
+    name: str,
+    *,
+    configured_hex: str | None,
+    byte_length: int,
+) -> bytes:
+    if configured_hex:
+        try:
+            value = bytes.fromhex(configured_hex)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be hex-encoded bytes.") from exc
+        if len(value) < byte_length:
+            raise ValueError(f"{name} must contain at least {byte_length} bytes.")
+        return value
+    stored, _created = _vault_secret(
+        vault,
+        name,
+        generated_value=lambda: secrets.token_bytes(byte_length).hex(),
+    )
+    try:
+        value = bytes.fromhex(stored)
+    except ValueError as exc:
+        raise ValueError(f"Secret vault entry {name!r} is not valid hex.") from exc
+    if len(value) < byte_length:
+        raise ValueError(f"Secret vault entry {name!r} is too short.")
+    return value
+
+
+def build_persistent_oauth_config(
+    config_dir: Path,
+    *,
+    master_key: str | None,
+    password: str | None,
+    server_url: str | None,
+    token_ttl: int,
+    token_secret_hex: str | None = None,
+    refresh_pepper_hex: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    redirect_uris: tuple[str, ...] = (),
+) -> tuple[OAuthConfig, bool]:
+    vault = SecretVault(config_dir / OAUTH_SECRET_VAULT_FILENAME, master_key)
+    if not vault.enabled():
+        raise ValueError(
+            f"{ENV_PREFIX}_SECRETS_KEY is required when OAuth persistence is enabled."
+        )
+    resolved_password = password
+    password_created = False
+    if not resolved_password:
+        resolved_password, password_created = _vault_secret(
+            vault,
+            OAUTH_PASSWORD_SECRET,
+            generated_value=lambda: secrets.token_urlsafe(32),
+        )
+    token_secret = _hex_secret(
+        vault,
+        OAUTH_TOKEN_SECRET,
+        configured_hex=token_secret_hex,
+        byte_length=32,
+    )
+    refresh_pepper = _hex_secret(
+        vault,
+        OAUTH_REFRESH_PEPPER_SECRET,
+        configured_hex=refresh_pepper_hex,
+        byte_length=32,
+    )
+    store = OAuthAuthorizationStore(config_dir / OAUTH_DB_FILENAME, pepper=refresh_pepper)
+    registry = PersistentOAuthClientRegistry(store)
+    if client_id:
+        registry.add_preregistered(
+            client_id,
+            redirect_uris or ("http://127.0.0.1/callback",),
+            client_secret=client_secret,
+        )
+    return (
+        OAuthConfig(
+            password=resolved_password,
+            server_url=server_url,
+            token_secret=token_secret,
+            token_ttl=token_ttl,
+            registry=registry,
+            store=store,
+            secret_vault=vault,
+        ),
+        password_created,
+    )
 
 
 def run_http(args: argparse.Namespace) -> int:
@@ -5388,55 +5499,52 @@ def run_http(args: argparse.Namespace) -> int:
     if oauth_mode:
         client_id = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_ID") or None
         client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or None
-        env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD")
-        password = env_password or secrets.token_urlsafe(32)
+        env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD") or None
         server_url = (os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or "").rstrip("/") or None
-        if not env_password:
-            print(f"OAuth authorize password: {password}", file=sys.stderr)
-        raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or ""
-        if raw_secret:
-            try:
-                token_secret = bytes.fromhex(raw_secret)
-            except ValueError:
-                print(
-                    f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_SECRET must be hex-encoded bytes.",
-                    file=sys.stderr,
-                )
-                return 2
-            if len(token_secret) < 32:
-                print(
-                    f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_SECRET must contain at least 32 bytes.",
-                    file=sys.stderr,
-                )
-                return 2
-        else:
-            token_secret = secrets.token_bytes(32)
         try:
-            token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL") or OAUTH_TOKEN_TTL_SECONDS)
+            token_ttl = int(
+                os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL")
+                or OAUTH_TOKEN_TTL_SECONDS
+            )
         except ValueError:
             print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be an integer.", file=sys.stderr)
             return 2
         if not 60 <= token_ttl <= 604_800:
-            print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.", file=sys.stderr)
+            print(
+                f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.",
+                file=sys.stderr,
+            )
             return 2
-        oauth_config = OAuthConfig(
-            password=password,
-            server_url=server_url,
-            token_secret=token_secret,
-            token_ttl=token_ttl,
+        raw_redirects = (
+            os.environ.get(f"{ENV_PREFIX}_OAUTH_REDIRECT_URIS")
+            or "http://127.0.0.1/callback"
         )
-        if client_id:
-            raw_redirects = os.environ.get(f"{ENV_PREFIX}_OAUTH_REDIRECT_URIS") or "http://127.0.0.1/callback"
-            redirect_uris = tuple(item.strip() for item in raw_redirects.split(",") if item.strip())
-            try:
-                oauth_config.registry.add_preregistered(
-                    client_id,
-                    redirect_uris,
-                    client_secret=client_secret,
-                )
-            except ValueError as exc:
-                print(f"ERROR: invalid OAuth redirect URI configuration: {exc}", file=sys.stderr)
-                return 2
+        redirect_uris = tuple(
+            item.strip() for item in raw_redirects.split(",") if item.strip()
+        )
+        try:
+            oauth_config, password_created = build_persistent_oauth_config(
+                default_settings_dir(),
+                master_key=os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"),
+                password=env_password,
+                server_url=server_url,
+                token_ttl=token_ttl,
+                token_secret_hex=(
+                    os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or None
+                ),
+                refresh_pepper_hex=(
+                    os.environ.get(f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_PEPPER")
+                    or None
+                ),
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uris=redirect_uris,
+            )
+        except (OSError, OAuthStoreError, SecretVaultError, ValueError) as exc:
+            print(f"ERROR: OAuth persistence is unavailable: {exc}", file=sys.stderr)
+            return 2
+        if password_created:
+            print(f"OAuth authorize password: {oauth_config.password}", file=sys.stderr)
         if auth_token:
             print(
                 "Auth: dual credentials enabled — both static bearer token and OAuth 2.1 access tokens will be accepted.",

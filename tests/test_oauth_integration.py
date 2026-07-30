@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import threading
+import urllib.request
 import sqlite3
 import unittest
 from contextlib import closing, contextmanager
@@ -10,6 +13,12 @@ from typing import Iterator
 
 from coding_tools_mcp.oauth import PersistentOAuthClientRegistry
 from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
+from coding_tools_mcp.server import (
+    MCPHandler,
+    Runtime,
+    RuntimeHTTPServer,
+    build_persistent_oauth_config,
+)
 
 
 PEPPER = b"phase-05-registry-pepper" * 2
@@ -80,6 +89,79 @@ class PersistentOAuthClientRegistryTests(unittest.TestCase):
                 hashlib.sha256(b"synthetic-client-secret").hexdigest(),
             )
             self.assertNotIn("synthetic-client-secret", str(record))
+
+
+class PersistentOAuthCompositionTests(unittest.TestCase):
+    def test_dcr_client_persists_across_runtime_rebuild_without_refresh_advertising(self) -> None:
+        with oauth_root() as root:
+            config, created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password="synthetic-authorize-password",
+                server_url=None,
+                token_ttl=86_400,
+            )
+            self.assertFalse(created)
+            runtime = Runtime(root, oauth_config=config, transport="http")
+            server = RuntimeHTTPServer(
+                ("127.0.0.1", 0),
+                MCPHandler,
+                runtime,
+                lambda: Runtime(root, oauth_config=config, transport="http"),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            body = json.dumps(
+                {
+                    "client_name": "Persistent DCR Agent",
+                    "redirect_uris": ["http://127.0.0.1/callback"],
+                    "grant_types": ["authorization_code", "refresh_token"],
+                    "response_types": ["code"],
+                    "token_endpoint_auth_method": "none",
+                }
+            ).encode("utf-8")
+            request = urllib.request.Request(
+                f"{base}/oauth/register",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    registered = json.loads(response.read())
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(registered["grant_types"], ["authorization_code"])
+            self.assertEqual(registered["response_types"], ["code"])
+            reopened, _created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password="synthetic-authorize-password",
+                server_url=None,
+                token_ttl=86_400,
+            )
+            stored = reopened.registry.get(str(registered["client_id"]))
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored.client_name, "Persistent DCR Agent")
+            self.assertEqual(
+                stored.redirect_uris,
+                ("http://127.0.0.1/callback",),
+            )
+
+    def test_persistent_oauth_config_requires_secret_vault_key(self) -> None:
+        with oauth_root() as root:
+            with self.assertRaisesRegex(ValueError, "SECRETS_KEY"):
+                build_persistent_oauth_config(
+                    root,
+                    master_key=None,
+                    password="synthetic-authorize-password",
+                    server_url=None,
+                    token_ttl=86_400,
+                )
 
 
 if __name__ == "__main__":

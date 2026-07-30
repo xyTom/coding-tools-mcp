@@ -13,6 +13,7 @@ from typing import Any
 import jwt
 
 from .oauth_store import OAuthAuthorizationStore
+from .secret_vault import SecretVault
 
 
 OAUTH_CODE_TTL_SECONDS = 300
@@ -198,6 +199,9 @@ class OAuthConfig:
     token_secret: bytes
     token_ttl: int = OAUTH_TOKEN_TTL_SECONDS
     registry: OAuthClientRegistry = field(default_factory=OAuthClientRegistry)
+    store: OAuthAuthorizationStore | None = None
+    secret_vault: SecretVault | None = None
+    refresh_token_ttl: int = 60 * 60 * 24 * 90
     pending_codes: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_codes_lock: threading.Lock = field(default_factory=threading.Lock)
 
