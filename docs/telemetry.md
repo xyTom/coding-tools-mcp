@@ -1,68 +1,75 @@
 # Telemetry
 
 coding-tools-mcp collects anonymous usage telemetry to answer two product
-questions: how many installs are active, and which tools succeed, fail, or run
-slowly in the wild. Telemetry is enabled by default and can be disabled at any
-time; disabling it changes nothing else about the server.
+questions: which tool paths fail most often, and which releases become slower.
+The upstream v0.2.2 default is enabled. Telemetry never changes MCP responses and
+delivery failures are dropped silently.
 
 ## How to disable
 
-Any one of the following turns telemetry off completely:
+Any of the following turns telemetry off completely:
 
 ```bash
-export CODING_TOOLS_MCP_TELEMETRY=off   # also accepts 0 / false / no
-export DO_NOT_TRACK=1                    # the cross-tool convention
+export CODING_TOOLS_MCP_TELEMETRY=off   # also accepts 0, false, or no
+export DO_NOT_TRACK=1
 ```
 
-Telemetry is also disabled automatically whenever `CI` is set, and the test
-suite forces it off in `tests/__init__.py`, so CI and test runs never pollute
-usage data. Deleting `~/.coding-tools-mcp/id` resets the anonymous install
-identity.
-
-To see exactly what would be sent without sending it:
+Telemetry is disabled automatically when `CI` is set. Debug mode prints the same
+closed-schema events to stderr instead of sending them:
 
 ```bash
-export CODING_TOOLS_MCP_TELEMETRY=debug  # prints events to stderr instead
+export CODING_TOOLS_MCP_TELEMETRY=debug
 ```
+
+The authenticated Admin status response exposes only:
+
+```json
+{"telemetry": {"mode": "on", "docs": "docs/telemetry.md"}}
+```
+
+The mode is `on`, `off`, or `debug`. Admin does not expose event payloads.
 
 ## What is collected
 
-Events are sent to PostHog (`us.i.posthog.com`) over HTTPS using the standard
-library only. The payload is a closed schema — counters, enums, durations, and
-version strings assembled by one function (`coding_tools_mcp/telemetry.py`).
-It is structurally incapable of carrying paths, arguments, or file contents.
-
-Every event carries: package version, OS platform and architecture, Python
-`major.minor`, transport (`stdio`/`http`), permission mode, MCP protocol
-version, the connecting client's `clientInfo` name and version (truncated to
-64 characters), a random per-session id, and the anonymous install id.
+Events use a closed schema. Every event carries package version, OS platform
+and architecture, Python `major.minor`, transport (`stdio` or `http`), permission
+mode, MCP protocol version, the connecting MCP `clientInfo` name/version
+(truncated to 64 characters), a random telemetry-session identifier, and the
+anonymous install identifier.
 
 | Event | When | Additional properties |
 | --- | --- | --- |
-| `session_start` | MCP `initialize` completes | — |
+| `session_start` | MCP `initialize` completes | none |
 | `tool_error` | a tool call fails (max 20 per session) | tool name, error code, duration ms, consecutive-failure count |
-| `tool_summary` | session ends, one per tool used | calls, ok, errors, per-error-code counts, duration buckets, truncation count |
-| `session_end` | session ends | session duration, total calls, distinct tools, dropped error-event count |
+| `tool_summary` | the Session ends, one per tool used | calls, successes, errors, per-error-code counts, duration buckets, truncation count |
+| `session_end` | the Session ends | Session duration, total calls, distinct tool count, dropped error-event count |
 
-A typical session produces 5–15 events totalling a few kilobytes.
+The random telemetry-session identifier is not an MCP `Mcp-Session-Id`, OAuth
+identity, Workspace identity, or persistent user identifier. Tool calls never
+block on delivery. Events are queued in memory to a daemon thread and error
+events are capped as shown above.
 
 ## What is never collected
 
-File paths, file contents, tool arguments, command lines, environment
-variables, patch bodies, diffs, repository or branch names, workspace
-locations, hostnames, usernames, and IP-derived identity. The install id is a
-random UUID generated locally — never derived from hardware, hostname, or any
-workspace property — so it cannot be reversed into an identity.
+Telemetry does not contain:
 
-`tests/test_telemetry.py` enforces the boundary: a probe session touches files
-with distinctive path substrings and the test asserts none of them appear
-anywhere in the serialized payload, and that a disabled session never reaches
-the sender at all.
+- file or directory paths;
+- repository/branch names, Workspace IDs, OAuth Agent/Client/Grant/token IDs, or MCP `Mcp-Session-Id` values;
+- command lines, arguments, environment values, patch bodies, diffs, or file
+  contents;
+- OAuth bearer/refresh tokens, Admin tokens, client secrets, signing material,
+  Vault references, hashes, or digests;
+- upstream MCP inputs/results;
+- chat/transcript content, model responses, context entries, transcript paths,
+  or conversation summaries.
+
+The install identifier is random and is not derived from a Workspace or user
+property. Delete `~/.coding-tools-mcp/id` to reset it.
 
 ## Delivery guarantees
 
-Events queue in memory on a bounded queue serviced by a daemon thread with a
-3-second send timeout; failures are swallowed and overflow is dropped. Nothing
-is written to stdout (over stdio that is the MCP wire), nothing telemetry-
-related is stored on disk beyond the install id file, and a dead or slow
-telemetry endpoint is invisible to tool calls.
+- stdout is never used for telemetry, so stdio JSON-RPC cannot be polluted;
+- debug events go to stderr;
+- network errors do not fail tool calls;
+- the telemetry endpoint is not reachable through MCP tools;
+- tests enforce the closed schema and privacy boundary.

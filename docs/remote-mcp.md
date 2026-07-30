@@ -1,10 +1,10 @@
 # Remote MCP
 
-`coding-tools-mcp` exposes Streamable HTTP at `/mcp`. Keep it bound to loopback
-and publish it through an HTTPS tunnel. The fixed tool set includes
-`apply_patch` and `exec_command`; there is no reduced read-only catalog, so every
-public deployment must use bearer auth, OAuth, or an external authenticated
-proxy.
+`coding-tools-mcp` exposes Streamable HTTP at `/mcp`. Keep the listener on
+loopback and publish it through an authenticated HTTPS tunnel. The fixed local
+catalog contains `apply_patch` and `exec_command`; there is no reduced read-only
+catalog, so a public endpoint must use static bearer auth, OAuth, or an external
+authenticated proxy.
 
 ## One-command bearer tunnel
 
@@ -14,36 +14,35 @@ curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts
 ```
 
 The script generates a bearer token, starts the server on `127.0.0.1`, and
-prints the HTTPS tunnel URL and header:
-
-```text
-URL: https://<tunnel-host>/mcp
-Header: Authorization: Bearer <token>
-```
-
-From a checkout, the equivalent commands are:
+prints the HTTPS MCP URL and `Authorization` header. From a checkout:
 
 ```bash
 export CODING_TOOLS_MCP_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 CODING_TOOLS_MCP_AUTH_MODE=bearer scripts/tunnel.sh cloudflared /path/to/repo
 ```
 
-The scripts also support `ngrok` and `devtunnel`.
+The tunnel scripts also support `ngrok` and `devtunnel`.
 
-## OAuth 2.1 + dynamic registration
+## Persistent OAuth 2.1
 
-For clients that cannot set a static `Authorization` header but support MCP
-OAuth discovery:
+Start OAuth mode with a stable Secret Vault master key:
 
 ```bash
-CODING_TOOLS_MCP_AUTH_MODE=oauth \
-scripts/tunnel.sh cloudflared /path/to/repo
+export CODING_TOOLS_MCP_SECRETS_KEY='<independent-high-entropy-master-key>'
+export CODING_TOOLS_MCP_SERVER_URL='https://mcp.example.com'
+coding-tools-mcp --oauth-mode --workspace /path/to/repo
 ```
 
-The server implements Authorization Code + PKCE S256 and RFC 7591 dynamic
-client registration. A client discovers and registers itself; operators do not
-need to invent a client ID or copy a client secret into the MCP host. The script
-prints the password that the operator enters on the authorization page.
+The server implements:
+
+- Authorization Code + PKCE S256;
+- RFC 7591 dynamic client registration;
+- exact redirect URI matching;
+- `authorization_code` and `refresh_token` grants;
+- access-token `jti` tracking and exact revocation;
+- refresh-token rotation and family revocation after reuse;
+- active, retired, and revoked signing-key states;
+- persistent Client/Grant/token/key metadata across restart.
 
 Discovery and OAuth endpoints:
 
@@ -54,115 +53,118 @@ Discovery and OAuth endpoints:
 - `POST /oauth/authorize`
 - `POST /oauth/token`
 
-Registration rules:
+Authorization codes remain process-local, single-use, and expire after five
+minutes. Dynamic Client records persist. Registration requests are narrowed to
+the supported grant types (`authorization_code`, `refresh_token`) and response
+type (`code`) instead of being widened silently.
 
-- `redirect_uris` are required, unique, and matched exactly.
-- HTTPS redirects are accepted. HTTP is accepted only for `localhost`,
-  `127.0.0.1`, or `::1` loopback callbacks.
-- Supported token authentication methods are `none`, `client_secret_post`, and
-  `client_secret_basic`. A client must use the method it registered.
-- Client secrets are stored as digests. Public clients rely on mandatory PKCE.
-- Registrations and authorization codes are process-local. A restart requires
-  dynamic clients to register again.
+### Persistent files
 
-Authorization codes are single-use and expire after five minutes. Access tokens
-default to 24 hours and are bound to the registered client and exact MCP
-resource URL.
+The stable configuration directory is selected by
+`CODING_TOOLS_MCP_CONFIG_DIR`, or defaults to:
 
-## OAuth configuration
+- Windows: `%APPDATA%\coding-tools-mcp`
+- POSIX: `$XDG_CONFIG_HOME/coding-tools-mcp` or `~/.config/coding-tools-mcp`
 
-```bash
-# Generated and printed when omitted:
-CODING_TOOLS_MCP_OAUTH_PASSWORD=<authorize-page-password>
+Relevant files are:
 
-# Optional stable public origin, without /mcp:
-CODING_TOOLS_MCP_SERVER_URL=https://mcp.example.com
+- `server-settings.json`
+- `mcp-servers.json`
+- `oauth.sqlite3`
+- `oauth-secrets.json`
+- `server-secrets.json`
+- `transcripts.sqlite3`
 
-# Optional stable HS256 key; hex-encoded bytes:
-CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=<hex-key>
-
-# Optional token lifetime in seconds; default 86400:
-CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=86400
-```
-
-With an ephemeral tunnel, omit `CODING_TOOLS_MCP_SERVER_URL`; the server derives
-the external origin from the request. For a stable hostname, pin it so issuer,
-audience, resource, and discovery URLs remain constant.
-
-The server ignores `Forwarded` and `X-Forwarded-*` by default. Set
-`CODING_TOOLS_MCP_TRUST_PROXY_HEADERS=1` only behind a proxy you control. You can
-also set exact browser origins with the comma-separated
-`CODING_TOOLS_MCP_ALLOWED_ORIGINS` variable.
+`oauth.sqlite3` stores identifiers, status, fingerprints, client-secret digests,
+and peppered refresh-token hashes—not plaintext bearer or refresh tokens.
+Signing material and the authorization-page password are resolved through the
+Secret Vault. If the Store, Vault, master key, or referenced secret is missing or
+corrupt, OAuth startup/request processing fails closed.
 
 ### Optional pre-registered client
 
-Dynamic registration is the default. An operator may additionally pre-register
-one known client:
-
 ```bash
-CODING_TOOLS_MCP_OAUTH_CLIENT_ID=<client-id>
-CODING_TOOLS_MCP_OAUTH_REDIRECT_URIS=https://client.example/callback,http://127.0.0.1/callback
-CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET=<optional-confidential-secret>
+export CODING_TOOLS_MCP_OAUTH_CLIENT_ID='<client-id>'
+export CODING_TOOLS_MCP_OAUTH_REDIRECT_URIS='https://client.example/callback,http://127.0.0.1/callback'
+export CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET='<optional-confidential-secret>'
+export CODING_TOOLS_MCP_OAUTH_WORKSPACE_ID='<workspace-id>'
 ```
 
-If a client ID is configured, its redirect URI list is required operational
-configuration; do not rely on the loopback fallback for a production client.
+Public clients omit the secret and must use PKCE. Confidential clients must use
+the authentication method recorded at registration. Client secrets are returned
+only at creation and stored only as digests.
 
-## HTTP session behavior
+## Workspace mapping
 
-An HTTP client initializes without `Mcp-Session-Id`. The response returns a
-new, unguessable session ID. Every later request must send both:
+OAuth bearer validation produces `client_id`, `grant_id`, `workspace_id`, and
+`jti`. The selected Workspace is frozen when the HTTP Session is initialized.
+The Session's cwd, processes, retained output, project instructions, and local
+path resolution all use that Workspace.
+
+- With exactly one enabled Workspace, old unbound Clients are migrated to that
+  sole default.
+- With multiple enabled Workspaces, a Client must have an explicit mapping in
+  `oauth_client_workspace_bindings` or `CODING_TOOLS_MCP_OAUTH_WORKSPACE_ID`.
+- A Grant copies and freezes the Client's Workspace at authorization time.
+- Missing, disabled, or unauthorized mappings reject authorization or Session
+  creation.
+- Disabling a Workspace rejects new Sessions; existing Sessions retain their
+  frozen binding until they are closed.
+
+## HTTP Session behavior
+
+An HTTP client initializes without `Mcp-Session-Id`. A successful response
+returns a new unguessable Session ID. Later requests send:
 
 ```text
 Mcp-Session-Id: <returned-id>
 MCP-Protocol-Version: 2025-11-25
+Authorization: Bearer <same-authority-context>
 ```
 
-Each ID owns a separate cwd, command-session table, output cache, and runtime
-directory. A second client cannot read or mutate the first client's state.
-`DELETE /mcp` with the session header terminates that one runtime. Sessions are
-bounded and expire after inactivity.
+A second Agent cannot reuse, mutate, or delete another Agent's Session. Each
+Session has an independent cwd, process table, output cache, runtime directory,
+Workspace binding, and Gateway snapshot. `DELETE /mcp` terminates only the
+selected Session.
 
-This implementation returns `405` for `GET /mcp` because it does not provide an
-SSE stream. It rejects JSON-RPC batches and accepts standard
-`notifications/cancelled` messages using `params.requestId`.
+## Gateway and remote tools
 
-## Local checks
+`mcp-servers.json` is read before Runtime initialization. Enabled servers and
+allowlists are frozen into each Runtime. Tools are published as
+`{alias}__{remote_name}`. Local names are reserved; a collision fails closed.
+Saving Gateway configuration through Admin only sets `restart_required`; there
+is no hot reload/start/stop path.
 
-Replace `BASE_URL` with the HTTPS origin, without `/mcp`:
+An upstream tool is a remote capability. Do not describe it as protected by the
+local Workspace path boundary or local command permission mode. Its data access
+and side effects are controlled by the upstream MCP server.
 
-```bash
-curl "$BASE_URL/.well-known/mcp.json"
-curl "$BASE_URL/.well-known/oauth-protected-resource"
-curl "$BASE_URL/.well-known/oauth-authorization-server"
-```
+Gateway `secret_ref` values require the server Secret Vault and a valid
+`CODING_TOOLS_MCP_SECRETS_KEY`; unresolved references fail closed.
 
-For bearer mode, an unauthenticated request must return `401` and a correct token
-must reach MCP initialization:
+## Admin authentication
 
-```bash
-curl "$BASE_URL/mcp" \
-  -H "Authorization: Bearer $CODING_TOOLS_MCP_AUTH_TOKEN" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Content-Type: application/json" \
-  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}'
-```
+`/admin` and `/admin/api` use a dedicated Admin token configured by
+`--admin-token`, `CODING_TOOLS_MCP_ADMIN_TOKEN`, or `admin_token_secret_ref`.
+Ordinary static MCP bearer tokens and OAuth access tokens are not Admin
+credentials. The browser keeps the Admin token in page memory and never writes
+it to the URL or persistent browser storage.
+
+## Proxy and origin settings
+
+For a stable hostname, set `CODING_TOOLS_MCP_SERVER_URL` so issuer, audience,
+resource, and discovery URLs remain stable. Forwarded headers are ignored unless
+`CODING_TOOLS_MCP_TRUST_PROXY_HEADERS=1` is set behind a proxy you control.
+Browser origins must match the validated `CODING_TOOLS_MCP_ALLOWED_ORIGINS`
+list exactly.
 
 ## Security notes
 
-- Never publish `CODING_TOOLS_MCP_AUTH_MODE=noauth`. It is suitable only for a
-  loopback-only local process.
-- Use HTTPS, rotate static bearer tokens, and keep OAuth passwords/signing keys
-  out of committed files.
-- Keep the MCP runtime in `safe` or `trusted`; use `dangerous` only inside an
-  isolated container or VM with a trusted client.
-- An HTTPS tunnel authenticates transport, not code execution. The server's
-  policy and Landlock protections do not replace an external sandbox for
-  untrusted repositories.
-- Avoid `--dangerously-fake-readonly-annotations` on a published endpoint. It
-  reports mutating tools as read-only, so a client on the far side of the tunnel
-  cannot tell from `tools/list` that `apply_patch` and `exec_command` are exposed.
-  The server requires authentication before allowing it over HTTP, but on a shared
-  endpoint the operator who set it and the client who connects may not be the same
-  party. Check `server_info.annotation_override` or the server card's
-  `tools.annotationOverride` to see whether an endpoint is doing this.
+- Never publish `CODING_TOOLS_MCP_AUTH_MODE=noauth`.
+- Use HTTPS and keep bearer tokens, Admin tokens, Vault master keys, OAuth
+  passwords, and signing material out of repositories and logs.
+- Use `dangerous` only inside an external container or VM.
+- `--dangerously-fake-readonly-annotations` does not block mutation; avoid it on
+  shared or public endpoints.
+- Back up the complete stable configuration directory before migration or key
+  operations. See [migration-v0.1-to-v0.2.2.md](migration-v0.1-to-v0.2.2.md).
