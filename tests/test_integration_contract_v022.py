@@ -9,6 +9,7 @@ from pathlib import Path
 from contextlib import closing
 from tempfile import TemporaryDirectory
 
+from coding_tools_mcp import upstream as upstream_module
 from coding_tools_mcp.oauth import (
     OAUTH_GRANT_TYPES_SUPPORTED,
     OAUTH_RESPONSE_TYPES_SUPPORTED,
@@ -18,6 +19,7 @@ from coding_tools_mcp.oauth import (
 from coding_tools_mcp.protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS
 from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
 from coding_tools_mcp.server import MCPHandler, Runtime, TOOL_REGISTRY, build_parser
+from coding_tools_mcp.upstream import UpstreamManager
 from coding_tools_mcp.workspace_binding import WorkspaceBindingError, WorkspaceBindingResolver
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 from tests.test_oauth_store import oauth_root
@@ -201,6 +203,26 @@ class IntegrationContractTests(unittest.TestCase):
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 conn.execute("PRAGMA journal_mode=DELETE")
                 conn.commit()
+
+    def test_phase07_gateway_snapshot_contract_is_machine_readable(self) -> None:
+        gateway = self.contract["gateway"]
+        self.assertEqual(gateway["phase"], 7)
+        self.assertEqual(gateway["namespace"], "{alias}__{remote_name}")
+        self.assertIs(gateway["local_names_reserved"], True)
+        self.assertEqual(gateway["collision"], "fail_closed")
+        self.assertEqual(gateway["snapshot_point"], "runtime_initialize")
+        self.assertIs(gateway["immutable_per_runtime"], True)
+        self.assertIs(gateway["list_changed"], False)
+        self.assertIs(gateway["config_before_initialize"], True)
+        self.assertEqual(gateway["schema"], "preserve_except_public_name")
+        self.assertEqual(gateway["annotations"], "preserve_real")
+        self.assertEqual(gateway["structured_content"], "preserve")
+        self.assertIs(gateway["remote_workspace_boundary_claim"], False)
+        self.assertIs(gateway["session_identity_mutation"], False)
+        self.assertIs(gateway["tool_profile_controls"], False)
+        self.assertFalse(hasattr(UpstreamManager, "start_server"))
+        self.assertFalse(hasattr(UpstreamManager, "stop_server"))
+        self.assertNotIn("tool_profile", inspect.getsource(upstream_module))
 
     def test_phase06_http_session_binding_is_immutable_and_fails_closed(self) -> None:
         binding = self.contract["workspace_binding"]

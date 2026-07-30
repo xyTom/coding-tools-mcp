@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import base64
 import ctypes
 import hashlib
@@ -99,6 +100,12 @@ from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
 from .transport_http import HTTPSessionManager
 from .transport_stdio import serve_stdio
+from .upstream import (
+    UpstreamConfigError,
+    UpstreamConfigSnapshot,
+    UpstreamManager,
+    load_upstream_config_snapshot,
+)
 from .workspace_binding import (
     WorkspaceBinding,
     WorkspaceBindingError,
@@ -1253,6 +1260,7 @@ class Runtime:
         project_context: ProjectContext | None = None,
         workspace_binding: WorkspaceBinding | None = None,
         authorization_context: AuthorizationContext | None = None,
+        upstream_manager: UpstreamManager | None = None,
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
     ) -> None:
@@ -1272,12 +1280,6 @@ class Runtime:
             self.workspace_binding.authorization_method
         )
         self.enable_view_image = enable_view_image
-        self._exposed_tool_names = [
-            name
-            for name, spec in TOOL_REGISTRY.items()
-            if spec.gated_by is None or getattr(self, spec.gated_by)
-        ]
-        self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
         if permission_mode not in PERMISSION_MODE_CHOICES:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -1310,6 +1312,32 @@ class Runtime:
         self.allow_network = allow_network or self.capabilities.network
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
+        self.upstream_manager = upstream_manager or UpstreamManager.empty(
+            PROTOCOL_VERSION,
+            reserved_names=TOOL_REGISTRY,
+        )
+        local_tool_names = [
+            name
+            for name, spec in TOOL_REGISTRY.items()
+            if spec.gated_by is None or getattr(self, spec.gated_by)
+        ]
+        upstream_definitions = self.upstream_manager.tool_definitions()
+        self._upstream_tool_definitions = {
+            str(definition["name"]): definition for definition in upstream_definitions
+        }
+        upstream_tool_names = self.upstream_manager.tool_names()
+        collisions = sorted(set(TOOL_REGISTRY) & set(upstream_tool_names))
+        if collisions:
+            self.upstream_manager.close()
+            raise ToolFailure(
+                "UPSTREAM_TOOL_COLLISION",
+                f"Upstream Gateway collided with reserved local tools: {', '.join(collisions)}",
+                category="configuration",
+            )
+        self._local_tool_name_set = frozenset(local_tool_names)
+        self._upstream_tool_name_set = frozenset(upstream_tool_names)
+        self._exposed_tool_names = [*local_tool_names, *upstream_tool_names]
+        self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
         self.server_instance_id = secrets.token_urlsafe(12)
         self._set_runtime_dir(runtime_dir_for_workspace(self.workspace.root, self.server_instance_id))
         self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(self.workspace.root, self.server_instance_id)
@@ -1359,6 +1387,7 @@ class Runtime:
             if session.process.poll() is None:
                 terminate_process_group(session.process, signal.SIGTERM)
             session.drain_readers()
+        self.upstream_manager.close()
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
         self.telemetry.finish()
 
@@ -1440,15 +1469,27 @@ class Runtime:
         }
 
     def list_tools(self) -> dict[str, Any]:
-        return {
-            "tools": [
-                tool_definition(name, fake_readonly=self.fake_readonly_annotations)
-                for name in self.exposed_tool_names()
-            ]
-        }
+        local_definitions = [
+            tool_definition(name, fake_readonly=self.fake_readonly_annotations)
+            for name in self._exposed_tool_names
+            if name in self._local_tool_name_set
+        ]
+        upstream_definitions = [
+            copy.deepcopy(self._upstream_tool_definitions[name])
+            for name in self._exposed_tool_names
+            if name in self._upstream_tool_name_set
+        ]
+        return {"tools": [*local_definitions, *upstream_definitions]}
 
     def exposed_tool_names(self) -> list[str]:
         return list(self._exposed_tool_names)
+
+    def real_tool_annotations(self, name: str) -> dict[str, Any]:
+        if name in self._local_tool_name_set:
+            return tool_annotations(name, fake_readonly=False)
+        definition = self._upstream_tool_definitions.get(name)
+        annotations = definition.get("annotations") if isinstance(definition, dict) else None
+        return copy.deepcopy(annotations) if isinstance(annotations, dict) else {}
 
     def auth_enabled(self) -> bool:
         return self.auth_token is not None or self.oauth_config is not None
@@ -1516,6 +1557,7 @@ class Runtime:
             },
             "tools": tools,
             "tool_count": len(tools),
+            "upstream": self.upstream_manager.status_payload(),
         }
 
     def call_tool(
@@ -1527,7 +1569,14 @@ class Runtime:
     ) -> dict[str, Any]:
         started_at = time.time()
         args = arguments or {}
-        handler = self._tool_handlers.get(name) if name in self._exposed_tool_name_set else None
+        if name in self._upstream_tool_name_set:
+            result = self.upstream_manager.call_tool(name, args)
+            structured = result.get("structuredContent")
+            payload = copy.deepcopy(structured) if isinstance(structured, dict) else {}
+            payload.setdefault("ok", not bool(result.get("isError")))
+            self.emit_tool_trace(name, args, payload, started_at)
+            return result
+        handler = self._tool_handlers.get(name) if name in self._local_tool_name_set else None
         if handler is None:
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         spec = TOOL_REGISTRY[name]
@@ -4706,7 +4755,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
     names = runtime.exposed_tool_names()
     # Always the real annotations, never the tools/list override: this card is
     # what an operator fetches to find out what the endpoint actually does.
-    annotations = {name: tool_annotations(name, fake_readonly=False) for name in names}
+    annotations = {name: runtime.real_tool_annotations(name) for name in names}
     read_only = [name for name in names if annotations[name].get("readOnlyHint") is True]
     mutating = [name for name in names if annotations[name].get("readOnlyHint") is not True]
     payload = {
@@ -5552,6 +5601,7 @@ def build_runtime(
     project_context: ProjectContext | None = None,
     workspace_binding: WorkspaceBinding | None = None,
     authorization_context: AuthorizationContext | None = None,
+    upstream_manager: UpstreamManager | None = None,
     transport: str = "stdio",
 ) -> Runtime:
     workspace = (
@@ -5559,20 +5609,26 @@ def build_runtime(
         if workspace_binding is not None
         else Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
     )
-    runtime = Runtime(
-        workspace,
-        enable_view_image=args.enable_view_image,
-        permission_mode=runtime_policy.permission_mode,
-        shell_env_policy=runtime_policy.shell_env_policy,
-        allow_network=runtime_policy.allow_network,
-        auth_token=auth_token,
-        oauth_config=oauth_config,
-        project_context=project_context,
-        workspace_binding=workspace_binding,
-        authorization_context=authorization_context,
-        fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
-        transport=transport,
-    )
+    try:
+        runtime = Runtime(
+            workspace,
+            enable_view_image=args.enable_view_image,
+            permission_mode=runtime_policy.permission_mode,
+            shell_env_policy=runtime_policy.shell_env_policy,
+            allow_network=runtime_policy.allow_network,
+            auth_token=auth_token,
+            oauth_config=oauth_config,
+            project_context=project_context,
+            workspace_binding=workspace_binding,
+            authorization_context=authorization_context,
+            upstream_manager=upstream_manager,
+            fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
+            transport=transport,
+        )
+    except BaseException:
+        if upstream_manager is not None:
+            upstream_manager.close()
+        raise
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
             "WARNING: permission_mode=dangerous disables MCP safety gates. Use only inside an isolated container or VM.",
@@ -5716,6 +5772,7 @@ def build_persistent_oauth_config(
 
 
 SERVER_SETTINGS_FILENAME = "server-settings.json"
+UPSTREAM_CONFIG_FILENAME = "mcp-servers.json"
 
 
 def load_workspace_startup(
@@ -5730,6 +5787,31 @@ def load_workspace_startup(
     )
     catalog = WorkspaceCatalog.from_settings(settings, fallback_root)
     return config_dir, settings, catalog
+
+
+def load_upstream_startup(
+    args: argparse.Namespace,
+    config_dir: Path,
+) -> UpstreamConfigSnapshot:
+    explicit = (
+        getattr(args, "upstream_config", None)
+        or os.environ.get(f"{ENV_PREFIX}_UPSTREAM_CONFIG")
+        or None
+    )
+    if explicit:
+        return load_upstream_config_snapshot(Path(str(explicit)))
+    default_path = config_dir / UPSTREAM_CONFIG_FILENAME
+    if not default_path.exists():
+        return UpstreamConfigSnapshot.empty()
+    return load_upstream_config_snapshot(default_path)
+
+
+def build_upstream_manager(snapshot: UpstreamConfigSnapshot) -> UpstreamManager:
+    return UpstreamManager.from_snapshot(
+        snapshot,
+        protocol_version=PROTOCOL_VERSION,
+        reserved_names=TOOL_REGISTRY,
+    )
 
 
 def apply_oauth_workspace_bindings(
@@ -5770,12 +5852,14 @@ class BoundRuntimeFactory:
         *,
         auth_token: str | None,
         oauth_config: OAuthConfig | None,
+        upstream_snapshot: UpstreamConfigSnapshot | None = None,
     ) -> None:
         self.args = args
         self.runtime_policy = runtime_policy
         self.resolver = resolver
         self.auth_token = auth_token
         self.oauth_config = oauth_config
+        self.upstream_snapshot = upstream_snapshot or UpstreamConfigSnapshot.empty()
         self._project_contexts: dict[tuple[str, str], ProjectContext] = {}
         self._lock = threading.Lock()
 
@@ -5791,17 +5875,26 @@ class BoundRuntimeFactory:
 
     def __call__(self, context: AuthorizationContext) -> Runtime:
         binding = self.resolver.resolve_http(context.method, context.oauth_identity)
-        return build_runtime(
-            self.args,
-            self.runtime_policy,
-            auth_token=self.auth_token,
-            oauth_config=self.oauth_config,
-            emit_warning=False,
-            project_context=self.project_context(binding),
-            workspace_binding=binding,
-            authorization_context=context,
-            transport="http",
-        )
+        try:
+            upstream_manager = build_upstream_manager(self.upstream_snapshot)
+        except UpstreamConfigError as exc:
+            raise RuntimeError("Upstream Gateway initialization failed.") from exc
+        try:
+            return build_runtime(
+                self.args,
+                self.runtime_policy,
+                auth_token=self.auth_token,
+                oauth_config=self.oauth_config,
+                emit_warning=False,
+                project_context=self.project_context(binding),
+                workspace_binding=binding,
+                authorization_context=context,
+                upstream_manager=upstream_manager,
+                transport="http",
+            )
+        except BaseException:
+            upstream_manager.close()
+            raise
 
 
 def run_http(args: argparse.Namespace) -> int:
@@ -5818,12 +5911,14 @@ def run_http(args: argparse.Namespace) -> int:
             startup_settings.get("oauth_client_workspace_bindings"),
             workspace_catalog,
         )
+        upstream_snapshot = load_upstream_startup(args, config_dir)
     except (
         SettingsStoreError,
+        UpstreamConfigError,
         WorkspaceCatalogError,
         ValueError,
     ) as exc:
-        print(f"ERROR: Workspace configuration is unavailable: {exc}", file=sys.stderr)
+        print(f"ERROR: Startup configuration is unavailable: {exc}", file=sys.stderr)
         return 2
     workspace_resolver = WorkspaceBindingResolver(workspace_catalog)
 
@@ -5948,6 +6043,11 @@ def run_http(args: argparse.Namespace) -> int:
         default_workspace.root,
         "control",
     )
+    try:
+        control_upstream = build_upstream_manager(upstream_snapshot)
+    except UpstreamConfigError as exc:
+        print(f"ERROR: Upstream Gateway configuration is unavailable: {exc}", file=sys.stderr)
+        return 2
     runtime = build_runtime(
         args,
         runtime_policy,
@@ -5956,6 +6056,7 @@ def run_http(args: argparse.Namespace) -> int:
         project_context=load_project_context(control_binding.root),
         workspace_binding=control_binding,
         authorization_context=AuthorizationContext("control"),
+        upstream_manager=control_upstream,
         transport="http",
     )
     runtime_factory = BoundRuntimeFactory(
@@ -5964,6 +6065,7 @@ def run_http(args: argparse.Namespace) -> int:
         workspace_resolver,
         auth_token=auth_token,
         oauth_config=oauth_config,
+        upstream_snapshot=upstream_snapshot,
     )
 
     server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime, runtime_factory)
@@ -5989,15 +6091,18 @@ def run_http(args: argparse.Namespace) -> int:
 def run_stdio(args: argparse.Namespace) -> int:
     try:
         runtime_policy = runtime_policy_from_args(args)
-        _config_dir, _settings, workspace_catalog = load_workspace_startup(args)
+        config_dir, _settings, workspace_catalog = load_workspace_startup(args)
         binding = WorkspaceBindingResolver(workspace_catalog).resolve_stdio()
+        upstream_snapshot = load_upstream_startup(args, config_dir)
+        upstream_manager = build_upstream_manager(upstream_snapshot)
     except (
         SettingsStoreError,
+        UpstreamConfigError,
         WorkspaceBindingError,
         WorkspaceCatalogError,
         ValueError,
     ) as exc:
-        print(f"ERROR: Workspace configuration is unavailable: {exc}", file=sys.stderr)
+        print(f"ERROR: Startup configuration is unavailable: {exc}", file=sys.stderr)
         return 2
     runtime = build_runtime(
         args,
@@ -6005,6 +6110,7 @@ def run_stdio(args: argparse.Namespace) -> int:
         project_context=load_project_context(binding.root),
         workspace_binding=binding,
         authorization_context=AuthorizationContext("stdio"),
+        upstream_manager=upstream_manager,
         transport="stdio",
     )
     return serve_stdio(runtime)
@@ -6013,6 +6119,14 @@ def run_stdio(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve workspace-confined coding tools over MCP.")
     parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
+    parser.add_argument(
+        "--upstream-config",
+        default=None,
+        help=(
+            "JSON config for upstream MCP Gateway servers; defaults to "
+            f"{ENV_PREFIX}_UPSTREAM_CONFIG or the stable config directory/{UPSTREAM_CONFIG_FILENAME}"
+        ),
+    )
     parser.add_argument(
         "--host",
         default=os.environ.get(f"{ENV_PREFIX}_HOST") or "127.0.0.1",
