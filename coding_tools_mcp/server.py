@@ -44,8 +44,10 @@ from .oauth import (
     MAX_PENDING_CODES,
     OAUTH_TOKEN_TTL_SECONDS,
     OAuthConfig,
+    OAuthServiceError,
     PersistentOAuthClientRegistry,
     create_access_token,
+    create_authorization_grant,
     valid_pkce_challenge,
     validate_access_token,
     verify_pkce,
@@ -5137,6 +5139,16 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not secrets.compare_digest(password, cfg.password):
             fail("Invalid password", status=401)
             return
+        try:
+            grant_id = create_authorization_grant(
+                cfg,
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                scopes="mcp",
+            )
+        except OAuthServiceError:
+            fail("OAuth authorization store is unavailable", status=503)
+            return
 
         code = secrets.token_urlsafe(32)
         now = time.time()
@@ -5151,6 +5163,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "client_id": client_id,
                 "redirect_uri": redirect_uri,
                 "state": state,
+                "grant_id": grant_id,
                 "expires_at": now + OAUTH_CODE_TTL_SECONDS,
                 "server_url": self.oauth_base_url(),
                 "resource": resource.rstrip("/"),

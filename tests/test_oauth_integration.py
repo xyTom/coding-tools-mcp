@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import urllib.error
+import urllib.parse
 import urllib.request
 import sqlite3
 import unittest
@@ -151,6 +153,73 @@ class PersistentOAuthCompositionTests(unittest.TestCase):
                 stored.redirect_uris,
                 ("http://127.0.0.1/callback",),
             )
+
+    def test_authorization_approval_persists_grant_before_issuing_code(self) -> None:
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+                return None
+
+        with oauth_root() as root:
+            config, _created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password="synthetic-authorize-password",
+                server_url=None,
+                token_ttl=86_400,
+                client_id="grant-agent",
+                redirect_uris=("http://127.0.0.1/callback",),
+            )
+            runtime = Runtime(root, oauth_config=config, transport="http")
+            server = RuntimeHTTPServer(
+                ("127.0.0.1", 0),
+                MCPHandler,
+                runtime,
+                lambda: Runtime(root, oauth_config=config, transport="http"),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            body = urllib.parse.urlencode(
+                {
+                    "client_id": "grant-agent",
+                    "redirect_uri": "http://127.0.0.1/callback",
+                    "code_challenge": "A" * 43,
+                    "code_challenge_method": "S256",
+                    "state": "state-a",
+                    "resource": base,
+                    "password": "synthetic-authorize-password",
+                }
+            ).encode("ascii")
+            request = urllib.request.Request(
+                f"{base}/oauth/authorize",
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            opener = urllib.request.build_opener(NoRedirect)
+            try:
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    opener.open(request, timeout=5)
+                self.assertEqual(caught.exception.code, 302)
+                self.assertIn("code=", caught.exception.headers["Location"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            grants = config.store.list_grants("grant-agent")
+            self.assertEqual(len(grants), 1)
+            self.assertEqual(grants[0]["scopes"], "mcp")
+            reopened, _created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password="synthetic-authorize-password",
+                server_url=None,
+                token_ttl=86_400,
+                client_id="grant-agent",
+                redirect_uris=("http://127.0.0.1/callback",),
+            )
+            self.assertEqual(reopened.store.list_grants("grant-agent"), grants)
 
     def test_persistent_oauth_config_requires_secret_vault_key(self) -> None:
         with oauth_root() as root:

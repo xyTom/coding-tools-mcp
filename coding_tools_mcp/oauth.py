@@ -12,7 +12,7 @@ from typing import Any
 
 import jwt
 
-from .oauth_store import OAuthAuthorizationStore
+from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
 from .secret_vault import SecretVault
 
 
@@ -204,6 +204,28 @@ class OAuthConfig:
     refresh_token_ttl: int = 60 * 60 * 24 * 90
     pending_codes: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_codes_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class OAuthServiceError(RuntimeError):
+    """Persistent OAuth state cannot safely complete the requested operation."""
+
+
+def create_authorization_grant(
+    config: OAuthConfig,
+    *,
+    client_id: str,
+    redirect_uri: str,
+    scopes: str,
+) -> str:
+    if config.store is None:
+        raise OAuthServiceError("OAuth authorization store is not configured.")
+    client = config.registry.get(client_id)
+    if client is None or not client.accepts_redirect(redirect_uri):
+        raise OAuthServiceError("OAuth client or redirect URI is not active.")
+    try:
+        return config.store.create_grant(client_id, scopes)
+    except (OAuthStoreError, ValueError) as exc:
+        raise OAuthServiceError("OAuth authorization store is unavailable.") from exc
 
 
 def validate_redirect_uris(value: Any) -> tuple[str, ...]:

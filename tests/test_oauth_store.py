@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
+import shutil
 import sqlite3
+import tempfile
+import time
 import threading
 import unittest
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from coding_tools_mcp.oauth_store import (
@@ -24,18 +27,26 @@ FUTURE = 4_000_000_000.0
 
 @contextmanager
 def oauth_root() -> Iterator[Path]:
-    with TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        try:
-            yield root
-        finally:
-            database = root / "oauth.sqlite3"
-            if database.exists():
-                with closing(sqlite3.connect(database)) as conn:
-                    conn.execute("PRAGMA busy_timeout = 5000")
-                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    conn.execute("PRAGMA journal_mode=DELETE")
-                    conn.commit()
+    root = Path(tempfile.mkdtemp())
+    try:
+        yield root
+    finally:
+        database = root / "oauth.sqlite3"
+        if database.exists():
+            with closing(sqlite3.connect(database)) as conn:
+                conn.execute("PRAGMA busy_timeout = 5000")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("PRAGMA journal_mode=DELETE")
+                conn.commit()
+        for attempt in range(20):
+            try:
+                shutil.rmtree(root)
+                break
+            except OSError as exc:
+                retryable = os.name == "nt" and getattr(exc, "winerror", None) in {5, 32, 145}
+                if not retryable or attempt == 19:
+                    raise
+                time.sleep(0.05)
 
 
 def prepared_store(
