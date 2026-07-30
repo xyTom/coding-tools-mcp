@@ -146,6 +146,28 @@ must never describe this switch as safe or genuinely read-only.
 - Allowed origins use `normalize_allowed_origins` for startup, Admin validation,
   persistence, and HTTP request checks.
 
+## Chat, transcript, and Codex session persistence
+
+- Chat conversations, messages, durable context entries, and imported Codex
+  sessions are keyed by explicit Workspace ID. Conversation, message, context,
+  session, query, cache, and deletion keys never fall back to a global row ID.
+- Ordinary callers use a `WorkspaceTranscriptService` fixed to the immutable
+  Workspace binding already established for their MCP Session. Cross-Workspace
+  listing, import, clear, and deletion remain dedicated Admin operations.
+- Codex session roots are relative paths inside a registered Workspace. Absolute
+  paths, `..`, symlink/reparse-point escapes, disabled/unknown Workspaces, and
+  files outside the selected root fail closed.
+- Session scanning enforces depth, file-count, per-file byte, total-byte, and
+  message-count limits. Invalid encoding, locked files, truncated JSONL, and
+  malformed individual records are represented as per-file or per-line errors
+  without failing the entire page.
+- List APIs return summaries and bounded pagination. Full message/context body is
+  returned only by an explicit Workspace-and-conversation detail request.
+- Message, context, conversation, and imported-session deletion uses stable IDs,
+  is idempotent, and returns actual affected counts.
+- Chat text, transcript paths, commands, model responses, and summaries are not
+  added to telemetry or ordinary logs.
+
 ## Telemetry and secret-store boundaries
 
 - Integration preserves the upstream v0.2.2 telemetry default: anonymous
@@ -258,6 +280,19 @@ The following block is consumed by the Phase 02 contract tests.
     "oauth_actions": "exact_id_idempotent_affected_count_audit_event",
     "workspace_validation": "workspace_catalog",
     "allowed_origins_source": "coding_tools_mcp.settings_definition.normalize_allowed_origins"
+  },
+  "chat_persistence": {
+    "phase": 9,
+    "workspace_keyed": true,
+    "ordinary_scope": "immutable_workspace_service",
+    "global_operations_authentication": "dedicated_admin_token",
+    "scan_roots": "registered_workspace_relative_only",
+    "scan_limits": ["depth", "files", "file_bytes", "total_bytes", "messages"],
+    "malformed_record": "item_error_continue",
+    "list_default": "summary_paginated",
+    "full_content": "explicit_detail_only",
+    "delete": "stable_id_workspace_keyed_idempotent_affected_count",
+    "telemetry_content": false
   },
   "telemetry": {
     "default_policy": "upstream_v0.2.2",

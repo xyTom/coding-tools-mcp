@@ -30,6 +30,7 @@ from coding_tools_mcp.server import (
     upstream_secret_resolver,
 )
 from coding_tools_mcp.settings_store import ServerSettingsStore
+from coding_tools_mcp.transcript import TranscriptStore
 from coding_tools_mcp.upstream import UpstreamConfigSnapshot, UpstreamServerConfig
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 
@@ -332,6 +333,7 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                 gateway_path=root / "gateway.json",
                 active_gateway_revision=document_revision({"servers": {}}),
                 secret_vault=SecretVault(root / "vault.json", "key"),
+                transcript_store=TranscriptStore(root / "transcripts.sqlite3"),
             )
             runtime = Runtime(workspace, auth_token="ordinary-mcp-token", transport="http")
             server = RuntimeHTTPServer(
@@ -385,6 +387,16 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                     )
                 self.assertEqual(write_denied.exception.code, 401)
                 self.assertEqual(service.settings_payload()["persisted_revision"], before)
+                with self.assertRaises(urllib.error.HTTPError) as delete_denied:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            f"http://127.0.0.1:{server.server_address[1]}/admin/api/chat/messages/ws-any/message-any",
+                            headers={"Authorization": "Bearer ordinary-mcp-token"},
+                            method="DELETE",
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(delete_denied.exception.code, 401)
                 with urllib.request.urlopen(
                     urllib.request.Request(
                         url,

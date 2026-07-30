@@ -11,6 +11,8 @@ from pathlib import Path
 from contextlib import closing
 from tempfile import TemporaryDirectory
 
+from coding_tools_mcp import codex_sessions as codex_sessions_module
+from coding_tools_mcp import transcript as transcript_module
 from coding_tools_mcp import upstream as upstream_module
 from coding_tools_mcp.oauth import (
     OAUTH_GRANT_TYPES_SUPPORTED,
@@ -184,6 +186,25 @@ class IntegrationContractTests(unittest.TestCase):
         source = inspect.getsource(AdminService)
         self.assertNotRegex(source, r"\b(?:SELECT|INSERT|UPDATE|DELETE FROM|PRAGMA)\b")
         self.assertNotIn("reload_upstream", source)
+
+    def test_phase09_chat_persistence_contract_is_machine_readable(self) -> None:
+        chat = self.contract["chat_persistence"]
+        self.assertEqual(chat["phase"], 9)
+        self.assertIs(chat["workspace_keyed"], True)
+        self.assertEqual(chat["ordinary_scope"], "immutable_workspace_service")
+        self.assertEqual(chat["global_operations_authentication"], "dedicated_admin_token")
+        self.assertEqual(chat["scan_roots"], "registered_workspace_relative_only")
+        self.assertEqual(
+            chat["scan_limits"],
+            ["depth", "files", "file_bytes", "total_bytes", "messages"],
+        )
+        self.assertEqual(chat["malformed_record"], "item_error_continue")
+        self.assertEqual(chat["list_default"], "summary_paginated")
+        self.assertEqual(chat["full_content"], "explicit_detail_only")
+        self.assertIs(chat["telemetry_content"], False)
+        source = inspect.getsource(transcript_module) + inspect.getsource(codex_sessions_module)
+        self.assertNotIn("telemetry", source.lower())
+        self.assertIn("workspace_id", source)
 
     def test_phase03_settings_migration_drops_tool_profile(self) -> None:
         migration = self.contract["legacy_tool_profile_migration"]

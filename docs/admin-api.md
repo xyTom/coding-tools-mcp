@@ -36,6 +36,18 @@ All responses use `Cache-Control: no-store`, apply the same validated allowed-or
 | GET | `/admin/api/workspaces/{id}/check` | Check only a catalog Workspace ID; arbitrary paths are not accepted. |
 | GET | `/admin/api/oauth/{collection}` | List redacted Clients, Grants, Tokens, Refresh Families, Signing Keys, or Audit Events. |
 | POST | `/admin/api/oauth/{resource}/{id}/{action}` | Perform an exact-ID idempotent OAuth action. |
+| GET | `/admin/api/chat/conversations` | Paginated conversation summaries; optional registered `workspace_id`. |
+| GET | `/admin/api/chat/conversations/{workspace_id}/{conversation_id}` | Explicit paginated message/context detail. |
+| POST | `/admin/api/chat/conversations/{workspace_id}/{conversation_id}/messages` | Record messages in one registered Workspace. |
+| POST | `/admin/api/chat/conversations/{workspace_id}/{conversation_id}/context` | Record durable context in one registered Workspace. |
+| DELETE | `/admin/api/chat/messages/{workspace_id}/{message_id}` | Stable-ID idempotent message deletion. |
+| DELETE | `/admin/api/chat/context/{workspace_id}/{context_id}` | Stable-ID idempotent context deletion. |
+| DELETE | `/admin/api/chat/conversations/{workspace_id}/{conversation_id}` | Delete one Workspace-scoped conversation. |
+| POST | `/admin/api/chat/workspaces/{workspace_id}/clear` | Clear chat/session persistence for one registered Workspace. |
+| POST | `/admin/api/codex/sessions/scan` | Bounded scan of relative roots inside a registered Workspace. |
+| POST | `/admin/api/codex/sessions/import` | Import explicitly selected candidate IDs. |
+| GET | `/admin/api/codex/sessions` | Paginated imported-session summaries. |
+| DELETE | `/admin/api/codex/sessions/{workspace_id}/{session_id}` | Stable-ID idempotent imported-session deletion. |
 
 OAuth collections are `clients`, `grants`, `tokens`, `refresh-families`, `signing-keys`, and `audit`. Supported actions are Client `enable`/`disable`, Grant/Token/Refresh Family `revoke`, and Signing Key `activate`/`retire`/`revoke`.
 
@@ -67,3 +79,11 @@ Gateway writes only update `mcp-servers.json`; they never start, stop, or reload
 ## Secret boundary
 
 Responses never include client-secret digests, bearer or refresh token plaintext, signing-key secret references, Vault values, or upstream credentials. Gateway `secret_ref` entries are accepted only when the server Secret Vault is enabled and the reference resolves. Startup and Admin validation fail closed otherwise.
+
+## Chat and session persistence
+
+Conversation lists are summary-only and paginated. Message and context content is returned only by the explicit conversation-detail endpoint. Every request that addresses stored content includes a registered Workspace ID; unknown or disabled Workspaces are rejected.
+
+Codex scan roots are relative to the selected Workspace. The API rejects absolute paths, `..`, and escapes through symlinks or reparse points. Scan requests may set bounded `max_depth`, `max_files`, `max_file_bytes`, `max_total_bytes`, and `max_messages` values. Malformed or partially written JSONL records appear as item errors while other candidates remain available.
+
+All delete and clear routes require the dedicated Admin credential, are idempotent, and return actual affected counts. Ordinary MCP bearer and OAuth credentials do not authorize these routes.

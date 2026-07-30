@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
+from .codex_sessions import CodexSessionError, CodexSessionScanner, ScanPolicy
 from .oauth_store import OAuthAuthorizationStore
 from .secret_vault import SecretVault, SecretVaultError
 from .settings_definition import (
@@ -21,6 +22,7 @@ from .settings_definition import (
     schema_payload,
 )
 from .settings_store import ServerSettingsStore, SettingsStoreError, sanitize_settings
+from .transcript import TranscriptStore, TranscriptStoreError, WorkspaceScope
 from .upstream import UpstreamConfigError, parse_server_config
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 
@@ -227,6 +229,8 @@ class AdminService:
         secret_vault: SecretVault,
         oauth_store: OAuthAuthorizationStore | None = None,
         active_gateway_status: Callable[[], dict[str, Any]] | None = None,
+        transcript_store: TranscriptStore | None = None,
+        session_scanner: CodexSessionScanner | None = None,
     ) -> None:
         self.settings_store = settings_store
         self.active_settings = _json_copy(active_settings)
@@ -236,6 +240,8 @@ class AdminService:
         self.secret_vault = secret_vault
         self.oauth_store = oauth_store
         self.active_gateway_status = active_gateway_status
+        self.transcript_store = transcript_store
+        self.session_scanner = session_scanner or CodexSessionScanner()
         self._settings_lock = threading.Lock()
         self._gateway_lock = threading.Lock()
 
@@ -246,6 +252,7 @@ class AdminService:
             "settings": {"available": True},
             "oauth": {"available": self.oauth_store is not None},
             "gateway": {"available": True, "dynamic_reload": False},
+            "chat": {"available": self.transcript_store is not None},
             "vault": {"enabled": self.secret_vault.enabled()},
         }
 
@@ -576,6 +583,158 @@ class AdminService:
             },
         }
 
+    def chat_conversations(self, query: dict[str, str]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        workspace_id = query.get("workspace_id") or None
+        if workspace_id is not None:
+            self._workspace_scope(workspace_id)
+        page = _query_int(query, "page", 1)
+        page_size = _query_int(query, "page_size", 50)
+        payload = store.list_conversations(
+            workspace_id,
+            page=page,
+            page_size=page_size,
+            query=query.get("query") or None,
+        )
+        return {"ok": True, **payload}
+
+    def chat_conversation_detail(self, workspace_id: str, conversation_id: str, query: dict[str, str]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        payload = store.conversation_detail(
+            workspace_id,
+            conversation_id,
+            message_page=_query_int(query, "message_page", 1),
+            message_page_size=_query_int(query, "message_page_size", 100),
+            context_page=_query_int(query, "context_page", 1),
+            context_page_size=_query_int(query, "context_page_size", 100),
+        )
+        if payload is None:
+            raise AdminNotFoundError("Conversation is not present in the selected Workspace.")
+        return {"ok": True, **payload}
+
+    def chat_record_messages(self, workspace_id: str, conversation_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            raise AdminServiceError("messages must be a list.")
+        return {
+            "ok": True,
+            **store.record_messages(
+                workspace_id,
+                conversation_id,
+                messages,
+                title=body.get("title"),
+                source=body.get("source") or "admin-api",
+            ),
+        }
+
+    def chat_record_context(self, workspace_id: str, conversation_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        entries = body.get("entries")
+        if not isinstance(entries, list):
+            raise AdminServiceError("entries must be a list.")
+        return {
+            "ok": True,
+            **store.record_context(
+                workspace_id,
+                conversation_id,
+                entries,
+                title=body.get("title"),
+                source=body.get("source") or "admin-api",
+            ),
+        }
+
+    def chat_delete(self, resource: str, workspace_id: str, identifier: str) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        if resource == "messages":
+            result = store.delete_message(workspace_id, identifier)
+        elif resource == "context":
+            result = store.delete_context(workspace_id, identifier)
+        elif resource == "conversations":
+            result = store.delete_conversation(workspace_id, identifier)
+        elif resource == "sessions":
+            result = store.delete_imported_session(workspace_id, identifier)
+        else:
+            raise AdminNotFoundError("Unknown chat deletion resource.")
+        return {"ok": True, **result}
+
+    def chat_clear_workspace(self, workspace_id: str) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        return {"ok": True, **store.clear_workspace(workspace_id)}
+
+    def codex_scan(self, body: dict[str, Any]) -> dict[str, Any]:
+        workspace_id = body.get("workspace_id")
+        if not isinstance(workspace_id, str):
+            raise AdminServiceError("workspace_id is required.")
+        scope = self._workspace_scope(workspace_id)
+        roots = body.get("roots")
+        if roots is not None and (not isinstance(roots, list) or not all(isinstance(item, str) for item in roots)):
+            raise AdminServiceError("roots must be a list of relative paths.")
+        try:
+            policy = _scan_policy(body)
+            return {"ok": True, **self.session_scanner.scan(scope, roots=roots, policy=policy)}
+        except CodexSessionError as exc:
+            raise AdminServiceError(str(exc)) from exc
+
+    def codex_import(self, body: dict[str, Any]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        workspace_id = body.get("workspace_id")
+        candidate_ids = body.get("candidate_ids")
+        if not isinstance(workspace_id, str):
+            raise AdminServiceError("workspace_id is required.")
+        if not isinstance(candidate_ids, list) or not all(isinstance(item, str) for item in candidate_ids):
+            raise AdminServiceError("candidate_ids must be a list of strings.")
+        roots = body.get("roots")
+        if roots is not None and (not isinstance(roots, list) or not all(isinstance(item, str) for item in roots)):
+            raise AdminServiceError("roots must be a list of relative paths.")
+        scope = self._workspace_scope(workspace_id)
+        try:
+            return {
+                "ok": True,
+                **self.session_scanner.import_candidates(
+                    store,
+                    scope,
+                    candidate_ids=candidate_ids,
+                    roots=roots,
+                    policy=_scan_policy(body),
+                ),
+            }
+        except (CodexSessionError, TranscriptStoreError) as exc:
+            raise AdminServiceError(str(exc)) from exc
+
+    def codex_sessions(self, query: dict[str, str]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        workspace_id = query.get("workspace_id") or None
+        if workspace_id is not None:
+            self._workspace_scope(workspace_id)
+        return {
+            "ok": True,
+            **store.list_imported_sessions(
+                workspace_id,
+                page=_query_int(query, "page", 1),
+                page_size=_query_int(query, "page_size", 50),
+            ),
+        }
+
+    def _workspace_scope(self, workspace_id: str) -> WorkspaceScope:
+        current = self.settings_store.read()
+        try:
+            catalog = WorkspaceCatalog.from_settings(current, self.fallback_workspace)
+            entry = catalog.get(workspace_id)
+        except WorkspaceCatalogError as exc:
+            raise AdminNotFoundError("Workspace is unknown or disabled.") from exc
+        return WorkspaceScope.create(entry.id, entry.root)
+
+    def _require_transcript_store(self) -> TranscriptStore:
+        if self.transcript_store is None:
+            raise AdminUnavailableError("Chat persistence is not configured.")
+        return self.transcript_store
+
     def dispatch(
         self,
         method: str,
@@ -618,6 +777,29 @@ class AdminService:
             return self.oauth_payload(parts[1], query)
         if len(parts) == 4 and parts[0] == "oauth" and method == "POST":
             return self.oauth_action(parts[1], parts[2], parts[3])
+        if method == "GET" and parts == ["chat", "conversations"]:
+            return self.chat_conversations(query)
+        if len(parts) == 4 and parts[:2] == ["chat", "conversations"] and method == "GET":
+            return self.chat_conversation_detail(parts[2], parts[3], query)
+        if len(parts) == 5 and parts[:2] == ["chat", "conversations"] and method == "POST":
+            if parts[4] == "messages":
+                return self.chat_record_messages(parts[2], parts[3], body)
+            if parts[4] == "context":
+                return self.chat_record_context(parts[2], parts[3], body)
+        if len(parts) == 4 and parts[0] == "chat" and parts[1] in {"messages", "context", "sessions"} and method == "DELETE":
+            return self.chat_delete(parts[1], parts[2], parts[3])
+        if len(parts) == 4 and parts[:2] == ["chat", "conversations"] and method == "DELETE":
+            return self.chat_delete("conversations", parts[2], parts[3])
+        if len(parts) == 4 and parts[:2] == ["chat", "workspaces"] and parts[3] == "clear" and method == "POST":
+            return self.chat_clear_workspace(parts[2])
+        if method == "POST" and parts == ["codex", "sessions", "scan"]:
+            return self.codex_scan(body)
+        if method == "POST" and parts == ["codex", "sessions", "import"]:
+            return self.codex_import(body)
+        if method == "GET" and parts == ["codex", "sessions"]:
+            return self.codex_sessions(query)
+        if len(parts) == 4 and parts[:2] == ["codex", "sessions"] and method == "DELETE":
+            return self.chat_delete("sessions", parts[2], parts[3])
         raise AdminNotFoundError("Unknown Admin API endpoint.")
 
     def _checked_settings(self, expected_revision: str) -> dict[str, Any]:
@@ -651,6 +833,31 @@ class AdminService:
         if self.oauth_store is None:
             raise AdminUnavailableError("OAuth persistence is not configured.")
         return self.oauth_store
+
+def _query_int(query: dict[str, str], key: str, default: int) -> int:
+    raw = query.get(key)
+    if raw in (None, ""):
+        return default
+    assert raw is not None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise AdminServiceError(f"{key} must be an integer.") from exc
+
+
+def _scan_policy(body: dict[str, Any]) -> ScanPolicy:
+    values: dict[str, int] = {}
+    for field in ("max_depth", "max_files", "max_file_bytes", "max_total_bytes", "max_messages"):
+        if field in body:
+            raw = body[field]
+            if isinstance(raw, bool):
+                raise AdminServiceError(f"{field} must be an integer.")
+            try:
+                values[field] = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise AdminServiceError(f"{field} must be an integer.") from exc
+    return ScanPolicy(**values).validated()
+
 
 def _required_revision(body: dict[str, Any]) -> str:
     value = body.get("expected_revision")

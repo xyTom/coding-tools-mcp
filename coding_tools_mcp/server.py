@@ -42,6 +42,7 @@ from .admin import (
     gateway_file_revision,
 )
 from .envutils import ENV_PREFIX, truthy_env
+from .codex_sessions import CodexSessionScanner
 from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
 from .oauth import (
@@ -110,6 +111,7 @@ from .project_context import ProjectContext, load_project_context
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
+from .transcript import TranscriptStore
 from .transport_http import HTTPSessionManager
 from .transport_stdio import serve_stdio
 from .upstream import (
@@ -5944,6 +5946,7 @@ def build_persistent_oauth_config(
 
 SERVER_SETTINGS_FILENAME = "server-settings.json"
 UPSTREAM_CONFIG_FILENAME = "mcp-servers.json"
+TRANSCRIPT_DB_FILENAME = "transcripts.sqlite3"
 
 
 def load_workspace_startup(
@@ -6382,6 +6385,8 @@ def run_http(args: argparse.Namespace) -> int:
                 secret_vault=server_vault,
                 oauth_store=oauth_config.store if oauth_config is not None else None,
                 active_gateway_status=runtime.upstream_manager.status_payload,
+                transcript_store=TranscriptStore(config_dir / TRANSCRIPT_DB_FILENAME),
+                session_scanner=CodexSessionScanner(),
             )
         except (AdminServiceError, OSError, SecretVaultError, SettingsStoreError) as exc:
             runtime.close()
