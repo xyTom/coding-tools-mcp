@@ -8,7 +8,7 @@
 | 05 | complete | 6297e4a..24c50a6 | phase-05.md |
 | 06 | complete | 7a5ae53 | phase-06.md |
 | 07 | complete | ce21704 | phase-07.md |
-| 08 | pending | - | - |
+| 08 | complete | 1928783 | phase-08.md |
 | 09 | pending | - | - |
 | 10 | pending | - | - |
 | 11 | pending | - | - |
