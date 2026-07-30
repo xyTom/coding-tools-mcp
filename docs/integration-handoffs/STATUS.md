@@ -10,7 +10,7 @@
 | 07 | complete | ce21704 | phase-07.md |
 | 08 | complete | 1928783 | phase-08.md |
 | 09 | complete | c425005 | phase-09.md |
-| 10 | pending | - | - |
+| 10 | complete | 100d267 | phase-10.md |
 | 11 | pending | - | - |
 | 12 | pending | - | - |
 | 13 | pending | - | - |
