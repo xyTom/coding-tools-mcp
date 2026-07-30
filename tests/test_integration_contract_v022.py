@@ -13,10 +13,13 @@ from coding_tools_mcp.oauth import (
     OAUTH_GRANT_TYPES_SUPPORTED,
     OAUTH_RESPONSE_TYPES_SUPPORTED,
     OAuthClientRegistry,
+    OAuthIdentity,
 )
 from coding_tools_mcp.protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS
 from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
 from coding_tools_mcp.server import MCPHandler, Runtime, TOOL_REGISTRY, build_parser
+from coding_tools_mcp.workspace_binding import WorkspaceBindingError, WorkspaceBindingResolver
+from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 from tests.test_oauth_store import oauth_root
 
 from coding_tools_mcp.settings_definition import (
@@ -199,9 +202,42 @@ class IntegrationContractTests(unittest.TestCase):
                 conn.execute("PRAGMA journal_mode=DELETE")
                 conn.commit()
 
-    @unittest.skip("Phase 06: replace this skip after Agent-to-Workspace binding occurs at HTTP initialize")
     def test_phase06_http_session_binding_is_immutable_and_fails_closed(self) -> None:
-        self.fail("Phase 06 must prove one immutable Workspace binding per MCP HTTP session")
+        binding = self.contract["workspace_binding"]
+        self.assertEqual(binding["phase"], 6)
+        self.assertEqual(binding["point"], "http_initialize_runtime_factory")
+        self.assertTrue(binding["immutable_per_session"])
+        self.assertEqual(binding["invalid_mapping"], "fail_closed")
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            resolver = WorkspaceBindingResolver(
+                WorkspaceCatalog(
+                    [
+                        WorkspaceEntry("first", "First", first, enabled=True, default=True),
+                        WorkspaceEntry("second", "Second", second, enabled=True),
+                    ],
+                    "first",
+                )
+            )
+            identity = OAuthIdentity("agent", "grant", "second", "jti")
+            resolved = resolver.resolve_http("oauth", identity)
+            self.assertEqual(resolved.workspace_id, "second")
+            resolver.update_catalog(
+                WorkspaceCatalog(
+                    [
+                        WorkspaceEntry("first", "First", first, enabled=True, default=True),
+                        WorkspaceEntry("second", "Second", second, enabled=False),
+                    ],
+                    "first",
+                )
+            )
+            self.assertEqual(resolved.workspace_id, "second")
+            with self.assertRaises(WorkspaceBindingError):
+                resolver.resolve_http("oauth", identity)
 
 
 if __name__ == "__main__":

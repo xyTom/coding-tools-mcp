@@ -31,6 +31,7 @@ RESTART_FIELDS = frozenset(
         "default_workspace_id",
         "oauth_server_url",
         "oauth_compatibility_mode",
+        "oauth_client_workspace_bindings",
         "permission_mode",
         "shell_env_inherit",
         "allowed_origins",
@@ -166,6 +167,44 @@ def _normalize_choice(value: Any, field: str, choices: tuple[str, ...]) -> str:
     return normalized
 
 
+def normalize_oauth_client_workspace_bindings(
+    value: Any,
+    catalog: WorkspaceCatalog,
+) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SettingsValidationError(
+            {"oauth_client_workspace_bindings": "OAuth client Workspace bindings must be an object."}
+        )
+    normalized: dict[str, str] = {}
+    for raw_client_id, raw_workspace_id in value.items():
+        if (
+            not isinstance(raw_client_id, str)
+            or not 1 <= len(raw_client_id) <= 128
+            or not all(char.isalnum() or char in "-._~" for char in raw_client_id)
+        ):
+            raise SettingsValidationError(
+                {"oauth_client_workspace_bindings": "OAuth client binding contains an invalid client_id."}
+            )
+        if not isinstance(raw_workspace_id, str) or not raw_workspace_id:
+            raise SettingsValidationError(
+                {"oauth_client_workspace_bindings": "OAuth client binding requires a Workspace id."}
+            )
+        try:
+            workspace = catalog.get(raw_workspace_id)
+        except WorkspaceCatalogError as exc:
+            raise SettingsValidationError(
+                {
+                    "oauth_client_workspace_bindings": (
+                        f"OAuth client {raw_client_id!r} references an unknown or disabled Workspace."
+                    )
+                }
+            ) from exc
+        normalized[raw_client_id] = workspace.id
+    return dict(sorted(normalized.items()))
+
+
 def _canonicalize_catalog(settings: dict[str, Any], fallback_workspace: str | Path) -> None:
     try:
         catalog = WorkspaceCatalog.from_settings(settings, fallback_workspace)
@@ -190,6 +229,7 @@ def normalize_startup_settings_with_warnings(
         "default_workspace_id",
         "oauth_server_url",
         "oauth_compatibility_mode",
+        "oauth_client_workspace_bindings",
         "permission_mode",
         "shell_env_inherit",
         "allowed_origins",
@@ -203,7 +243,11 @@ def normalize_startup_settings_with_warnings(
                 settings.pop(key, None)
             else:
                 settings[key] = normalize_allowed_origins(value)
-        elif key in {"workspace_catalog", "oauth_compatibility_mode"}:
+        elif key in {
+            "workspace_catalog",
+            "oauth_compatibility_mode",
+            "oauth_client_workspace_bindings",
+        }:
             settings[key] = value
         elif value is None or value == "":
             settings.pop(key, None)
@@ -240,6 +284,15 @@ def normalize_startup_settings_with_warnings(
         or "workspace" in clean_updates
     ):
         _canonicalize_catalog(settings, fallback_workspace)
+    if "oauth_client_workspace_bindings" in settings:
+        try:
+            catalog = WorkspaceCatalog.from_settings(settings, fallback_workspace)
+        except WorkspaceCatalogError as exc:
+            raise SettingsValidationError({"workspace_catalog": str(exc)}) from exc
+        settings["oauth_client_workspace_bindings"] = normalize_oauth_client_workspace_bindings(
+            settings["oauth_client_workspace_bindings"],
+            catalog,
+        )
 
     warnings = tuple(dict.fromkeys((*current_warnings, *update_warnings)))
     return settings, warnings

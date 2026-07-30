@@ -12,6 +12,7 @@ from coding_tools_mcp import settings_store as settings_store_module
 from coding_tools_mcp.secret_vault import SecretVault, SecretVaultError
 from coding_tools_mcp.settings_definition import (
     LEGACY_TOOL_PROFILE_WARNING,
+    SettingsValidationError,
     normalize_startup_settings_with_warnings,
     pending_restart_fields,
     schema_payload,
@@ -152,6 +153,49 @@ class SettingsDefinitionTests(unittest.TestCase):
         self.assertEqual(normalized["port"], 8765)
         self.assertNotIn("tool_profile", schema_payload())
         self.assertNotIn("tool_profile", schema_payload()["restart_fields"])
+
+    def test_oauth_client_workspace_bindings_require_enabled_catalog_entries(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            updates = {
+                "workspace_catalog": [
+                    {
+                        "id": "first",
+                        "name": "First",
+                        "root": str(first),
+                        "enabled": True,
+                        "default": True,
+                    },
+                    {
+                        "id": "second",
+                        "name": "Second",
+                        "root": str(second),
+                        "enabled": False,
+                        "default": False,
+                    },
+                ],
+                "default_workspace_id": "first",
+                "oauth_client_workspace_bindings": {"agent-a": "first"},
+            }
+            normalized, _warnings = normalize_startup_settings_with_warnings(
+                {}, updates, first
+            )
+            self.assertEqual(
+                normalized["oauth_client_workspace_bindings"],
+                {"agent-a": "first"},
+            )
+            self.assertIn(
+                "oauth_client_workspace_bindings",
+                schema_payload()["restart_fields"],
+            )
+
+            updates["oauth_client_workspace_bindings"] = {"agent-a": "second"}
+            with self.assertRaisesRegex(SettingsValidationError, "unknown or disabled"):
+                normalize_startup_settings_with_warnings({}, updates, first)
 
     def test_pending_restart_fields_compares_only_active_settings(self) -> None:
         active = {"port": 8000, "permission_mode": "safe", "tool_profile": "read-only"}

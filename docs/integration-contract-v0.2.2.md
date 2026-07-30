@@ -65,8 +65,9 @@ must never describe this switch as safe or genuinely read-only.
   with that Workspace adapter. The binding is immutable for the lifetime of the
   MCP HTTP session.
 - Ordinary MCP tools do not switch Workspace roots. Administrative mapping
-  changes apply to new sessions; a session whose mapped Workspace is no longer
-  valid must fail closed rather than fall back to another root.
+  changes apply only to new sessions. Existing sessions retain their frozen
+  Runtime and root until closed; new sessions targeting a missing or disabled
+  Workspace fail closed rather than falling back to another root.
 - stdio keeps one explicit default Workspace because it has no OAuth Agent
   identity.
 
@@ -143,10 +144,12 @@ The following block is consumed by the Phase 02 contract tests.
   "workspace_binding": {
     "phase": 6,
     "point": "http_initialize_runtime_factory",
-    "identity_fields": ["client_id", "grant_id"],
+    "identity_fields": ["client_id", "grant_id", "workspace_id"],
     "immutable_per_session": true,
     "ordinary_tool_switching": false,
     "invalid_mapping": "fail_closed",
+    "disabled_workspace_new_session": "fail_closed",
+    "disabled_workspace_existing_session": "retain_frozen_binding_until_close",
     "stdio_binding": "default_workspace"
   },
   "telemetry": {

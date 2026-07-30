@@ -46,21 +46,27 @@ from .oauth import (
     OAUTH_TOKEN_TTL_SECONDS,
     OAuthClientAuthenticationError,
     OAuthConfig,
+    OAuthIdentity,
     OAuthInvalidGrantError,
     OAuthServiceError,
     PersistentOAuthClientRegistry,
+    authenticate_access_token,
     create_access_token,
     create_authorization_grant,
     exchange_refresh_token,
     initialize_signing_key_ring,
     issue_refresh_token,
     valid_pkce_challenge,
-    validate_access_token,
     verify_pkce,
 )
 from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
 from .secret_vault import SecretVault, SecretVaultError
-from .settings_store import default_settings_dir
+from .settings_definition import normalize_oauth_client_workspace_bindings
+from .settings_store import (
+    ServerSettingsStore,
+    SettingsStoreError,
+    default_settings_dir,
+)
 from .patching import (
     AtomicPatchCommitter,
     FileBaseline,
@@ -93,6 +99,12 @@ from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
 from .transport_http import HTTPSessionManager
 from .transport_stdio import serve_stdio
+from .workspace_binding import (
+    WorkspaceBinding,
+    WorkspaceBindingError,
+    WorkspaceBindingResolver,
+)
+from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 
 
 SERVER_NAME = "coding-tools-mcp"
@@ -333,6 +345,20 @@ class RuntimePolicy:
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
     fake_readonly_annotations: bool = False
+
+
+@dataclass(frozen=True)
+class AuthorizationContext:
+    method: str
+    oauth_identity: OAuthIdentity | None = None
+
+    def authorization_key(self, workspace_id: str) -> tuple[str, str | None, str | None, str]:
+        return (
+            self.method,
+            self.oauth_identity.client_id if self.oauth_identity is not None else None,
+            self.oauth_identity.grant_id if self.oauth_identity is not None else None,
+            workspace_id,
+        )
 
 
 OAUTH_TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
@@ -1225,10 +1251,26 @@ class Runtime:
         auth_token: str | None = None,
         oauth_config: OAuthConfig | None = None,
         project_context: ProjectContext | None = None,
+        workspace_binding: WorkspaceBinding | None = None,
+        authorization_context: AuthorizationContext | None = None,
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
     ) -> None:
         self.workspace = Workspace(workspace)
+        if workspace_binding is not None and workspace_binding.root != self.workspace.root:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Workspace binding root does not match Runtime workspace.",
+                category="validation",
+            )
+        self.workspace_binding = workspace_binding or WorkspaceBinding(
+            "default",
+            self.workspace.root,
+            transport,
+        )
+        self.authorization_context = authorization_context or AuthorizationContext(
+            self.workspace_binding.authorization_method
+        )
         self.enable_view_image = enable_view_image
         self._exposed_tool_names = [
             name
@@ -1294,6 +1336,9 @@ class Runtime:
         self.initialized = False
         self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
+
+    def session_authorization_key(self) -> tuple[str, str | None, str | None, str]:
+        return self.authorization_context.authorization_key(self.workspace_binding.workspace_id)
 
     def _set_runtime_dir(self, runtime_dir: Path) -> None:
         self.runtime_dir = runtime_dir
@@ -4734,7 +4779,23 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_unauthorized()
             return
         session_id = self.headers.get("Mcp-Session-Id")
-        if not session_id or not self.server.sessions.delete(session_id):  # type: ignore[attr-defined]
+        runtime = self.server.sessions.get(session_id) if session_id else None  # type: ignore[attr-defined]
+        if runtime is None:
+            self.send_rpc_error(-32001, "Unknown MCP session", status=404)
+            return
+        authorization_context = getattr(self, "_authorization_context", None)
+        if (
+            not isinstance(authorization_context, AuthorizationContext)
+            or runtime.session_authorization_key()
+            != authorization_context.authorization_key(runtime.workspace_binding.workspace_id)
+        ):
+            self.send_rpc_error(
+                -32000,
+                "Authorization context does not match the initialized MCP session",
+                status=403,
+            )
+            return
+        if not self.server.sessions.delete(session_id):  # type: ignore[attr-defined]
             self.send_rpc_error(-32001, "Unknown MCP session", status=404)
             return
         self.send_response(200)
@@ -4880,9 +4941,18 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                     -32600, "initialize must not include Mcp-Session-Id", request_id=request.get("id")
                 )
                 return
+            authorization_context = getattr(self, "_authorization_context", None)
+            if not isinstance(authorization_context, AuthorizationContext):
+                self.send_rpc_error(
+                    -32000,
+                    "Request authorization context is unavailable",
+                    status=503,
+                    request_id=request.get("id"),
+                )
+                return
             try:
-                self._runtime = self.server.sessions.create()  # type: ignore[attr-defined]
-            except RuntimeError as exc:
+                self._runtime = self.server.sessions.create(authorization_context)  # type: ignore[attr-defined]
+            except (RuntimeError, WorkspaceBindingError) as exc:
                 self.send_rpc_error(-32000, str(exc), status=503, request_id=request.get("id"))
                 return
             self._send_session_header = True
@@ -4892,6 +4962,19 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if runtime is None:
                 self.send_rpc_error(
                     -32001, "Unknown MCP session", status=404, request_id=response_id(request)
+                )
+                return
+            authorization_context = getattr(self, "_authorization_context", None)
+            if (
+                not isinstance(authorization_context, AuthorizationContext)
+                or runtime.session_authorization_key()
+                != authorization_context.authorization_key(runtime.workspace_binding.workspace_id)
+            ):
+                self.send_rpc_error(
+                    -32000,
+                    "Authorization context does not match the initialized MCP session",
+                    status=403,
+                    request_id=request.get("id"),
                 )
                 return
             self._runtime = runtime
@@ -4929,23 +5012,32 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return jsonrpc_error(response_id(request), -32603, str(exc))
 
     def is_authorized(self) -> bool:
+        self._authorization_context = None
         if not self.runtime.auth_enabled():
+            self._authorization_context = AuthorizationContext("noauth")
             return True
         header = self.headers.get("Authorization", "").strip()
         if self.runtime.auth_token is not None:
             if secrets.compare_digest(header, f"Bearer {self.runtime.auth_token}"):
+                self._authorization_context = AuthorizationContext("bearer")
                 return True
         if self.runtime.oauth_config is not None and header.startswith("Bearer "):
             token = header[len("Bearer "):]
             try:
-                if validate_access_token(
+                identity = authenticate_access_token(
                     token,
                     self.runtime.oauth_config,
                     self.oauth_base_url(),
-                ):
-                    return True
+                )
             except OAuthStoreError:
                 self.log_error("OAuth bearer validation unavailable; request denied")
+                return False
+            if identity is not None:
+                self._authorization_context = AuthorizationContext(
+                    "oauth",
+                    oauth_identity=identity,
+                )
+                return True
         return False
 
     def oauth_base_url(self) -> str:
@@ -5458,9 +5550,15 @@ def build_runtime(
     oauth_config: OAuthConfig | None = None,
     emit_warning: bool = True,
     project_context: ProjectContext | None = None,
+    workspace_binding: WorkspaceBinding | None = None,
+    authorization_context: AuthorizationContext | None = None,
     transport: str = "stdio",
 ) -> Runtime:
-    workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
+    workspace = (
+        workspace_binding.root
+        if workspace_binding is not None
+        else Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
+    )
     runtime = Runtime(
         workspace,
         enable_view_image=args.enable_view_image,
@@ -5470,6 +5568,8 @@ def build_runtime(
         auth_token=auth_token,
         oauth_config=oauth_config,
         project_context=project_context,
+        workspace_binding=workspace_binding,
+        authorization_context=authorization_context,
         fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
         transport=transport,
     )
@@ -5553,6 +5653,8 @@ def build_persistent_oauth_config(
     client_id: str | None = None,
     client_secret: str | None = None,
     redirect_uris: tuple[str, ...] = (),
+    registration_workspace_id: str | None = "default",
+    client_workspace_id: str | None = None,
 ) -> tuple[OAuthConfig, bool]:
     vault = SecretVault(config_dir / OAUTH_SECRET_VAULT_FILENAME, master_key)
     if not vault.enabled():
@@ -5586,12 +5688,16 @@ def build_persistent_oauth_config(
         token_secret,
         legacy_secret_ref=OAUTH_TOKEN_SECRET,
     )
-    registry = PersistentOAuthClientRegistry(store)
+    registry = PersistentOAuthClientRegistry(
+        store,
+        registration_workspace_id=registration_workspace_id,
+    )
     if client_id:
         registry.add_preregistered(
             client_id,
             redirect_uris or ("http://127.0.0.1/callback",),
             client_secret=client_secret,
+            workspace_id=client_workspace_id,
         )
     return (
         OAuthConfig(
@@ -5609,6 +5715,95 @@ def build_persistent_oauth_config(
     )
 
 
+SERVER_SETTINGS_FILENAME = "server-settings.json"
+
+
+def load_workspace_startup(
+    args: argparse.Namespace,
+) -> tuple[Path, dict[str, Any], WorkspaceCatalog]:
+    config_dir = default_settings_dir()
+    settings = ServerSettingsStore(config_dir / SERVER_SETTINGS_FILENAME).read()
+    fallback_root = Path(
+        args.workspace
+        or os.environ.get(f"{ENV_PREFIX}_WORKSPACE")
+        or os.getcwd()
+    )
+    catalog = WorkspaceCatalog.from_settings(settings, fallback_root)
+    return config_dir, settings, catalog
+
+
+def apply_oauth_workspace_bindings(
+    config: OAuthConfig,
+    catalog: WorkspaceCatalog,
+    bindings: dict[str, str],
+) -> None:
+    if config.store is None:
+        raise OAuthServiceError("OAuth authorization store is not configured.")
+    normalized = normalize_oauth_client_workspace_bindings(bindings, catalog)
+    for client_id, workspace_id in normalized.items():
+        if config.store.get_client(client_id) is None:
+            raise OAuthServiceError(
+                f"OAuth Workspace binding references unknown client_id {client_id!r}."
+            )
+        if not config.store.set_client_workspace(client_id, workspace_id):
+            raise OAuthServiceError(
+                f"OAuth Workspace binding could not be applied to client_id {client_id!r}."
+            )
+
+    enabled = catalog.enabled_entries()
+    if len(enabled) == 1:
+        default_id = catalog.default_id
+        for client in config.store.list_clients():
+            if not client.get("workspace_id"):
+                if not config.store.set_client_workspace(str(client["client_id"]), default_id):
+                    raise OAuthServiceError(
+                        "OAuth client could not be migrated to the sole enabled Workspace."
+                    )
+
+
+class BoundRuntimeFactory:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        runtime_policy: RuntimePolicy,
+        resolver: WorkspaceBindingResolver,
+        *,
+        auth_token: str | None,
+        oauth_config: OAuthConfig | None,
+    ) -> None:
+        self.args = args
+        self.runtime_policy = runtime_policy
+        self.resolver = resolver
+        self.auth_token = auth_token
+        self.oauth_config = oauth_config
+        self._project_contexts: dict[tuple[str, str], ProjectContext] = {}
+        self._lock = threading.Lock()
+
+    def project_context(self, binding: WorkspaceBinding) -> ProjectContext:
+        key = (binding.workspace_id, str(binding.root))
+        with self._lock:
+            cached = self._project_contexts.get(key)
+        if cached is not None:
+            return cached
+        loaded = load_project_context(binding.root)
+        with self._lock:
+            return self._project_contexts.setdefault(key, loaded)
+
+    def __call__(self, context: AuthorizationContext) -> Runtime:
+        binding = self.resolver.resolve_http(context.method, context.oauth_identity)
+        return build_runtime(
+            self.args,
+            self.runtime_policy,
+            auth_token=self.auth_token,
+            oauth_config=self.oauth_config,
+            emit_warning=False,
+            project_context=self.project_context(binding),
+            workspace_binding=binding,
+            authorization_context=context,
+            transport="http",
+        )
+
+
 def run_http(args: argparse.Namespace) -> int:
     auth_mode = (os.environ.get(f"{ENV_PREFIX}_AUTH_MODE") or "").strip().lower()
     if auth_mode and auth_mode not in AUTH_MODE_CHOICES:
@@ -5618,9 +5813,19 @@ def run_http(args: argparse.Namespace) -> int:
     auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or None
     try:
         runtime_policy = runtime_policy_from_args(args)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        config_dir, startup_settings, workspace_catalog = load_workspace_startup(args)
+        workspace_bindings = normalize_oauth_client_workspace_bindings(
+            startup_settings.get("oauth_client_workspace_bindings"),
+            workspace_catalog,
+        )
+    except (
+        SettingsStoreError,
+        WorkspaceCatalogError,
+        ValueError,
+    ) as exc:
+        print(f"ERROR: Workspace configuration is unavailable: {exc}", file=sys.stderr)
         return 2
+    workspace_resolver = WorkspaceBindingResolver(workspace_catalog)
 
     oauth_config: OAuthConfig | None = None
     oauth_mode = (
@@ -5632,6 +5837,17 @@ def run_http(args: argparse.Namespace) -> int:
         client_id = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_ID") or None
         client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or None
         env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD") or None
+        client_workspace_id = (
+            os.environ.get(f"{ENV_PREFIX}_OAUTH_WORKSPACE_ID")
+            or (workspace_bindings.get(client_id) if client_id else None)
+        )
+        if client_id and client_workspace_id:
+            workspace_bindings[client_id] = client_workspace_id
+        registration_workspace_id = (
+            workspace_catalog.default_id
+            if len(workspace_catalog.enabled_entries()) == 1
+            else None
+        )
         server_url = (os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or "").rstrip("/") or None
         try:
             token_ttl = int(
@@ -5656,7 +5872,7 @@ def run_http(args: argparse.Namespace) -> int:
         )
         try:
             oauth_config, password_created = build_persistent_oauth_config(
-                default_settings_dir(),
+                config_dir,
                 master_key=os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"),
                 password=env_password,
                 server_url=server_url,
@@ -5671,6 +5887,13 @@ def run_http(args: argparse.Namespace) -> int:
                 client_id=client_id,
                 client_secret=client_secret,
                 redirect_uris=redirect_uris,
+                registration_workspace_id=registration_workspace_id,
+                client_workspace_id=client_workspace_id,
+            )
+            apply_oauth_workspace_bindings(
+                oauth_config,
+                workspace_catalog,
+                workspace_bindings,
             )
         except (
             OSError,
@@ -5719,18 +5942,29 @@ def run_http(args: argparse.Namespace) -> int:
         )
         return 2
 
-    runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config, transport="http")
-
-    def runtime_factory() -> Runtime:
-        return build_runtime(
-            args,
-            runtime_policy,
-            auth_token=auth_token,
-            oauth_config=oauth_config,
-            emit_warning=False,
-            project_context=runtime.project_context,
-            transport="http",
-        )
+    default_workspace = workspace_catalog.default()
+    control_binding = WorkspaceBinding(
+        default_workspace.id,
+        default_workspace.root,
+        "control",
+    )
+    runtime = build_runtime(
+        args,
+        runtime_policy,
+        auth_token=auth_token,
+        oauth_config=oauth_config,
+        project_context=load_project_context(control_binding.root),
+        workspace_binding=control_binding,
+        authorization_context=AuthorizationContext("control"),
+        transport="http",
+    )
+    runtime_factory = BoundRuntimeFactory(
+        args,
+        runtime_policy,
+        workspace_resolver,
+        auth_token=auth_token,
+        oauth_config=oauth_config,
+    )
 
     server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime, runtime_factory)
     if oauth_config:
@@ -5755,10 +5989,24 @@ def run_http(args: argparse.Namespace) -> int:
 def run_stdio(args: argparse.Namespace) -> int:
     try:
         runtime_policy = runtime_policy_from_args(args)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        _config_dir, _settings, workspace_catalog = load_workspace_startup(args)
+        binding = WorkspaceBindingResolver(workspace_catalog).resolve_stdio()
+    except (
+        SettingsStoreError,
+        WorkspaceBindingError,
+        WorkspaceCatalogError,
+        ValueError,
+    ) as exc:
+        print(f"ERROR: Workspace configuration is unavailable: {exc}", file=sys.stderr)
         return 2
-    runtime = build_runtime(args, runtime_policy)
+    runtime = build_runtime(
+        args,
+        runtime_policy,
+        project_context=load_project_context(binding.root),
+        workspace_binding=binding,
+        authorization_context=AuthorizationContext("stdio"),
+        transport="stdio",
+    )
     return serve_stdio(runtime)
 
 
