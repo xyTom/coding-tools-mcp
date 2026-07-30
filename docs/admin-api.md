@@ -87,3 +87,7 @@ Conversation lists are summary-only and paginated. Message and context content i
 Codex scan roots are relative to the selected Workspace. The API rejects absolute paths, `..`, and escapes through symlinks or reparse points. Scan requests may set bounded `max_depth`, `max_files`, `max_file_bytes`, `max_total_bytes`, and `max_messages` values. Malformed or partially written JSONL records appear as item errors while other candidates remain available.
 
 All delete and clear routes require the dedicated Admin credential, are idempotent, and return actual affected counts. Ordinary MCP bearer and OAuth credentials do not authorize these routes.
+
+## Admin WebUI
+
+The generated administration interface is served at `/admin`. Its source/build, authentication, stale-revision, redaction, accessibility, and conversation-detail boundaries are documented in `docs/admin-webui.md`.

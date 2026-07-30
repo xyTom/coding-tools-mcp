@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Coding Tools MCP Admin</title>
+  <link rel="stylesheet" href="./admin.css">
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">coding-tools-mcp</p>
+      <h1>Admin Console</h1>
+    </div>
+    <form id="authForm" class="auth-form" autocomplete="off">
+      <div>
+        <label for="adminToken">本次页面使用的 Admin token</label>
+        <input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required>
+        <p id="adminTokenHelp" class="help">仅保存在当前页面内存中；不会写入 URL、浏览器持久化存储、日志或服务器设置。</p>
+      </div>
+      <button type="submit">连接</button>
+      <button id="forgetToken" type="button" class="secondary">清除</button>
+    </form>
+  </header>
+
+  <div class="layout">
+    <nav aria-label="Admin 页面" class="sidebar">
+      <button class="nav-item active" data-section="overview" type="button">概览</button>
+      <button class="nav-item" data-section="settings" type="button">设置</button>
+      <button class="nav-item" data-section="workspaces" type="button">Workspace</button>
+      <button class="nav-item" data-section="gateway" type="button">Gateway</button>
+      <button class="nav-item" data-section="oauth" type="button">OAuth</button>
+      <button class="nav-item" data-section="secrets" type="button">Secret Vault</button>
+      <button class="nav-item" data-section="chat" type="button">Conversations</button>
+    </nav>
+
+    <main id="mainContent" tabindex="-1">
+      <div id="globalStatus" class="status" role="status" aria-live="polite">输入专用 Admin token 后连接。</div>
+
+      <section id="section-overview" class="page-section active" aria-labelledby="overviewTitle">
+        <div class="section-heading"><div><p class="eyebrow">Runtime</p><h2 id="overviewTitle">概览</h2></div><button id="refreshAll" type="button" class="secondary">刷新</button></div>
+        <div class="card-grid">
+          <article class="card"><h3>Admin API</h3><strong id="adminApiStatus">未连接</strong><p class="muted">普通 MCP bearer 不具备管理员权限。</p></article>
+          <article class="card"><h3>Gateway</h3><strong id="gatewayRuntimeStatus">未连接</strong><p class="muted">工具快照在 Runtime 初始化时冻结，不支持热 reload。</p></article>
+          <article class="card"><h3>Telemetry</h3><strong id="telemetryStatus">未报告</strong><p id="telemetryDetail" class="muted"></p><p id="telemetryDisableHelp" class="help"></p></article>
+          <article class="card"><h3>Vault</h3><strong id="vaultStatus">未连接</strong><p class="muted">页面从不读取或显示 Secret 值。</p></article>
+        </div>
+      </section>
+
+      <section id="section-settings" class="page-section" aria-labelledby="settingsTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Revision-aware</p><h2 id="settingsTitle">服务器设置</h2></div><div class="button-row"><button id="reloadSettings" type="button" class="secondary">重新读取</button><button id="saveSettings" type="button">保存草稿</button></div></div>
+        <div id="settingsConflict" class="alert warning" role="alert" tabindex="-1" hidden></div>
+        <div id="settingsError" class="alert danger" role="alert" tabindex="-1" hidden></div>
+        <form id="settingsForm" class="card form-grid" novalidate>
+          <div><label for="settingsHost">Host</label><input id="settingsHost" aria-describedby="settingsHostHelp"><p id="settingsHostHelp" class="help">修改后需重启。</p></div>
+          <div><label for="settingsPort">Port</label><input id="settingsPort" type="number" min="1" max="65535" aria-describedby="settingsPortHelp"><p id="settingsPortHelp" class="help">1–65535，修改后需重启。</p></div>
+          <div><label for="settingsPermission">Permission mode</label><select id="settingsPermission" aria-describedby="permissionHelp"><option value="safe">safe</option><option value="trusted">trusted</option><option value="dangerous">dangerous</option></select><p id="permissionHelp" class="help"></p></div>
+          <div><label for="settingsShellEnv">Shell 环境继承</label><select id="settingsShellEnv"><option value="core">core</option><option value="all">all</option><option value="none">none</option></select></div>
+          <div class="full"><label for="settingsOauthServerUrl">OAuth server URL</label><input id="settingsOauthServerUrl" type="url" placeholder="https://mcp.example"></div>
+          <div class="full"><label for="settingsAllowedOrigins">Allowed origins（每行一个）</label><textarea id="settingsAllowedOrigins" rows="4"></textarea></div>
+          <label class="checkline full" for="settingsOauthCompatibility"><input id="settingsOauthCompatibility" type="checkbox"> OAuth compatibility mode（旧客户端使用受追踪的长效 access token）</label>
+        </form>
+        <details class="card danger-zone">
+          <summary>高级危险兼容设置</summary>
+          <h3 id="fakeReadonlyLabel"></h3>
+          <p id="fakeReadonlyWarning" class="alert danger"></p>
+          <p id="fakeReadonlyEnable" class="help"></p>
+          <p>当前状态：<strong id="fakeReadonlyStatus">未报告</strong></p>
+        </details>
+        <div class="card-grid">
+          <article class="card"><h3>Active</h3><pre id="settingsActiveJson" class="code-block"></pre></article>
+          <article class="card"><h3>Persisted</h3><pre id="settingsPersistedJson" class="code-block"></pre></article>
+          <article class="card"><h3>Pending restart</h3><ul id="settingsPending"></ul><p>Revision：<code id="settingsRevision">—</code></p></article>
+        </div>
+      </section>
+
+      <section id="section-workspaces" class="page-section" aria-labelledby="workspacesTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Catalog</p><h2 id="workspacesTitle">Workspace</h2></div><button id="reloadWorkspaces" type="button" class="secondary">刷新</button></div>
+        <div id="workspaceList" class="card-grid"></div>
+        <form id="workspaceAddForm" class="card form-grid" novalidate>
+          <h3 class="full">新增 Workspace</h3>
+          <div><label for="workspaceId">ID</label><input id="workspaceId" required></div>
+          <div><label for="workspaceName">名称</label><input id="workspaceName" required></div>
+          <div class="full"><label for="workspaceRoot">Root</label><input id="workspaceRoot" required></div>
+          <label class="checkline"><input id="workspaceEnabled" type="checkbox" checked> 启用</label>
+          <label class="checkline"><input id="workspaceDefault" type="checkbox"> 设为唯一默认 Workspace</label>
+          <div class="full"><button type="submit">添加</button></div>
+        </form>
+      </section>
+
+      <section id="section-gateway" class="page-section" aria-labelledby="gatewayTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Restart-only</p><h2 id="gatewayTitle">Gateway 配置</h2></div><button id="reloadGateway" type="button" class="secondary">刷新</button></div>
+        <div class="card-grid"><article class="card"><h3>当前快照</h3><div id="gatewaySummary"></div></article><article class="card"><h3>保存状态</h3><p>Restart required：<strong id="gatewayRestartRequired">—</strong></p><p>Persisted revision：<code id="gatewayRevision">—</code></p><p class="muted">此页面没有 start、stop 或 reload 控件。</p></article></div>
+        <form id="gatewayForm" class="card" novalidate>
+          <label for="gatewayDocument">替换配置 JSON（仅限不含凭据的配置）</label>
+          <textarea id="gatewayDocument" rows="14" placeholder='{"servers":{}}' aria-describedby="gatewayHelp"></textarea>
+          <p id="gatewayHelp" class="help">不会预填或显示任何上游凭据、摘要值或内部引用。含凭据的现有配置只能查看脱敏摘要；请通过受控配置流程维护。</p>
+          <div class="button-row"><button type="submit">保存并标记重启</button><button id="clearGatewayDraft" type="button" class="secondary">清空草稿</button></div>
+        </form>
+      </section>
+
+      <section id="section-oauth" class="page-section" aria-labelledby="oauthTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Redacted</p><h2 id="oauthTitle">OAuth 管理</h2></div><button id="reloadOAuth" type="button" class="secondary">刷新</button></div>
+        <div class="toolbar"><label for="oauthCollection">资源</label><select id="oauthCollection"><option value="clients">Clients</option><option value="grants">Grants</option><option value="tokens">Access Token metadata</option><option value="refresh-families">Refresh Families</option><option value="signing-keys">Signing Keys</option><option value="audit">Audit Events</option></select></div>
+        <p class="help">页面只显示脱敏元数据，不显示任何凭据、摘要值或内部引用。</p>
+        <div id="oauthList" class="stack"></div>
+      </section>
+
+      <section id="section-secrets" class="page-section" aria-labelledby="secretsTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Names only</p><h2 id="secretsTitle">Secret Vault</h2></div><button id="reloadSecrets" type="button" class="secondary">刷新</button></div>
+        <div id="secretList" class="stack"></div>
+        <form id="secretForm" class="card form-grid" autocomplete="off">
+          <div><label for="secretName">Secret 名称</label><input id="secretName" autocomplete="off" required></div>
+          <div><label for="secretValue">新值</label><input id="secretValue" type="password" autocomplete="new-password" required></div>
+          <div class="full"><button type="submit">设置或替换</button></div>
+        </form>
+      </section>
+
+      <section id="section-chat" class="page-section" aria-labelledby="chatTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Summary → detail</p><h2 id="chatTitle">Conversations</h2></div><button id="reloadConversations" type="button" class="secondary">刷新摘要</button></div>
+        <div class="toolbar"><label for="chatWorkspace">Workspace</label><select id="chatWorkspace"></select><label for="chatQuery">搜索摘要</label><input id="chatQuery"><button id="searchConversations" type="button">搜索</button></div>
+        <div class="split-view">
+          <div><div id="conversationList" class="stack"></div><div class="pager"><button id="conversationPrev" type="button" class="secondary">上一页</button><span id="conversationPage">1</span><button id="conversationNext" type="button" class="secondary">下一页</button></div></div>
+          <article id="conversationDetail" class="card" aria-live="polite"><h3>按需详情</h3><p class="muted">从摘要列表选择会话后，才会调用详情分页端点读取正文。</p></article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+    <form method="dialog" class="dialog-card">
+      <h2 id="confirmTitle">确认操作</h2>
+      <p id="confirmMessage"></p>
+      <div class="button-row end"><button value="cancel" class="secondary">取消</button><button id="confirmAccept" value="confirm" class="danger">确认</button></div>
+    </form>
+  </dialog>
+
+  <script type="module" src="./settings-copy.js"></script>
+  <script type="module" src="./settings-model.js"></script>
+  <script type="module" src="./workspace-editor.js"></script>
+  <script type="module" src="./settings-page.js"></script>
+  <script type="module" src="./admin.js"></script>
+</body>
+</html>

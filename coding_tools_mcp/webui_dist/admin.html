@@ -1,0 +1,1147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Coding Tools MCP Admin</title>
+  <style data-build-source="admin.css">
+:root {
+  color-scheme: light dark;
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --text: #17202a;
+  --muted: #56616d;
+  --line: #c9d1d9;
+  --accent: #075985;
+  --accent-text: #ffffff;
+  --danger: #b42318;
+  --warning: #8a4b08;
+  --good: #18794e;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#11161c; --surface:#1b232c; --text:#f4f7fa; --muted:#b6c0ca; --line:#43505d; --accent:#38bdf8; --accent-text:#06131b; --danger:#ff8a80; --warning:#ffca80; --good:#6ee7b7; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.5; }
+button, input, select, textarea { font: inherit; }
+button, input, select, textarea { min-height: 44px; }
+button { border: 1px solid transparent; border-radius: .55rem; padding: .65rem .9rem; background: var(--accent); color: var(--accent-text); cursor: pointer; }
+button:hover { filter: brightness(1.08); }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 2px; }
+button.secondary { background: transparent; color: var(--text); border-color: var(--line); }
+button.danger { background: var(--danger); color: #fff; }
+button:disabled { opacity: .55; cursor: not-allowed; }
+input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: .5rem; padding: .65rem; background: var(--surface); color: var(--text); }
+textarea { resize: vertical; }
+label { display: block; font-weight: 650; margin-bottom: .3rem; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.skip-link { position: fixed; left: .5rem; top: -4rem; z-index: 100; background: var(--surface); color: var(--text); padding: .75rem; }
+.skip-link:focus { top: .5rem; }
+.topbar { display: flex; gap: 2rem; align-items: flex-start; justify-content: space-between; padding: 1rem 1.5rem; background: var(--surface); border-bottom: 1px solid var(--line); }
+.topbar h1 { margin: 0; }
+.eyebrow { margin: 0; text-transform: uppercase; letter-spacing: .08em; font-size: .75rem; color: var(--muted); }
+.auth-form { display: grid; grid-template-columns: minmax(220px, 420px) auto auto; gap: .6rem; align-items: end; }
+.help, .muted { color: var(--muted); font-size: .9rem; }
+.help { margin: .3rem 0 0; }
+.layout { display: grid; grid-template-columns: 210px minmax(0, 1fr); min-height: calc(100vh - 100px); }
+.sidebar { padding: 1rem; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: .4rem; background: var(--surface); }
+.nav-item { text-align: left; background: transparent; color: var(--text); border-color: transparent; }
+.nav-item.active { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: var(--accent); }
+main { width: 100%; max-width: 1500px; padding: 1.25rem; }
+.page-section { display: none; }
+.page-section.active { display: block; }
+.section-heading { display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom:1rem; }
+.section-heading h2 { margin:.1rem 0; }
+.card, .workspace-card { background: var(--surface); border:1px solid var(--line); border-radius:.8rem; padding:1rem; min-width:0; }
+.card h3, .workspace-card h3 { margin-top:0; }
+.card-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:1rem; margin-bottom:1rem; }
+.stack { display:flex; flex-direction:column; gap:.75rem; }
+.form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; margin-bottom:1rem; }
+.form-grid .full { grid-column:1/-1; }
+.button-row, .toolbar, .pager { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; }
+.button-row.end { justify-content:flex-end; }
+.toolbar { margin-bottom:1rem; }
+.toolbar label { margin:0; }
+.toolbar input, .toolbar select { width:auto; min-width:180px; }
+.checkline { display:flex; align-items:center; gap:.6rem; font-weight:500; }
+.checkline input { width:auto; min-height:auto; }
+.status { min-height:2.2rem; padding:.65rem .8rem; margin-bottom:1rem; border-left:4px solid var(--accent); background:var(--surface); }
+.alert { padding:.8rem; border:1px solid currentColor; border-radius:.6rem; margin-bottom:1rem; }
+.alert.warning { color:var(--warning); }
+.alert.danger { color:var(--danger); }
+.badge { display:inline-flex; border:1px solid var(--line); border-radius:999px; padding:.2rem .55rem; font-size:.8rem; }
+.badge.good { color:var(--good); }
+.badge.danger { color:var(--danger); }
+.workspace-heading { display:flex; justify-content:space-between; gap:1rem; }
+.compact-definition { display:grid; grid-template-columns:auto 1fr; gap:.3rem .7rem; }
+.compact-definition dt { color:var(--muted); }
+.compact-definition dd { margin:0; min-width:0; }
+.code-block { max-height:360px; overflow:auto; white-space:pre-wrap; background:color-mix(in srgb,var(--bg) 75%,transparent); padding:.75rem; border-radius:.5rem; }
+.danger-zone { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); margin-bottom:1rem; }
+details > summary { cursor:pointer; font-weight:700; }
+.split-view { display:grid; grid-template-columns:minmax(280px,.8fr) minmax(0,1.2fr); gap:1rem; }
+.conversation-card button { width:100%; text-align:left; background:transparent; color:var(--text); border-color:var(--line); }
+.conversation-card h3 { margin:.1rem 0; }
+.message, .context-entry { border-left:4px solid var(--line); padding:.75rem; margin:.75rem 0; background:color-mix(in srgb,var(--surface) 92%,var(--bg)); }
+.message pre, .context-entry pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+.data-table { width:100%; border-collapse:collapse; }
+.data-table th, .data-table td { border-bottom:1px solid var(--line); padding:.55rem; text-align:left; vertical-align:top; }
+.data-table th { color:var(--muted); }
+dialog { border:1px solid var(--line); border-radius:.8rem; background:var(--surface); color:var(--text); max-width:560px; width:calc(100% - 2rem); }
+dialog::backdrop { background:rgba(0,0,0,.55); }
+.dialog-card { padding:.5rem; }
+[hidden] { display:none !important; }
+@media (max-width: 850px) {
+  .topbar { flex-direction:column; }
+  .auth-form { grid-template-columns:1fr auto auto; width:100%; }
+  .layout { grid-template-columns:1fr; }
+  .sidebar { position:sticky; top:0; z-index:10; flex-direction:row; overflow-x:auto; border-right:0; border-bottom:1px solid var(--line); }
+  .nav-item { white-space:nowrap; }
+  .split-view, .form-grid { grid-template-columns:1fr; }
+  .form-grid .full { grid-column:auto; }
+}
+@media (max-width: 560px) {
+  .auth-form { grid-template-columns:1fr 1fr; }
+  .auth-form > div { grid-column:1/-1; }
+  .section-heading { align-items:flex-start; flex-direction:column; }
+  main { padding:.8rem; }
+  .toolbar input, .toolbar select { width:100%; }
+}
+</style>
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">coding-tools-mcp</p>
+      <h1>Admin Console</h1>
+    </div>
+    <form id="authForm" class="auth-form" autocomplete="off">
+      <div>
+        <label for="adminToken">本次页面使用的 Admin token</label>
+        <input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required>
+        <p id="adminTokenHelp" class="help">仅保存在当前页面内存中；不会写入 URL、浏览器持久化存储、日志或服务器设置。</p>
+      </div>
+      <button type="submit">连接</button>
+      <button id="forgetToken" type="button" class="secondary">清除</button>
+    </form>
+  </header>
+
+  <div class="layout">
+    <nav aria-label="Admin 页面" class="sidebar">
+      <button class="nav-item active" data-section="overview" type="button">概览</button>
+      <button class="nav-item" data-section="settings" type="button">设置</button>
+      <button class="nav-item" data-section="workspaces" type="button">Workspace</button>
+      <button class="nav-item" data-section="gateway" type="button">Gateway</button>
+      <button class="nav-item" data-section="oauth" type="button">OAuth</button>
+      <button class="nav-item" data-section="secrets" type="button">Secret Vault</button>
+      <button class="nav-item" data-section="chat" type="button">Conversations</button>
+    </nav>
+
+    <main id="mainContent" tabindex="-1">
+      <div id="globalStatus" class="status" role="status" aria-live="polite">输入专用 Admin token 后连接。</div>
+
+      <section id="section-overview" class="page-section active" aria-labelledby="overviewTitle">
+        <div class="section-heading"><div><p class="eyebrow">Runtime</p><h2 id="overviewTitle">概览</h2></div><button id="refreshAll" type="button" class="secondary">刷新</button></div>
+        <div class="card-grid">
+          <article class="card"><h3>Admin API</h3><strong id="adminApiStatus">未连接</strong><p class="muted">普通 MCP bearer 不具备管理员权限。</p></article>
+          <article class="card"><h3>Gateway</h3><strong id="gatewayRuntimeStatus">未连接</strong><p class="muted">工具快照在 Runtime 初始化时冻结，不支持热 reload。</p></article>
+          <article class="card"><h3>Telemetry</h3><strong id="telemetryStatus">未报告</strong><p id="telemetryDetail" class="muted"></p><p id="telemetryDisableHelp" class="help"></p></article>
+          <article class="card"><h3>Vault</h3><strong id="vaultStatus">未连接</strong><p class="muted">页面从不读取或显示 Secret 值。</p></article>
+        </div>
+      </section>
+
+      <section id="section-settings" class="page-section" aria-labelledby="settingsTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Revision-aware</p><h2 id="settingsTitle">服务器设置</h2></div><div class="button-row"><button id="reloadSettings" type="button" class="secondary">重新读取</button><button id="saveSettings" type="button">保存草稿</button></div></div>
+        <div id="settingsConflict" class="alert warning" role="alert" tabindex="-1" hidden></div>
+        <div id="settingsError" class="alert danger" role="alert" tabindex="-1" hidden></div>
+        <form id="settingsForm" class="card form-grid" novalidate>
+          <div><label for="settingsHost">Host</label><input id="settingsHost" aria-describedby="settingsHostHelp"><p id="settingsHostHelp" class="help">修改后需重启。</p></div>
+          <div><label for="settingsPort">Port</label><input id="settingsPort" type="number" min="1" max="65535" aria-describedby="settingsPortHelp"><p id="settingsPortHelp" class="help">1–65535，修改后需重启。</p></div>
+          <div><label for="settingsPermission">Permission mode</label><select id="settingsPermission" aria-describedby="permissionHelp"><option value="safe">safe</option><option value="trusted">trusted</option><option value="dangerous">dangerous</option></select><p id="permissionHelp" class="help"></p></div>
+          <div><label for="settingsShellEnv">Shell 环境继承</label><select id="settingsShellEnv"><option value="core">core</option><option value="all">all</option><option value="none">none</option></select></div>
+          <div class="full"><label for="settingsOauthServerUrl">OAuth server URL</label><input id="settingsOauthServerUrl" type="url" placeholder="https://mcp.example"></div>
+          <div class="full"><label for="settingsAllowedOrigins">Allowed origins（每行一个）</label><textarea id="settingsAllowedOrigins" rows="4"></textarea></div>
+          <label class="checkline full" for="settingsOauthCompatibility"><input id="settingsOauthCompatibility" type="checkbox"> OAuth compatibility mode（旧客户端使用受追踪的长效 access token）</label>
+        </form>
+        <details class="card danger-zone">
+          <summary>高级危险兼容设置</summary>
+          <h3 id="fakeReadonlyLabel"></h3>
+          <p id="fakeReadonlyWarning" class="alert danger"></p>
+          <p id="fakeReadonlyEnable" class="help"></p>
+          <p>当前状态：<strong id="fakeReadonlyStatus">未报告</strong></p>
+        </details>
+        <div class="card-grid">
+          <article class="card"><h3>Active</h3><pre id="settingsActiveJson" class="code-block"></pre></article>
+          <article class="card"><h3>Persisted</h3><pre id="settingsPersistedJson" class="code-block"></pre></article>
+          <article class="card"><h3>Pending restart</h3><ul id="settingsPending"></ul><p>Revision：<code id="settingsRevision">—</code></p></article>
+        </div>
+      </section>
+
+      <section id="section-workspaces" class="page-section" aria-labelledby="workspacesTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Catalog</p><h2 id="workspacesTitle">Workspace</h2></div><button id="reloadWorkspaces" type="button" class="secondary">刷新</button></div>
+        <div id="workspaceList" class="card-grid"></div>
+        <form id="workspaceAddForm" class="card form-grid" novalidate>
+          <h3 class="full">新增 Workspace</h3>
+          <div><label for="workspaceId">ID</label><input id="workspaceId" required></div>
+          <div><label for="workspaceName">名称</label><input id="workspaceName" required></div>
+          <div class="full"><label for="workspaceRoot">Root</label><input id="workspaceRoot" required></div>
+          <label class="checkline"><input id="workspaceEnabled" type="checkbox" checked> 启用</label>
+          <label class="checkline"><input id="workspaceDefault" type="checkbox"> 设为唯一默认 Workspace</label>
+          <div class="full"><button type="submit">添加</button></div>
+        </form>
+      </section>
+
+      <section id="section-gateway" class="page-section" aria-labelledby="gatewayTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Restart-only</p><h2 id="gatewayTitle">Gateway 配置</h2></div><button id="reloadGateway" type="button" class="secondary">刷新</button></div>
+        <div class="card-grid"><article class="card"><h3>当前快照</h3><div id="gatewaySummary"></div></article><article class="card"><h3>保存状态</h3><p>Restart required：<strong id="gatewayRestartRequired">—</strong></p><p>Persisted revision：<code id="gatewayRevision">—</code></p><p class="muted">此页面没有 start、stop 或 reload 控件。</p></article></div>
+        <form id="gatewayForm" class="card" novalidate>
+          <label for="gatewayDocument">替换配置 JSON（仅限不含凭据的配置）</label>
+          <textarea id="gatewayDocument" rows="14" placeholder='{"servers":{}}' aria-describedby="gatewayHelp"></textarea>
+          <p id="gatewayHelp" class="help">不会预填或显示任何上游凭据、摘要值或内部引用。含凭据的现有配置只能查看脱敏摘要；请通过受控配置流程维护。</p>
+          <div class="button-row"><button type="submit">保存并标记重启</button><button id="clearGatewayDraft" type="button" class="secondary">清空草稿</button></div>
+        </form>
+      </section>
+
+      <section id="section-oauth" class="page-section" aria-labelledby="oauthTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Redacted</p><h2 id="oauthTitle">OAuth 管理</h2></div><button id="reloadOAuth" type="button" class="secondary">刷新</button></div>
+        <div class="toolbar"><label for="oauthCollection">资源</label><select id="oauthCollection"><option value="clients">Clients</option><option value="grants">Grants</option><option value="tokens">Access Token metadata</option><option value="refresh-families">Refresh Families</option><option value="signing-keys">Signing Keys</option><option value="audit">Audit Events</option></select></div>
+        <p class="help">页面只显示脱敏元数据，不显示任何凭据、摘要值或内部引用。</p>
+        <div id="oauthList" class="stack"></div>
+      </section>
+
+      <section id="section-secrets" class="page-section" aria-labelledby="secretsTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Names only</p><h2 id="secretsTitle">Secret Vault</h2></div><button id="reloadSecrets" type="button" class="secondary">刷新</button></div>
+        <div id="secretList" class="stack"></div>
+        <form id="secretForm" class="card form-grid" autocomplete="off">
+          <div><label for="secretName">Secret 名称</label><input id="secretName" autocomplete="off" required></div>
+          <div><label for="secretValue">新值</label><input id="secretValue" type="password" autocomplete="new-password" required></div>
+          <div class="full"><button type="submit">设置或替换</button></div>
+        </form>
+      </section>
+
+      <section id="section-chat" class="page-section" aria-labelledby="chatTitle" hidden>
+        <div class="section-heading"><div><p class="eyebrow">Summary → detail</p><h2 id="chatTitle">Conversations</h2></div><button id="reloadConversations" type="button" class="secondary">刷新摘要</button></div>
+        <div class="toolbar"><label for="chatWorkspace">Workspace</label><select id="chatWorkspace"></select><label for="chatQuery">搜索摘要</label><input id="chatQuery"><button id="searchConversations" type="button">搜索</button></div>
+        <div class="split-view">
+          <div><div id="conversationList" class="stack"></div><div class="pager"><button id="conversationPrev" type="button" class="secondary">上一页</button><span id="conversationPage">1</span><button id="conversationNext" type="button" class="secondary">下一页</button></div></div>
+          <article id="conversationDetail" class="card" aria-live="polite"><h3>按需详情</h3><p class="muted">从摘要列表选择会话后，才会调用详情分页端点读取正文。</p></article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+    <form method="dialog" class="dialog-card">
+      <h2 id="confirmTitle">确认操作</h2>
+      <p id="confirmMessage"></p>
+      <div class="button-row end"><button value="cancel" class="secondary">取消</button><button id="confirmAccept" value="confirm" class="danger">确认</button></div>
+    </form>
+  </dialog>
+
+  <script type="module" data-build-source="settings-copy.js">
+const PERMISSION_COPY = Object.freeze({
+  safe: Object.freeze({
+    label: '安全模式',
+    description: '保留完整固定工具目录，同时限制网络、Shell 展开和高风险命令。它不会隐藏或禁用 mutation tools。',
+  }),
+  trusted: Object.freeze({
+    label: '可信本地模式',
+    description: '保留完整固定工具目录，并允许更多本机网络与 Shell 能力。仅用于受信任的本地环境。',
+  }),
+  dangerous: Object.freeze({
+    label: '危险模式',
+    description: '关闭主要命令权限门。只应在隔离容器或虚拟机中使用。',
+  }),
+});
+
+const FAKE_READONLY_COPY = Object.freeze({
+  label: '伪只读 annotations 兼容覆盖',
+  warning: '此高级兼容选项只会向客户端伪报 readOnlyHint。它不会隐藏工具、阻止 mutation、改变 handler，或形成安全边界；并且只能配合 dangerous 模式启动。',
+  enable: '通过 --dangerously-fake-readonly-annotations 或 CODING_TOOLS_MCP_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS=1 启用，然后重启服务。',
+});
+
+function permissionPresentation(mode) {
+  return PERMISSION_COPY[mode] || { label: String(mode || '未知'), description: '后端返回了未知 permission mode。' };
+}
+
+function telemetryPresentation(value) {
+  const mode = typeof value === 'string' ? value : value?.mode;
+  if (mode === 'off' || mode === 'disabled') {
+    return { mode: 'off', label: '关闭', detail: '不会发送匿名 telemetry。' };
+  }
+  if (mode === 'debug') {
+    return { mode: 'debug', label: '调试', detail: '事件仅写入 stderr，不发送到远端。' };
+  }
+  if (mode === 'enabled' || mode === 'on') {
+    return { mode: 'enabled', label: '启用', detail: '使用上游 v0.2.2 默认匿名 telemetry 策略。' };
+  }
+  return { mode: 'unknown', label: '未报告', detail: '当前 Admin 后端尚未报告 telemetry 运行模式。' };
+}
+
+const TELEMETRY_DISABLE_HELP = '设置 CODING_TOOLS_MCP_TELEMETRY=off、DO_NOT_TRACK=1，或在 CI 环境中启动；修改后重启服务。';
+
+globalThis.McpSettingsCopy = {
+  PERMISSION_COPY,
+  FAKE_READONLY_COPY,
+  TELEMETRY_DISABLE_HELP,
+  permissionPresentation,
+  telemetryPresentation,
+};
+
+export { PERMISSION_COPY, FAKE_READONLY_COPY, TELEMETRY_DISABLE_HELP, permissionPresentation, telemetryPresentation };
+</script>
+  <script type="module" data-build-source="settings-model.js">
+function clone(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function canonicalWorkspaces(workspaces, defaultId) {
+  const rows = Array.isArray(workspaces) ? workspaces.map((item) => ({ ...item })) : [];
+  let resolved = defaultId || rows.find((item) => item.default)?.id || rows.find((item) => item.enabled !== false)?.id || rows[0]?.id || '';
+  if (resolved && !rows.some((item) => item.id === resolved && item.enabled !== false)) {
+    resolved = rows.find((item) => item.enabled !== false)?.id || '';
+  }
+  return rows.map((item) => ({ ...item, default: Boolean(resolved && item.id === resolved) }));
+}
+
+function canonicalSettings(settings = {}) {
+  const result = clone(settings) || {};
+  const catalog = canonicalWorkspaces(result.workspace_catalog, result.default_workspace_id);
+  if (catalog.length) {
+    result.workspace_catalog = catalog;
+    result.default_workspace_id = catalog.find((item) => item.default)?.id || '';
+    result.workspace = catalog.find((item) => item.default)?.root || result.workspace || '';
+  }
+  return result;
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hydrateSettings(payload = {}) {
+  const active = canonicalSettings(payload.active || {});
+  const persisted = canonicalSettings(payload.persisted || {});
+  return {
+    active,
+    persisted,
+    draft: clone(persisted),
+    persistedRevision: String(payload.persisted_revision || ''),
+    pendingRestart: Array.isArray(payload.pending_restart) ? [...payload.pending_restart] : [],
+    restartRequired: Boolean(payload.restart_required),
+    conflict: null,
+    schema: clone(payload.schema || {}),
+  };
+}
+
+function refreshPersistedKeepingDraft(state, payload = {}) {
+  const draft = clone(state.draft);
+  const next = hydrateSettings(payload);
+  next.draft = draft;
+  next.conflict = {
+    code: 'stale_revision',
+    message: '服务器设置已被其他管理员更新。草稿已保留，请审阅最新 persisted revision 后再次保存。',
+  };
+  return next;
+}
+
+function computeDirty(draft, persisted) {
+  return stableJson(canonicalSettings(draft || {})) !== stableJson(canonicalSettings(persisted || {}));
+}
+
+function serializeSettings(draft = {}) {
+  return canonicalSettings(draft);
+}
+
+function createWorkspace(existing = []) {
+  const ids = new Set(existing.map((item) => item.id));
+  let index = 1;
+  let id = 'ws-new';
+  while (ids.has(id)) id = `ws-new-${index++}`;
+  return { id, name: 'New Workspace', root: '', enabled: true, default: existing.length === 0 };
+}
+
+function setDefaultWorkspace(workspaces, workspaceId) {
+  if (!workspaces.some((item) => item.id === workspaceId && item.enabled !== false)) {
+    throw new Error('Only an enabled Workspace can be the default.');
+  }
+  return workspaces.map((item) => ({ ...item, default: item.id === workspaceId }));
+}
+
+globalThis.McpSettingsModel = {
+  canonicalWorkspaces,
+  canonicalSettings,
+  hydrateSettings,
+  refreshPersistedKeepingDraft,
+  computeDirty,
+  serializeSettings,
+  createWorkspace,
+  setDefaultWorkspace,
+};
+
+export { canonicalWorkspaces, canonicalSettings, hydrateSettings, refreshPersistedKeepingDraft, computeDirty, serializeSettings, createWorkspace, setDefaultWorkspace };
+</script>
+  <script type="module" data-build-source="workspace-editor.js">
+function element(documentRef, tag, options = {}) {
+  const node = documentRef.createElement(tag);
+  if (options.className) node.className = options.className;
+  if (options.text !== undefined) node.textContent = String(options.text);
+  if (options.type) node.type = options.type;
+  if (options.id) node.id = options.id;
+  if (options.title) node.title = options.title;
+  return node;
+}
+
+function renderWorkspaceRows(container, workspaces, handlers = {}) {
+  const documentRef = container.ownerDocument || document;
+  container.replaceChildren();
+  if (!Array.isArray(workspaces) || workspaces.length === 0) {
+    container.append(element(documentRef, 'p', { className: 'muted', text: '尚未登记 Workspace。' }));
+    return;
+  }
+  for (const workspace of workspaces) {
+    const card = element(documentRef, 'article', { className: 'workspace-card' });
+    card.dataset.workspaceId = String(workspace.id || '');
+    const heading = element(documentRef, 'div', { className: 'workspace-heading' });
+    const title = element(documentRef, 'h3', { text: workspace.name || workspace.id || 'Unnamed Workspace' });
+    const badge = element(documentRef, 'span', {
+      className: `badge ${workspace.default ? 'good' : workspace.enabled === false ? 'danger' : ''}`,
+      text: workspace.default ? '默认' : workspace.enabled === false ? '已禁用' : '已启用',
+    });
+    heading.append(title, badge);
+    card.append(heading);
+
+    const ids = element(documentRef, 'dl', { className: 'compact-definition' });
+    for (const [label, value] of [['ID', workspace.id], ['Root', workspace.root]]) {
+      const dt = element(documentRef, 'dt', { text: label });
+      const dd = element(documentRef, 'dd');
+      const code = element(documentRef, 'code', { text: value || '—' });
+      dd.append(code);
+      ids.append(dt, dd);
+    }
+    card.append(ids);
+
+    const actions = element(documentRef, 'div', { className: 'button-row' });
+    const check = element(documentRef, 'button', { type: 'button', className: 'secondary', text: '检查' });
+    check.addEventListener('click', () => handlers.onCheck?.(workspace, check));
+    actions.append(check);
+    if (!workspace.default && workspace.enabled !== false) {
+      const makeDefault = element(documentRef, 'button', { type: 'button', className: 'secondary', text: '设为默认' });
+      makeDefault.addEventListener('click', () => handlers.onDefault?.(workspace, makeDefault));
+      actions.append(makeDefault);
+      const disable = element(documentRef, 'button', { type: 'button', className: 'danger', text: '禁用' });
+      disable.addEventListener('click', () => handlers.onDisable?.(workspace, disable));
+      actions.append(disable);
+    }
+    card.append(actions);
+    container.append(card);
+  }
+}
+
+function populateWorkspaceSelect(select, workspaces, selectedId = '') {
+  const documentRef = select.ownerDocument || document;
+  select.replaceChildren();
+  for (const workspace of workspaces || []) {
+    if (workspace.enabled === false) continue;
+    const option = documentRef.createElement('option');
+    option.value = String(workspace.id || '');
+    option.textContent = `${workspace.name || workspace.id} (${workspace.id})`;
+    option.selected = option.value === selectedId;
+    select.append(option);
+  }
+}
+
+globalThis.McpWorkspaceEditor = { renderWorkspaceRows, populateWorkspaceSelect };
+export { renderWorkspaceRows, populateWorkspaceSelect };
+</script>
+  <script type="module" data-build-source="settings-page.js">
+function setControlValue(documentRef, id, value) {
+  const control = documentRef.getElementById(id);
+  if (!control) return;
+  if (control.type === 'checkbox') control.checked = Boolean(value);
+  else control.value = value ?? '';
+}
+
+function renderSettingsForm(documentRef, state, permissionPresentation) {
+  const draft = state?.draft || {};
+  setControlValue(documentRef, 'settingsHost', draft.host || '');
+  setControlValue(documentRef, 'settingsPort', draft.port || '');
+  setControlValue(documentRef, 'settingsPermission', draft.permission_mode || 'safe');
+  setControlValue(documentRef, 'settingsShellEnv', draft.shell_env_inherit || 'core');
+  setControlValue(documentRef, 'settingsOauthServerUrl', draft.oauth_server_url || '');
+  setControlValue(documentRef, 'settingsOauthCompatibility', draft.oauth_compatibility_mode || false);
+  setControlValue(documentRef, 'settingsAllowedOrigins', Array.isArray(draft.allowed_origins) ? draft.allowed_origins.join('\n') : '');
+  const presentation = permissionPresentation(draft.permission_mode || 'safe');
+  const help = documentRef.getElementById('permissionHelp');
+  if (help) help.textContent = presentation.description;
+  const active = documentRef.getElementById('settingsActiveJson');
+  if (active) active.textContent = JSON.stringify(state?.active || {}, null, 2);
+  const persisted = documentRef.getElementById('settingsPersistedJson');
+  if (persisted) persisted.textContent = JSON.stringify(state?.persisted || {}, null, 2);
+  const pending = documentRef.getElementById('settingsPending');
+  if (pending) {
+    pending.replaceChildren();
+    const values = state?.pendingRestart || [];
+    if (!values.length) pending.append(documentRef.createTextNode('无待重启字段。'));
+    for (const field of values) {
+      const item = documentRef.createElement('li');
+      item.textContent = field;
+      pending.append(item);
+    }
+  }
+  const revision = documentRef.getElementById('settingsRevision');
+  if (revision) revision.textContent = state?.persistedRevision || '—';
+  const conflict = documentRef.getElementById('settingsConflict');
+  if (conflict) {
+    conflict.textContent = state?.conflict?.message || '';
+    conflict.hidden = !state?.conflict;
+  }
+}
+
+function collectSettingsDraft(documentRef, previous = {}) {
+  const allowedOrigins = String(documentRef.getElementById('settingsAllowedOrigins')?.value || '')
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return {
+    ...previous,
+    host: String(documentRef.getElementById('settingsHost')?.value || '').trim(),
+    port: Number(documentRef.getElementById('settingsPort')?.value || 0),
+    permission_mode: String(documentRef.getElementById('settingsPermission')?.value || 'safe'),
+    shell_env_inherit: String(documentRef.getElementById('settingsShellEnv')?.value || 'core'),
+    oauth_server_url: String(documentRef.getElementById('settingsOauthServerUrl')?.value || '').trim(),
+    oauth_compatibility_mode: Boolean(documentRef.getElementById('settingsOauthCompatibility')?.checked),
+    allowed_origins: allowedOrigins,
+  };
+}
+
+function renderFormError(documentRef, message, fieldId = '') {
+  const box = documentRef.getElementById('settingsError');
+  if (box) {
+    box.textContent = message || '';
+    box.hidden = !message;
+  }
+  for (const control of documentRef.querySelectorAll('[aria-invalid="true"]')) {
+    control.removeAttribute('aria-invalid');
+  }
+  if (fieldId) {
+    const control = documentRef.getElementById(fieldId);
+    if (control) {
+      control.setAttribute('aria-invalid', 'true');
+      control.focus();
+    }
+  } else if (message && box) {
+    box.focus();
+  }
+}
+
+globalThis.McpSettingsPage = { renderSettingsForm, collectSettingsDraft, renderFormError };
+export { renderSettingsForm, collectSettingsDraft, renderFormError };
+</script>
+  <script type="module" data-build-source="admin.js">
+class ApiError extends Error {
+  constructor(status, payload, message) {
+    super(message || payload?.error?.message || `Admin request failed with HTTP ${status}.`);
+    this.name = 'ApiError';
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
+const FORBIDDEN_RESPONSE_KEYS = new Set([
+  'client_secret',
+  'client_secret_digest',
+  'refresh_token',
+  'access_token',
+  'token_hash',
+  'signing_secret',
+  'secret_ref',
+]);
+
+function sensitiveKey(key) {
+  const normalized = String(key || '').toLowerCase();
+  return FORBIDDEN_RESPONSE_KEYS.has(normalized)
+    || normalized.endsWith('_secret_ref')
+    || normalized.endsWith('_digest')
+    || normalized.endsWith('_hash');
+}
+
+function sanitizeAdminValue(value) {
+  if (Array.isArray(value)) return value.map(sanitizeAdminValue);
+  if (!value || typeof value !== 'object') return value;
+  const result = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (sensitiveKey(key)) continue;
+    if (key === 'source' && child === 'secret_ref') {
+      result.source = 'configured credential';
+      continue;
+    }
+    result[key] = sanitizeAdminValue(child);
+  }
+  return result;
+}
+
+function containsCredentialControl(value) {
+  if (Array.isArray(value)) return value.some(containsCredentialControl);
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, child]) => {
+    const normalized = key.toLowerCase();
+    if (normalized === 'secret_ref' || normalized === 'env_ref') return true;
+    if (/authorization|api[-_]?key|token|password|credential|secret/.test(normalized)) return true;
+    return containsCredentialControl(child);
+  });
+}
+
+function createApiClient(getToken, fetchImpl = globalThis.fetch) {
+  async function request(path, options = {}) {
+    const token = String(getToken?.() || '');
+    const headers = new Headers(options.headers || {});
+    headers.set('Accept', 'application/json');
+    if (options.body !== undefined) headers.set('Content-Type', 'application/json');
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    const response = await fetchImpl(`/admin/api${path}`, {
+      method: options.method || 'GET',
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    let payload = {};
+    try { payload = await response.json(); } catch { payload = {}; }
+    if (!response.ok) throw new ApiError(response.status, payload);
+    return payload;
+  }
+  return { request };
+}
+
+function createNode(documentRef, tag, options = {}) {
+  const node = documentRef.createElement(tag);
+  if (options.className) node.className = options.className;
+  if (options.text !== undefined) node.textContent = String(options.text);
+  if (options.type) node.type = options.type;
+  if (options.id) node.id = options.id;
+  return node;
+}
+
+function appendDefinitionList(documentRef, container, value) {
+  const safe = sanitizeAdminValue(value);
+  const dl = createNode(documentRef, 'dl', { className: 'compact-definition' });
+  for (const [key, child] of Object.entries(safe || {})) {
+    if (typeof child === 'object' && child !== null) continue;
+    dl.append(
+      createNode(documentRef, 'dt', { text: key }),
+      createNode(documentRef, 'dd', { text: child ?? '—' }),
+    );
+  }
+  container.append(dl);
+}
+
+function renderConversationItems(container, items, onSelect) {
+  const documentRef = container.ownerDocument || document;
+  container.replaceChildren();
+  if (!items?.length) {
+    container.append(createNode(documentRef, 'p', { className: 'muted', text: '没有匹配的会话摘要。' }));
+    return;
+  }
+  for (const item of items) {
+    const card = createNode(documentRef, 'article', { className: 'conversation-card' });
+    const button = createNode(documentRef, 'button', { type: 'button' });
+    const title = createNode(documentRef, 'h3', { text: item.title || item.conversation_id || 'Untitled conversation' });
+    const identity = createNode(documentRef, 'p', { className: 'muted', text: `${item.workspace_id || '—'} / ${item.conversation_id || '—'}` });
+    const preview = createNode(documentRef, 'p', { text: item.preview || '无摘要正文。' });
+    const counts = createNode(documentRef, 'p', { className: 'muted', text: `Messages: ${item.message_count || 0} · Context: ${item.context_count || 0}` });
+    button.append(title, identity, preview, counts);
+    button.addEventListener('click', () => onSelect?.(item, button));
+    card.append(button);
+    container.append(card);
+  }
+}
+
+function renderConversationDetail(container, payload, handlers = {}) {
+  const documentRef = container.ownerDocument || document;
+  container.replaceChildren();
+  const conversation = payload?.conversation || {};
+  const heading = createNode(documentRef, 'div', { className: 'section-heading' });
+  const titleWrap = createNode(documentRef, 'div');
+  titleWrap.append(
+    createNode(documentRef, 'p', { className: 'eyebrow', text: `${conversation.workspace_id || '—'} / ${conversation.conversation_id || '—'}` }),
+    createNode(documentRef, 'h3', { text: conversation.title || conversation.conversation_id || 'Conversation detail' }),
+  );
+  const deleteConversation = createNode(documentRef, 'button', { type: 'button', className: 'danger', text: '删除会话' });
+  deleteConversation.addEventListener('click', () => handlers.onDeleteConversation?.(conversation, deleteConversation));
+  heading.append(titleWrap, deleteConversation);
+  container.append(heading);
+
+  const messagesHeading = createNode(documentRef, 'h4', { text: `Messages (${payload.messages_total || 0})` });
+  container.append(messagesHeading);
+  for (const message of payload.messages || []) {
+    const card = createNode(documentRef, 'section', { className: 'message' });
+    const meta = createNode(documentRef, 'p', { className: 'muted', text: `${message.role || 'unknown'} · ${message.message_id || '—'} · ${message.timestamp || '—'}` });
+    const content = createNode(documentRef, 'pre', { text: message.content || '' });
+    const remove = createNode(documentRef, 'button', { type: 'button', className: 'danger', text: '删除 message' });
+    remove.addEventListener('click', () => handlers.onDeleteMessage?.(message, remove));
+    card.append(meta, content, remove);
+    container.append(card);
+  }
+  const messagePager = createNode(documentRef, 'div', { className: 'pager' });
+  const previousMessages = createNode(documentRef, 'button', { type: 'button', className: 'secondary', text: 'Messages 上一页' });
+  previousMessages.disabled = (payload.message_page || 1) <= 1;
+  previousMessages.addEventListener('click', () => handlers.onMessagePage?.((payload.message_page || 1) - 1));
+  const nextMessages = createNode(documentRef, 'button', { type: 'button', className: 'secondary', text: 'Messages 下一页' });
+  nextMessages.disabled = (payload.message_page || 1) * (payload.message_page_size || 100) >= (payload.messages_total || 0);
+  nextMessages.addEventListener('click', () => handlers.onMessagePage?.((payload.message_page || 1) + 1));
+  messagePager.append(previousMessages, createNode(documentRef, 'span', { text: `第 ${payload.message_page || 1} 页` }), nextMessages);
+  container.append(messagePager);
+
+  container.append(createNode(documentRef, 'h4', { text: `Context (${payload.contexts_total || 0})` }));
+  for (const entry of payload.contexts || []) {
+    const card = createNode(documentRef, 'section', { className: 'context-entry' });
+    card.append(
+      createNode(documentRef, 'p', { className: 'muted', text: `${entry.kind || 'context'} · ${entry.context_id || '—'} · ${entry.timestamp || '—'}` }),
+      createNode(documentRef, 'pre', { text: entry.content || '' }),
+    );
+    const remove = createNode(documentRef, 'button', { type: 'button', className: 'danger', text: '删除 context' });
+    remove.addEventListener('click', () => handlers.onDeleteContext?.(entry, remove));
+    card.append(remove);
+    container.append(card);
+  }
+  const contextPager = createNode(documentRef, 'div', { className: 'pager' });
+  const previousContext = createNode(documentRef, 'button', { type: 'button', className: 'secondary', text: 'Context 上一页' });
+  previousContext.disabled = (payload.context_page || 1) <= 1;
+  previousContext.addEventListener('click', () => handlers.onContextPage?.((payload.context_page || 1) - 1));
+  const nextContext = createNode(documentRef, 'button', { type: 'button', className: 'secondary', text: 'Context 下一页' });
+  nextContext.disabled = (payload.context_page || 1) * (payload.context_page_size || 100) >= (payload.contexts_total || 0);
+  nextContext.addEventListener('click', () => handlers.onContextPage?.((payload.context_page || 1) + 1));
+  contextPager.append(previousContext, createNode(documentRef, 'span', { text: `第 ${payload.context_page || 1} 页` }), nextContext);
+  container.append(contextPager);
+}
+
+function renderOAuthItems(container, items, collection, onAction) {
+  const documentRef = container.ownerDocument || document;
+  container.replaceChildren();
+  if (!items?.length) {
+    container.append(createNode(documentRef, 'p', { className: 'muted', text: '没有记录。' }));
+    return;
+  }
+  const actionMap = {
+    clients: ['enable', 'disable'],
+    grants: ['revoke'],
+    tokens: ['revoke'],
+    'refresh-families': ['revoke'],
+    'signing-keys': ['activate', 'retire', 'revoke'],
+  };
+  const idKey = {
+    clients: 'client_id', grants: 'grant_id', tokens: 'jti',
+    'refresh-families': 'family_id', 'signing-keys': 'kid', audit: 'event_id',
+  }[collection];
+  for (const original of items) {
+    const item = sanitizeAdminValue(original);
+    const card = createNode(documentRef, 'article', { className: 'card' });
+    card.append(createNode(documentRef, 'h3', { text: String(item?.[idKey] || `${collection} item`) }));
+    appendDefinitionList(documentRef, card, item);
+    if (Object.values(item || {}).some((value) => value && typeof value === 'object')) {
+      const details = createNode(documentRef, 'details');
+      const summary = createNode(documentRef, 'summary', { text: '查看脱敏结构' });
+      const pre = createNode(documentRef, 'pre', { className: 'code-block', text: JSON.stringify(item, null, 2) });
+      details.append(summary, pre);
+      card.append(details);
+    }
+    const actions = createNode(documentRef, 'div', { className: 'button-row' });
+    for (const action of actionMap[collection] || []) {
+      const button = createNode(documentRef, 'button', { type: 'button', className: action === 'enable' || action === 'activate' ? 'secondary' : 'danger', text: action });
+      button.addEventListener('click', () => onAction?.(collection, String(item?.[idKey] || ''), action, button));
+      actions.append(button);
+    }
+    if (actions.childNodes.length) card.append(actions);
+    container.append(card);
+  }
+}
+
+function confirmDestructive(documentRef, { title, message, confirmLabel = '确认', returnFocus } = {}) {
+  const dialog = documentRef.getElementById('confirmDialog');
+  if (!dialog || typeof dialog.showModal !== 'function') {
+    return Promise.resolve(globalThis.confirm ? globalThis.confirm(message || title || '确认操作？') : false);
+  }
+  documentRef.getElementById('confirmTitle').textContent = title || '确认操作';
+  documentRef.getElementById('confirmMessage').textContent = message || '';
+  documentRef.getElementById('confirmAccept').textContent = confirmLabel;
+  return new Promise((resolve) => {
+    const finish = () => {
+      dialog.removeEventListener('close', finish);
+      const accepted = dialog.returnValue === 'confirm';
+      if (returnFocus && typeof returnFocus.focus === 'function') returnFocus.focus();
+      resolve(accepted);
+    };
+    dialog.addEventListener('close', finish);
+    dialog.showModal();
+  });
+}
+
+async function handleSettingsSave({ api, state, documentRef }) {
+  const model = globalThis.McpSettingsModel;
+  const page = globalThis.McpSettingsPage;
+  state.settings.draft = model.serializeSettings(page.collectSettingsDraft(documentRef, state.settings.draft));
+  try {
+    const payload = await api.request('/settings', {
+      method: 'PUT',
+      body: { expected_revision: state.settings.persistedRevision, updates: state.settings.draft },
+    });
+    const safePayload = { ...payload, active: sanitizeAdminValue(payload.active), persisted: sanitizeAdminValue(payload.persisted) };
+    state.settings = model.hydrateSettings(safePayload);
+    page.renderSettingsForm(documentRef, state.settings, globalThis.McpSettingsCopy.permissionPresentation);
+    page.renderFormError(documentRef, '');
+    return { saved: true, conflict: false };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      const latest = await api.request('/settings');
+      const safeLatest = { ...latest, active: sanitizeAdminValue(latest.active), persisted: sanitizeAdminValue(latest.persisted) };
+      state.settings = model.refreshPersistedKeepingDraft(state.settings, safeLatest);
+      page.renderSettingsForm(documentRef, state.settings, globalThis.McpSettingsCopy.permissionPresentation);
+      const conflict = documentRef.getElementById('settingsConflict');
+      conflict?.focus();
+      return { saved: false, conflict: true };
+    }
+    throw error;
+  }
+}
+
+function initAdminApp(documentRef = document) {
+  const model = globalThis.McpSettingsModel;
+  const copy = globalThis.McpSettingsCopy;
+  const workspaceEditor = globalThis.McpWorkspaceEditor;
+  const settingsPage = globalThis.McpSettingsPage;
+  const state = {
+    token: '', settings: null, workspaces: [], workspaceRevision: '', gateway: null,
+    gatewayRevision: '', conversationPage: 1, conversationTotal: 0,
+    selectedConversation: null, messagePage: 1, contextPage: 1,
+  };
+  const api = createApiClient(() => state.token);
+  const byId = (id) => documentRef.getElementById(id);
+
+  function status(message, kind = '') {
+    const box = byId('globalStatus');
+    if (!box) return;
+    box.textContent = message;
+    box.className = `status ${kind}`.trim();
+  }
+
+  function showSection(name) {
+    for (const section of documentRef.querySelectorAll('.page-section')) {
+      const active = section.id === `section-${name}`;
+      section.hidden = !active;
+      section.classList.toggle('active', active);
+    }
+    for (const button of documentRef.querySelectorAll('.nav-item')) {
+      button.classList.toggle('active', button.dataset.section === name);
+    }
+    byId('mainContent')?.focus();
+  }
+
+  async function loadOverview() {
+    const payload = await api.request('/status');
+    byId('adminApiStatus').textContent = payload.admin_api ? '可用' : '不可用';
+    byId('gatewayRuntimeStatus').textContent = payload.gateway?.available ? '已配置（快照不可变）' : '不可用';
+    byId('vaultStatus').textContent = payload.vault?.enabled ? '已启用' : '未启用';
+    const telemetry = copy.telemetryPresentation(payload.telemetry);
+    byId('telemetryStatus').textContent = telemetry.label;
+    byId('telemetryDetail').textContent = telemetry.detail;
+    byId('telemetryDisableHelp').textContent = copy.TELEMETRY_DISABLE_HELP;
+    byId('fakeReadonlyStatus').textContent = payload.runtime?.annotation_override === 'fake_readonly' ? '已启用' : payload.runtime ? '未启用' : '未报告';
+    return payload;
+  }
+
+  function safeSettingsPayload(payload) {
+    return { ...payload, active: sanitizeAdminValue(payload.active), persisted: sanitizeAdminValue(payload.persisted) };
+  }
+
+  async function loadSettings({ preserveDraft = false } = {}) {
+    const payload = safeSettingsPayload(await api.request('/settings'));
+    state.settings = preserveDraft && state.settings
+      ? model.refreshPersistedKeepingDraft(state.settings, payload)
+      : model.hydrateSettings(payload);
+    settingsPage.renderSettingsForm(documentRef, state.settings, copy.permissionPresentation);
+    return payload;
+  }
+
+  async function loadWorkspaces() {
+    const payload = await api.request('/workspaces');
+    state.workspaces = payload.workspace_catalog || [];
+    state.workspaceRevision = payload.persisted_revision || '';
+    workspaceEditor.renderWorkspaceRows(byId('workspaceList'), state.workspaces, {
+      onCheck: async (workspace) => {
+        const result = await api.request(`/workspaces/${encodeURIComponent(workspace.id)}/check`);
+        status(`Workspace ${workspace.id}: exists=${result.check?.exists}, directory=${result.check?.is_directory}`);
+      },
+      onDefault: async (workspace, button) => {
+        const accepted = await confirmDestructive(documentRef, {
+          title: '更改默认 Workspace',
+          message: `Workspace ID: ${workspace.id}\n影响：新的 Runtime/Session 将使用此默认 Workspace；已有 Session 绑定不变。`,
+          confirmLabel: '设为默认', returnFocus: button,
+        });
+        if (!accepted) return;
+        await api.request(`/workspaces/${encodeURIComponent(workspace.id)}/default`, { method: 'POST', body: { expected_revision: state.workspaceRevision } });
+        await Promise.all([loadWorkspaces(), loadSettings()]);
+        status(`默认 Workspace 已改为 ${workspace.id}；需要按返回状态重启。`);
+      },
+      onDisable: async (workspace, button) => {
+        const accepted = await confirmDestructive(documentRef, {
+          title: '禁用 Workspace',
+          message: `Workspace ID: ${workspace.id}\n影响：新的 Session 将无法绑定此 Workspace；已有 Session 保持冻结直到关闭。`,
+          confirmLabel: '禁用', returnFocus: button,
+        });
+        if (!accepted) return;
+        await api.request(`/workspaces/${encodeURIComponent(workspace.id)}/disable`, { method: 'POST', body: { expected_revision: state.workspaceRevision } });
+        await Promise.all([loadWorkspaces(), loadSettings()]);
+        status(`Workspace ${workspace.id} 已禁用。`);
+      },
+    });
+    workspaceEditor.populateWorkspaceSelect(byId('chatWorkspace'), state.workspaces, byId('chatWorkspace')?.value || payload.default_workspace_id);
+    return payload;
+  }
+
+  function renderGateway(payload) {
+    state.gateway = payload;
+    state.gatewayRevision = payload.persisted_revision || '';
+    byId('gatewayRestartRequired').textContent = payload.restart_required ? '是' : '否';
+    byId('gatewayRevision').textContent = state.gatewayRevision || '—';
+    const summary = byId('gatewaySummary');
+    summary.replaceChildren();
+    const servers = payload.persisted?.servers || {};
+    const aliases = Object.keys(servers);
+    if (!aliases.length) summary.append(createNode(documentRef, 'p', { className: 'muted', text: '没有持久化 Gateway server。' }));
+    for (const alias of aliases) {
+      const raw = servers[alias] || {};
+      const item = createNode(documentRef, 'article', { className: 'card' });
+      item.append(
+        createNode(documentRef, 'h4', { text: alias }),
+        createNode(documentRef, 'p', { text: `Transport: ${raw.transport || 'unknown'} · Enabled: ${raw.enabled !== false}` }),
+        createNode(documentRef, 'p', { className: 'muted', text: 'Credential fields are configured but intentionally hidden.' }),
+      );
+      summary.append(item);
+    }
+  }
+
+  async function loadGateway() { const payload = await api.request('/gateway'); renderGateway(payload); return payload; }
+
+  async function loadOAuth() {
+    const collection = byId('oauthCollection').value;
+    const payload = await api.request(`/oauth/${encodeURIComponent(collection)}`);
+    renderOAuthItems(byId('oauthList'), payload.items || [], collection, async (resource, id, action, button) => {
+      const accepted = await confirmDestructive(documentRef, {
+        title: `OAuth ${action}`,
+        message: `Resource: ${resource}\nID: ${id}\n影响：仅对该精确 ID 执行幂等状态变更。`,
+        confirmLabel: action, returnFocus: button,
+      });
+      if (!accepted) return;
+      const result = await api.request(`/oauth/${encodeURIComponent(resource)}/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: 'POST', body: {} });
+      status(`OAuth ${action} 完成，实际影响数量：${result.affected_count || 0}。`);
+      await loadOAuth();
+    });
+    return payload;
+  }
+
+  async function loadSecrets() {
+    const payload = await api.request('/secrets');
+    const root = byId('secretList');
+    root.replaceChildren();
+    for (const item of payload.secrets || []) {
+      const card = createNode(documentRef, 'article', { className: 'card' });
+      card.append(createNode(documentRef, 'strong', { text: item.name }));
+      const remove = createNode(documentRef, 'button', { type: 'button', className: 'danger', text: '删除' });
+      remove.addEventListener('click', async () => {
+        const accepted = await confirmDestructive(documentRef, {
+          title: '删除 Secret Vault 条目',
+          message: `Secret 名称: ${item.name}\n影响：删除该名称对应的一个 Vault 值；值本身不会显示。`,
+          confirmLabel: '删除', returnFocus: remove,
+        });
+        if (!accepted) return;
+        const result = await api.request(`/secrets/${encodeURIComponent(item.name)}`, { method: 'DELETE' });
+        status(`Secret ${item.name} 删除影响数量：${result.affected_count || 0}。`);
+        await loadSecrets();
+      });
+      card.append(remove);
+      root.append(card);
+    }
+    if (!(payload.secrets || []).length) root.append(createNode(documentRef, 'p', { className: 'muted', text: 'Vault 中没有已配置名称。' }));
+  }
+
+  async function loadConversations() {
+    const workspaceId = byId('chatWorkspace').value;
+    if (!workspaceId) return;
+    const query = new URLSearchParams({ workspace_id: workspaceId, page: String(state.conversationPage), page_size: '20' });
+    const search = byId('chatQuery').value.trim();
+    if (search) query.set('query', search);
+    const payload = await api.request(`/chat/conversations?${query}`);
+    state.conversationTotal = payload.total || 0;
+    byId('conversationPage').textContent = `第 ${payload.page || 1} 页`;
+    byId('conversationPrev').disabled = state.conversationPage <= 1;
+    byId('conversationNext').disabled = state.conversationPage * (payload.page_size || 20) >= state.conversationTotal;
+    renderConversationItems(byId('conversationList'), payload.items || [], async (item) => {
+      state.selectedConversation = { workspaceId: item.workspace_id, conversationId: item.conversation_id };
+      state.messagePage = 1; state.contextPage = 1;
+      await loadConversationDetail();
+    });
+  }
+
+  async function deleteChatResource(resource, workspaceId, identifier, button, detailMessage) {
+    const accepted = await confirmDestructive(documentRef, {
+      title: `删除 ${resource}`,
+      message: `Workspace ID: ${workspaceId}\nObject ID: ${identifier}\n影响：${detailMessage}`,
+      confirmLabel: '删除', returnFocus: button,
+    });
+    if (!accepted) return false;
+    const result = await api.request(`/chat/${resource}/${encodeURIComponent(workspaceId)}/${encodeURIComponent(identifier)}`, { method: 'DELETE' });
+    status(`删除完成，实际影响数量：${result.affected_count || 0}。`);
+    return true;
+  }
+
+  async function loadConversationDetail() {
+    const selected = state.selectedConversation;
+    if (!selected) return;
+    const query = new URLSearchParams({ message_page: String(state.messagePage), message_page_size: '50', context_page: String(state.contextPage), context_page_size: '50' });
+    const payload = await api.request(`/chat/conversations/${encodeURIComponent(selected.workspaceId)}/${encodeURIComponent(selected.conversationId)}?${query}`);
+    renderConversationDetail(byId('conversationDetail'), payload, {
+      onDeleteMessage: async (message, button) => {
+        if (await deleteChatResource('messages', selected.workspaceId, message.message_id, button, '最多删除 1 条 message。')) await loadConversationDetail();
+      },
+      onDeleteContext: async (entry, button) => {
+        if (await deleteChatResource('context', selected.workspaceId, entry.context_id, button, '最多删除 1 条 context entry。')) await loadConversationDetail();
+      },
+      onDeleteConversation: async (_conversation, button) => {
+        const accepted = await confirmDestructive(documentRef, {
+          title: '删除 Conversation',
+          message: `Workspace ID: ${selected.workspaceId}\nConversation ID: ${selected.conversationId}\n影响：删除该会话以及其所有 messages 和 context entries。`,
+          confirmLabel: '删除会话', returnFocus: button,
+        });
+        if (!accepted) return;
+        const result = await api.request(`/chat/conversations/${encodeURIComponent(selected.workspaceId)}/${encodeURIComponent(selected.conversationId)}`, { method: 'DELETE' });
+        status(`会话删除：conversation=${result.affected_count || 0}, messages=${result.deleted_message_count || 0}, context=${result.deleted_context_count || 0}。`);
+        state.selectedConversation = null;
+        byId('conversationDetail').replaceChildren(createNode(documentRef, 'p', { className: 'muted', text: '会话已删除。' }));
+        await loadConversations();
+      },
+      onMessagePage: async (page) => { state.messagePage = page; await loadConversationDetail(); },
+      onContextPage: async (page) => { state.contextPage = page; await loadConversationDetail(); },
+    });
+  }
+
+  async function refreshAll() {
+    status('正在读取 Admin API…');
+    await Promise.all([loadOverview(), loadSettings(), loadWorkspaces(), loadGateway(), loadSecrets()]);
+    await Promise.all([loadOAuth(), loadConversations()]);
+    status('Admin 数据已刷新。');
+  }
+
+  byId('fakeReadonlyLabel').textContent = copy.FAKE_READONLY_COPY.label;
+  byId('fakeReadonlyWarning').textContent = copy.FAKE_READONLY_COPY.warning;
+  byId('fakeReadonlyEnable').textContent = copy.FAKE_READONLY_COPY.enable;
+
+  for (const button of documentRef.querySelectorAll('.nav-item')) {
+    button.addEventListener('click', () => showSection(button.dataset.section));
+  }
+  byId('authForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    state.token = byId('adminToken').value;
+    try { await refreshAll(); } catch (error) { status(error.message, 'danger'); }
+  });
+  byId('forgetToken').addEventListener('click', () => {
+    state.token = '';
+    byId('adminToken').value = '';
+    status('Admin token 已从页面内存清除。');
+  });
+  byId('refreshAll').addEventListener('click', () => refreshAll().catch((error) => status(error.message, 'danger')));
+  byId('reloadSettings').addEventListener('click', () => loadSettings().then(() => status('Settings 已重新读取。')).catch((error) => status(error.message, 'danger')));
+  byId('saveSettings').addEventListener('click', async () => {
+    try {
+      const result = await handleSettingsSave({ api, state, documentRef });
+      status(result.conflict ? '检测到 stale revision；草稿已保留，请审阅后重新保存。' : 'Settings 已保存；查看 pending restart。', result.conflict ? 'warning' : '');
+      await loadWorkspaces();
+    } catch (error) { settingsPage.renderFormError(documentRef, error.message); status(error.message, 'danger'); }
+  });
+  byId('settingsPermission').addEventListener('change', () => {
+    byId('permissionHelp').textContent = copy.permissionPresentation(byId('settingsPermission').value).description;
+  });
+  byId('reloadWorkspaces').addEventListener('click', () => loadWorkspaces().catch((error) => status(error.message, 'danger')));
+  byId('workspaceAddForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const workspace = {
+      id: byId('workspaceId').value.trim(), name: byId('workspaceName').value.trim(), root: byId('workspaceRoot').value.trim(),
+      enabled: byId('workspaceEnabled').checked, default: byId('workspaceDefault').checked,
+    };
+    try {
+      await api.request('/workspaces', { method: 'POST', body: { expected_revision: state.workspaceRevision, workspace } });
+      event.currentTarget.reset(); byId('workspaceEnabled').checked = true;
+      await Promise.all([loadWorkspaces(), loadSettings()]);
+      status(`Workspace ${workspace.id} 已添加。`);
+    } catch (error) { status(error.message, 'danger'); }
+  });
+  byId('reloadGateway').addEventListener('click', () => loadGateway().catch((error) => status(error.message, 'danger')));
+  byId('clearGatewayDraft').addEventListener('click', () => { byId('gatewayDocument').value = ''; });
+  byId('gatewayForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const draft = byId('gatewayDocument').value;
+    try {
+      const documentValue = JSON.parse(draft || '{"servers":{}}');
+      if (containsCredentialControl(documentValue)) throw new Error('Gateway WebUI 草稿不得包含 credential、secret reference 或敏感 header/env 字段。');
+      const result = await api.request('/gateway', { method: 'PUT', body: { expected_revision: state.gatewayRevision, document: documentValue } });
+      byId('gatewayDocument').value = '';
+      renderGateway(result);
+      status(`Gateway 配置已持久化。restart_required=${Boolean(result.restart_required)}；现有 Runtime 未热加载。`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        await loadGateway();
+        status('Gateway revision 冲突；草稿已保留，persisted revision 已刷新。', 'warning');
+      } else status(error.message, 'danger');
+    }
+  });
+  byId('oauthCollection').addEventListener('change', () => loadOAuth().catch((error) => status(error.message, 'danger')));
+  byId('reloadOAuth').addEventListener('click', () => loadOAuth().catch((error) => status(error.message, 'danger')));
+  byId('reloadSecrets').addEventListener('click', () => loadSecrets().catch((error) => status(error.message, 'danger')));
+  byId('secretForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const name = byId('secretName').value.trim();
+    const value = byId('secretValue').value;
+    try {
+      const result = await api.request(`/secrets/${encodeURIComponent(name)}`, { method: 'PUT', body: { value } });
+      byId('secretValue').value = '';
+      status(`Secret ${name} 已配置；实际影响数量：${result.affected_count || 0}。`);
+      await loadSecrets();
+    } catch (error) { byId('secretValue').value = ''; status(error.message, 'danger'); }
+  });
+  byId('chatWorkspace').addEventListener('change', () => { state.conversationPage = 1; state.selectedConversation = null; loadConversations().catch((error) => status(error.message, 'danger')); });
+  byId('searchConversations').addEventListener('click', () => { state.conversationPage = 1; loadConversations().catch((error) => status(error.message, 'danger')); });
+  byId('reloadConversations').addEventListener('click', () => loadConversations().catch((error) => status(error.message, 'danger')));
+  byId('conversationPrev').addEventListener('click', () => { if (state.conversationPage > 1) { state.conversationPage -= 1; loadConversations().catch((error) => status(error.message, 'danger')); } });
+  byId('conversationNext').addEventListener('click', () => { state.conversationPage += 1; loadConversations().catch((error) => status(error.message, 'danger')); });
+
+  return { state, api, refreshAll, loadSettings, loadWorkspaces, loadGateway, loadOAuth, loadSecrets, loadConversations, loadConversationDetail, showSection };
+}
+
+globalThis.McpAdminApp = {
+  ApiError,
+  sanitizeAdminValue,
+  containsCredentialControl,
+  createApiClient,
+  renderConversationItems,
+  renderConversationDetail,
+  renderOAuthItems,
+  confirmDestructive,
+  handleSettingsSave,
+  initAdminApp,
+};
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => initAdminApp(document));
+}
+
+export { ApiError, sanitizeAdminValue, containsCredentialControl, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, initAdminApp };
+</script>
+</body>
+</html>

@@ -406,6 +406,16 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                 ) as response:
                     payload = json.loads(response.read())
                 self.assertTrue(payload["ok"])
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_address[1]}/admin",
+                        headers={"Authorization": "Bearer dedicated-admin-token"},
+                    ),
+                    timeout=5,
+                ) as response:
+                    page = response.read().decode("utf-8")
+                self.assertIn('data-build-source="admin.js"', page)
+                self.assertNotIn('src="./admin.js"', page)
             finally:
                 server.shutdown()
                 server.server_close()

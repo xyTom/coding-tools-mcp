@@ -168,6 +168,16 @@ must never describe this switch as safe or genuinely read-only.
 - Chat text, transcript paths, commands, model responses, and summaries are not
   added to telemetry or ordinary logs.
 
+## Admin WebUI
+
+- `webui/src/**` is the sole editable frontend source. Packaged files under `coding_tools_mcp/webui_dist/**` are recreated only by the formal build.
+- The page consumes the dedicated-Admin Phase 08/09 API. It does not bypass authentication, settings/Gateway revisions, Workspace IDs, or conversation pagination.
+- The Admin token is kept in page memory only and is never placed in URLs or browser persistent storage.
+- No legacy tool-profile UI/state/serialization exists. Safe mode does not claim to hide mutation tools; fake-readonly annotations are presented only as a dangerous non-security compatibility override.
+- Stale settings writes preserve the user draft, refresh the persisted revision, and present a conflict instead of silently overwriting. Gateway writes remain restart-only.
+- OAuth/Gateway/Vault credential material and references are not displayed. Conversation lists use summaries and full text is fetched only through paginated detail calls.
+- Untrusted server/transcript content is rendered through node creation and `textContent`, not `innerHTML`. Destructive actions require an ID-specific confirmation and restore focus.
+
 ## Telemetry and secret-store boundaries
 
 - Integration preserves the upstream v0.2.2 telemetry default: anonymous
@@ -191,7 +201,9 @@ The following block is consumed by the Phase 02 contract tests.
   "schema_version": 1,
   "protocol": {
     "target": "2025-11-25",
-    "compatible": ["2025-06-18"]
+    "compatible": [
+      "2025-06-18"
+    ]
   },
   "version": {
     "integration": "0.2.2"
@@ -200,7 +212,9 @@ The following block is consumed by the Phase 02 contract tests.
     "strategy": "fixed",
     "source": "coding_tools_mcp.server.TOOL_REGISTRY",
     "legacy_tool_profile_controls_catalog": false,
-    "optional_installation_gates": ["view_image"],
+    "optional_installation_gates": [
+      "view_image"
+    ],
     "fake_readonly": {
       "security_boundary": false,
       "changes_catalog": false,
@@ -215,24 +229,47 @@ The following block is consumed by the Phase 02 contract tests.
     "unknown_value": "ignore_with_warning",
     "cases": [
       {
-        "input": {"tool_profile": "full"},
-        "output": {"tool_profile": null, "catalog": "fixed", "warning": "legacy_tool_profile_ignored"}
+        "input": {
+          "tool_profile": "full"
+        },
+        "output": {
+          "tool_profile": null,
+          "catalog": "fixed",
+          "warning": "legacy_tool_profile_ignored"
+        }
       },
       {
-        "input": {"tool_profile": "read-only"},
-        "output": {"tool_profile": null, "catalog": "fixed", "warning": "legacy_tool_profile_ignored"}
+        "input": {
+          "tool_profile": "read-only"
+        },
+        "output": {
+          "tool_profile": null,
+          "catalog": "fixed",
+          "warning": "legacy_tool_profile_ignored"
+        }
       },
       {
-        "input": {"tool_profile": "compat-readonly-all"},
-        "output": {"tool_profile": null, "catalog": "fixed", "warning": "legacy_tool_profile_ignored"}
+        "input": {
+          "tool_profile": "compat-readonly-all"
+        },
+        "output": {
+          "tool_profile": null,
+          "catalog": "fixed",
+          "warning": "legacy_tool_profile_ignored"
+        }
       }
     ]
   },
   "oauth": {
     "grant_types_source": "coding_tools_mcp.oauth.OAUTH_GRANT_TYPES_SUPPORTED",
     "response_types_source": "coding_tools_mcp.oauth.OAUTH_RESPONSE_TYPES_SUPPORTED",
-    "advertised_grant_types": ["authorization_code", "refresh_token"],
-    "advertised_response_types": ["code"],
+    "advertised_grant_types": [
+      "authorization_code",
+      "refresh_token"
+    ],
+    "advertised_response_types": [
+      "code"
+    ],
     "authorization_codes": "ephemeral",
     "persistent_store_phase": 4,
     "http_integration_phase": 5,
@@ -241,7 +278,11 @@ The following block is consumed by the Phase 02 contract tests.
   "workspace_binding": {
     "phase": 6,
     "point": "http_initialize_runtime_factory",
-    "identity_fields": ["client_id", "grant_id", "workspace_id"],
+    "identity_fields": [
+      "client_id",
+      "grant_id",
+      "workspace_id"
+    ],
     "immutable_per_session": true,
     "ordinary_tool_switching": false,
     "invalid_mapping": "fail_closed",
@@ -272,7 +313,11 @@ The following block is consumed by the Phase 02 contract tests.
     "ordinary_mcp_bearer_is_admin": false,
     "handler_sql": false,
     "responses_redacted": true,
-    "settings_views": ["active", "persisted", "pending_restart"],
+    "settings_views": [
+      "active",
+      "persisted",
+      "pending_restart"
+    ],
     "stale_update": "revision_conflict",
     "gateway_change": "persist_and_restart_only",
     "gateway_dynamic_reload": false,
@@ -287,7 +332,13 @@ The following block is consumed by the Phase 02 contract tests.
     "ordinary_scope": "immutable_workspace_service",
     "global_operations_authentication": "dedicated_admin_token",
     "scan_roots": "registered_workspace_relative_only",
-    "scan_limits": ["depth", "files", "file_bytes", "total_bytes", "messages"],
+    "scan_limits": [
+      "depth",
+      "files",
+      "file_bytes",
+      "total_bytes",
+      "messages"
+    ],
     "malformed_record": "item_error_continue",
     "list_default": "summary_paginated",
     "full_content": "explicit_detail_only",
@@ -302,6 +353,23 @@ The following block is consumed by the Phase 02 contract tests.
     "server_admin": "server_secret_vault",
     "desktop": "desktop_profile_storage",
     "shared": false
+  },
+  "webui": {
+    "phase": 10,
+    "source_root": "webui/src",
+    "dist": "build_generated_only",
+    "authentication": "dedicated_admin_token",
+    "admin_token_storage": "page_memory_only",
+    "tool_profile_controls": false,
+    "safe_mode_hides_mutation_tools": false,
+    "fake_readonly_security_boundary": false,
+    "settings_stale_update": "preserve_draft_refresh_revision_conflict",
+    "gateway_change": "persist_and_restart_only",
+    "gateway_dynamic_reload": false,
+    "secret_material_displayed": false,
+    "conversation_list": "summary_only",
+    "conversation_detail": "explicit_paginated",
+    "untrusted_rendering": "dom_text_content"
   }
 }
 ```

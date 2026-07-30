@@ -187,6 +187,27 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertNotRegex(source, r"\b(?:SELECT|INSERT|UPDATE|DELETE FROM|PRAGMA)\b")
         self.assertNotIn("reload_upstream", source)
 
+    def test_phase10_webui_contract_is_machine_readable(self) -> None:
+        webui = self.contract["webui"]
+        self.assertEqual(webui["phase"], 10)
+        self.assertEqual(webui["source_root"], "webui/src")
+        self.assertEqual(webui["dist"], "build_generated_only")
+        self.assertEqual(webui["authentication"], "dedicated_admin_token")
+        self.assertEqual(webui["admin_token_storage"], "page_memory_only")
+        self.assertIs(webui["tool_profile_controls"], False)
+        self.assertIs(webui["safe_mode_hides_mutation_tools"], False)
+        self.assertIs(webui["fake_readonly_security_boundary"], False)
+        self.assertEqual(
+            webui["settings_stale_update"],
+            "preserve_draft_refresh_revision_conflict",
+        )
+        self.assertEqual(webui["gateway_change"], "persist_and_restart_only")
+        self.assertIs(webui["gateway_dynamic_reload"], False)
+        self.assertIs(webui["secret_material_displayed"], False)
+        self.assertEqual(webui["conversation_list"], "summary_only")
+        self.assertEqual(webui["conversation_detail"], "explicit_paginated")
+        self.assertEqual(webui["untrusted_rendering"], "dom_text_content")
+
     def test_phase09_chat_persistence_contract_is_machine_readable(self) -> None:
         chat = self.contract["chat_persistence"]
         self.assertEqual(chat["phase"], 9)
