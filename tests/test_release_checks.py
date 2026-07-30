@@ -59,8 +59,9 @@ class ReleaseMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "not stable"):
                 validate_release(root, "v0.2.0")
 
-    def test_current_v022_release_tree_is_consistent(self) -> None:
-        self.assertEqual(validate_release(ROOT, "v0.2.2"), ("0.2.2", "0.1.0"))
+    def test_current_integration_tree_requires_release_preparation(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "Unreleased"):
+            validate_release(ROOT, "v0.2.2")
 
 
 class FinalAuditTests(unittest.TestCase):
