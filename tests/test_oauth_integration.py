@@ -3,7 +3,11 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import shutil
+import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,7 +17,6 @@ import sqlite3
 import unittest
 from contextlib import closing, contextmanager, redirect_stderr
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Iterator
 from unittest.mock import patch
 
@@ -38,17 +41,28 @@ PEPPER = b"phase-05-registry-pepper" * 2
 
 @contextmanager
 def oauth_root() -> Iterator[Path]:
-    with TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        try:
-            yield root
-        finally:
-            database = root / "oauth.sqlite3"
-            if database.exists():
-                with closing(sqlite3.connect(database)) as conn:
-                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    conn.execute("PRAGMA journal_mode=DELETE")
-                    conn.commit()
+    root = Path(tempfile.mkdtemp())
+    try:
+        yield root
+    finally:
+        database = root / "oauth.sqlite3"
+        if database.exists():
+            with closing(sqlite3.connect(database)) as conn:
+                conn.execute("PRAGMA busy_timeout = 5000")
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("PRAGMA journal_mode=DELETE")
+                conn.commit()
+        for attempt in range(20):
+            try:
+                shutil.rmtree(root)
+                break
+            except FileNotFoundError:
+                break
+            except OSError as exc:
+                retryable = os.name == "nt" and getattr(exc, "winerror", None) in {5, 32, 145}
+                if not retryable or attempt == 19:
+                    raise
+                time.sleep(0.05)
 
 
 class PersistentOAuthClientRegistryTests(unittest.TestCase):
