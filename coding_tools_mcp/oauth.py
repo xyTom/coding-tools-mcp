@@ -8,13 +8,13 @@ import threading
 import time
 import urllib.parse
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import jwt
 
 from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
-from .secret_vault import SecretVault
+from .secret_vault import SecretVault, SecretVaultError
 
 
 OAUTH_CODE_TTL_SECONDS = 300
@@ -417,8 +417,114 @@ def valid_pkce_challenge(code_challenge: str) -> bool:
     return re.fullmatch(r"[A-Za-z0-9_-]{43}", code_challenge) is not None
 
 
+def signing_key_id(secret: bytes) -> str:
+    return f"key-{hashlib.sha256(secret).hexdigest()[:16]}"
+
+
+def signing_key_secret_ref(kid: str) -> str:
+    return f"oauth/signing/{kid}"
+
+
+def initialize_signing_key_ring(
+    store: OAuthAuthorizationStore,
+    vault: SecretVault,
+    initial_secret: bytes,
+    *,
+    legacy_secret_ref: str,
+) -> tuple[str, bytes, dict[str, bytes]]:
+    if not vault.enabled():
+        raise OAuthServiceError("OAuth Secret Vault is not enabled.")
+    records = store.list_signing_keys()
+    initial_kid = signing_key_id(initial_secret)
+    if not records:
+        reference = signing_key_secret_ref(initial_kid)
+        vault.set_secret(reference, initial_secret.hex())
+        store.register_signing_key(
+            initial_kid,
+            hashlib.sha256(initial_secret).hexdigest(),
+            secret_ref=reference,
+        )
+        records = store.list_signing_keys()
+
+    keys: dict[str, bytes] = {}
+    active: list[tuple[str, bytes]] = []
+    for record in records:
+        status = record.get("status")
+        if status not in {"active", "retired"}:
+            continue
+        raw_kid = record.get("kid")
+        raw_reference = record.get("secret_ref")
+        if not isinstance(raw_kid, str) or not raw_kid:
+            raise OAuthServiceError("OAuth signing-key metadata is invalid.")
+        kid = raw_kid
+        if not isinstance(raw_reference, str) or not raw_reference:
+            raise OAuthServiceError(f"OAuth signing key {kid!r} has no Vault reference.")
+        reference = raw_reference
+        try:
+            secret = bytes.fromhex(vault.get_secret(reference))
+        except (ValueError, SecretVaultError) as exc:
+            raise OAuthServiceError(
+                f"OAuth signing key {kid!r} cannot be loaded from Secret Vault."
+            ) from exc
+        fingerprint = hashlib.sha256(secret).hexdigest()
+        if record.get("fingerprint") != fingerprint or signing_key_id(secret) != kid:
+            raise OAuthServiceError(f"OAuth signing key {kid!r} metadata does not match its secret.")
+        if reference == legacy_secret_ref:
+            migrated_ref = signing_key_secret_ref(kid)
+            vault.set_secret(migrated_ref, secret.hex())
+            store.register_signing_key(
+                kid,
+                fingerprint,
+                secret_ref=migrated_ref,
+                active=status == "active",
+            )
+        keys[kid] = secret
+        if status == "active":
+            active.append((kid, secret))
+    if len(active) != 1:
+        raise OAuthServiceError("OAuth signing-key ring must contain exactly one active key.")
+    active_kid, active_secret = active[0]
+    return active_kid, active_secret, keys
+
+
+def rotate_signing_key(config: OAuthConfig) -> OAuthConfig:
+    if config.store is None or config.secret_vault is None:
+        raise OAuthServiceError("OAuth signing-key persistence is not configured.")
+    if not config.secret_vault.enabled():
+        raise OAuthServiceError("OAuth Secret Vault is not enabled.")
+    secret = secrets.token_bytes(32)
+    kid = signing_key_id(secret)
+    reference = signing_key_secret_ref(kid)
+    try:
+        config.secret_vault.set_secret(reference, secret.hex())
+        config.store.register_signing_key(
+            kid,
+            hashlib.sha256(secret).hexdigest(),
+            secret_ref=reference,
+        )
+    except (OAuthStoreError, SecretVaultError, ValueError) as exc:
+        raise OAuthServiceError("OAuth signing-key rotation failed.") from exc
+    keys = dict(config.signing_keys)
+    keys[kid] = secret
+    return replace(
+        config,
+        token_secret=secret,
+        signing_kid=kid,
+        signing_keys=keys,
+    )
+
+
+def revoke_signing_key(config: OAuthConfig, kid: str) -> bool:
+    if config.store is None:
+        raise OAuthServiceError("OAuth signing-key persistence is not configured.")
+    try:
+        return config.store.revoke_signing_key(kid)
+    except OAuthStoreError as exc:
+        raise OAuthServiceError("OAuth signing-key revocation failed.") from exc
+
+
 def oauth_signing_kid(config: OAuthConfig) -> str:
-    return config.signing_kid or f"key-{hashlib.sha256(config.token_secret).hexdigest()[:16]}"
+    return config.signing_kid or signing_key_id(config.token_secret)
 
 
 def _oauth_signing_key(config: OAuthConfig, kid: str) -> bytes | None:

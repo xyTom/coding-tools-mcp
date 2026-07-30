@@ -52,6 +52,7 @@ from .oauth import (
     create_access_token,
     create_authorization_grant,
     exchange_refresh_token,
+    initialize_signing_key_ring,
     issue_refresh_token,
     valid_pkce_challenge,
     validate_access_token,
@@ -5480,6 +5481,9 @@ def _hex_secret(
             raise ValueError(f"{name} must be hex-encoded bytes.") from exc
         if len(value) < byte_length:
             raise ValueError(f"{name} must contain at least {byte_length} bytes.")
+        normalized = value.hex()
+        if name not in vault.list_names() or vault.get_secret(name) != normalized:
+            vault.set_secret(name, normalized)
         return value
     stored, _created = _vault_secret(
         vault,
@@ -5534,11 +5538,11 @@ def build_persistent_oauth_config(
         byte_length=32,
     )
     store = OAuthAuthorizationStore(config_dir / OAUTH_DB_FILENAME, pepper=refresh_pepper)
-    signing_kid = f"key-{hashlib.sha256(token_secret).hexdigest()[:16]}"
-    store.register_signing_key(
-        signing_kid,
-        hashlib.sha256(token_secret).hexdigest(),
-        secret_ref=OAUTH_TOKEN_SECRET,
+    signing_kid, active_secret, signing_keys = initialize_signing_key_ring(
+        store,
+        vault,
+        token_secret,
+        legacy_secret_ref=OAUTH_TOKEN_SECRET,
     )
     registry = PersistentOAuthClientRegistry(store)
     if client_id:
@@ -5551,13 +5555,13 @@ def build_persistent_oauth_config(
         OAuthConfig(
             password=resolved_password,
             server_url=server_url,
-            token_secret=token_secret,
+            token_secret=active_secret,
             token_ttl=token_ttl,
             registry=registry,
             store=store,
             secret_vault=vault,
             signing_kid=signing_kid,
-            signing_keys={signing_kid: token_secret},
+            signing_keys=signing_keys,
         ),
         password_created,
     )

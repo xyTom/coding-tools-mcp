@@ -17,6 +17,8 @@ from coding_tools_mcp.oauth import (
 from coding_tools_mcp.protocol import PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS
 from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
 from coding_tools_mcp.server import MCPHandler, Runtime, TOOL_REGISTRY, build_parser
+from tests.test_oauth_store import oauth_root
+
 from coding_tools_mcp.settings_definition import (
     LEGACY_TOOL_PROFILE_WARNING,
     migrate_persisted_settings,
@@ -172,8 +174,8 @@ class IntegrationContractTests(unittest.TestCase):
         oauth = self.contract["oauth"]
         self.assertEqual(oauth["persistent_store_phase"], 4)
         self.assertEqual(oauth["migration"], "idempotent_transactional")
-        with TemporaryDirectory() as tmp:
-            path = Path(tmp) / "oauth.sqlite3"
+        with oauth_root() as root:
+            path = root / "oauth.sqlite3"
             first = OAuthAuthorizationStore(path, pepper=b"contract-pepper" * 2)
             first.upsert_client(
                 "contract-agent",
