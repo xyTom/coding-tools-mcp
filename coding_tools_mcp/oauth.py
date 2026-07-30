@@ -12,6 +12,8 @@ from typing import Any
 
 import jwt
 
+from .oauth_store import OAuthAuthorizationStore
+
 
 OAUTH_CODE_TTL_SECONDS = 300
 OAUTH_TOKEN_TTL_SECONDS = 24 * 60 * 60
@@ -73,26 +75,7 @@ class OAuthClientRegistry:
             self._clients[client_id] = client
 
     def register(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        redirects = validate_redirect_uris(metadata.get("redirect_uris"))
-        requested_grant_types = metadata.get("grant_types", list(OAUTH_GRANT_TYPES_SUPPORTED))
-        requested_response_types = metadata.get("response_types", list(OAUTH_RESPONSE_TYPES_SUPPORTED))
-        if not isinstance(requested_grant_types, list) or not all(
-            isinstance(item, str) for item in requested_grant_types
-        ):
-            raise ValueError("grant_types must be an array of strings")
-        grant_types = tuple(item for item in OAUTH_GRANT_TYPES_SUPPORTED if item in requested_grant_types)
-        if not grant_types:
-            raise ValueError("grant_types must include at least one supported value")
-        if not isinstance(requested_response_types, list) or not all(
-            isinstance(item, str) for item in requested_response_types
-        ):
-            raise ValueError("response_types must be an array of strings")
-        response_types = tuple(item for item in OAUTH_RESPONSE_TYPES_SUPPORTED if item in requested_response_types)
-        if not response_types:
-            raise ValueError("response_types must include at least one supported value")
-        method = str(metadata.get("token_endpoint_auth_method") or "none")
-        if method not in {"none", "client_secret_post", "client_secret_basic"}:
-            raise ValueError("unsupported token_endpoint_auth_method")
+        redirects, grant_types, response_types, method, client_name = _validated_registration(metadata)
         with self._lock:
             if len(self._clients) >= MAX_REGISTERED_CLIENTS:
                 raise ValueError("dynamic client registration limit reached")
@@ -104,24 +87,11 @@ class OAuthClientRegistry:
                 client_id=client_id,
                 redirect_uris=redirects,
                 token_endpoint_auth_method=method,
-                client_name=_optional_text(metadata.get("client_name"), 200),
+                client_name=client_name,
                 secret_digest=_secret_digest(client_secret) if client_secret is not None else None,
             )
             self._clients[client_id] = client
-        response: dict[str, Any] = {
-            "client_id": client.client_id,
-            "client_id_issued_at": client.issued_at,
-            "redirect_uris": list(client.redirect_uris),
-            "grant_types": list(grant_types),
-            "response_types": list(response_types),
-            "token_endpoint_auth_method": client.token_endpoint_auth_method,
-        }
-        if client.client_name:
-            response["client_name"] = client.client_name
-        if client_secret is not None:
-            response["client_secret"] = client_secret
-            response["client_secret_expires_at"] = 0
-        return response
+        return _registration_response(client, grant_types, response_types, client_secret)
 
     def get(self, client_id: str) -> OAuthClient | None:
         with self._lock:
@@ -137,6 +107,87 @@ class OAuthClientRegistry:
             client is not None
             and client.token_endpoint_auth_method == auth_method
             and client.verifies_secret(client_secret)
+        )
+
+
+class PersistentOAuthClientRegistry(OAuthClientRegistry):
+    """Store-backed registry preserving the upstream registry interface.
+
+    Store errors propagate so callers can fail closed instead of silently
+    falling back to an in-memory registry.
+    """
+
+    def __init__(self, store: OAuthAuthorizationStore) -> None:
+        self.store = store
+
+    def add_preregistered(
+        self,
+        client_id: str,
+        redirect_uris: tuple[str, ...],
+        *,
+        client_secret: str | None,
+    ) -> None:
+        redirects = validate_redirect_uris(list(redirect_uris))
+        method = "client_secret_post" if client_secret is not None else "none"
+        self.store.upsert_client(
+            client_id,
+            display_name=client_id,
+            scopes="mcp",
+            redirect_uris=redirects,
+            client_type="confidential" if client_secret is not None else "public_pkce",
+            token_endpoint_auth_method=method,
+            client_secret_digest=(
+                _secret_digest(client_secret) if client_secret is not None else None
+            ),
+        )
+
+    def register(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        redirects, grant_types, response_types, method, client_name = _validated_registration(metadata)
+        if len(self.store.list_clients()) >= MAX_REGISTERED_CLIENTS:
+            raise ValueError("dynamic client registration limit reached")
+        client_id = secrets.token_urlsafe(24)
+        while self.store.get_client(client_id) is not None:
+            client_id = secrets.token_urlsafe(24)
+        client_secret = secrets.token_urlsafe(32) if method != "none" else None
+        client = OAuthClient(
+            client_id=client_id,
+            redirect_uris=redirects,
+            token_endpoint_auth_method=method,
+            client_name=client_name,
+            secret_digest=_secret_digest(client_secret) if client_secret is not None else None,
+        )
+        self.store.upsert_client(
+            client.client_id,
+            display_name=client.client_name or client.client_id,
+            scopes="mcp",
+            redirect_uris=client.redirect_uris,
+            client_type="confidential" if client_secret is not None else "public_pkce",
+            token_endpoint_auth_method=client.token_endpoint_auth_method,
+            client_secret_digest=client.secret_digest,
+        )
+        return _registration_response(client, grant_types, response_types, client_secret)
+
+    def get(self, client_id: str) -> OAuthClient | None:
+        record = self.store.get_client(client_id)
+        if record is None or not bool(record.get("enabled")) or record.get("revoked_at") is not None:
+            return None
+        redirects = record.get("redirect_uris")
+        if not isinstance(redirects, list) or not all(isinstance(item, str) for item in redirects):
+            return None
+        method = record.get("token_endpoint_auth_method")
+        if method not in {"none", "client_secret_post", "client_secret_basic"}:
+            return None
+        digest = record.get("client_secret_digest")
+        if digest is not None and not isinstance(digest, str):
+            return None
+        created_at = record.get("created_at")
+        return OAuthClient(
+            client_id=client_id,
+            redirect_uris=tuple(redirects),
+            token_endpoint_auth_method=method,
+            client_name=str(record.get("display_name") or client_id),
+            secret_digest=digest,
+            issued_at=int(created_at) if isinstance(created_at, (int, float)) else int(time.time()),
         )
 
 
@@ -172,6 +223,54 @@ def validate_redirect_uris(value: Any) -> tuple[str, ...]:
     if len(set(redirects)) != len(redirects):
         raise ValueError("redirect_uris must be unique")
     return tuple(redirects)
+
+
+def _validated_registration(
+    metadata: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], str, str | None]:
+    redirects = validate_redirect_uris(metadata.get("redirect_uris"))
+    requested_grant_types = metadata.get("grant_types", list(OAUTH_GRANT_TYPES_SUPPORTED))
+    requested_response_types = metadata.get("response_types", list(OAUTH_RESPONSE_TYPES_SUPPORTED))
+    if not isinstance(requested_grant_types, list) or not all(
+        isinstance(item, str) for item in requested_grant_types
+    ):
+        raise ValueError("grant_types must be an array of strings")
+    grant_types = tuple(item for item in OAUTH_GRANT_TYPES_SUPPORTED if item in requested_grant_types)
+    if not grant_types:
+        raise ValueError("grant_types must include at least one supported value")
+    if not isinstance(requested_response_types, list) or not all(
+        isinstance(item, str) for item in requested_response_types
+    ):
+        raise ValueError("response_types must be an array of strings")
+    response_types = tuple(item for item in OAUTH_RESPONSE_TYPES_SUPPORTED if item in requested_response_types)
+    if not response_types:
+        raise ValueError("response_types must include at least one supported value")
+    method = str(metadata.get("token_endpoint_auth_method") or "none")
+    if method not in {"none", "client_secret_post", "client_secret_basic"}:
+        raise ValueError("unsupported token_endpoint_auth_method")
+    return redirects, grant_types, response_types, method, _optional_text(metadata.get("client_name"), 200)
+
+
+def _registration_response(
+    client: OAuthClient,
+    grant_types: tuple[str, ...],
+    response_types: tuple[str, ...],
+    client_secret: str | None,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "client_id": client.client_id,
+        "client_id_issued_at": client.issued_at,
+        "redirect_uris": list(client.redirect_uris),
+        "grant_types": list(grant_types),
+        "response_types": list(response_types),
+        "token_endpoint_auth_method": client.token_endpoint_auth_method,
+    }
+    if client.client_name:
+        response["client_name"] = client.client_name
+    if client_secret is not None:
+        response["client_secret"] = client_secret
+        response["client_secret_expires_at"] = 0
+    return response
 
 
 def verify_pkce(code_verifier: str, code_challenge: str) -> bool:
