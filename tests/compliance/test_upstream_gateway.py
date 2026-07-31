@@ -84,7 +84,6 @@ class FakeUpstreamClient(BaseUpstreamClient):
         self.behavior = behavior
         self.marker = marker
         self.calls: list[tuple[str, dict[str, object]]] = []
-        self.closed = False
         self.close_calls = 0
 
     def initialize(self) -> None:
@@ -140,9 +139,8 @@ class FakeUpstreamClient(BaseUpstreamClient):
     def notify(self, method: str, params: dict[str, object] | None = None) -> None:
         raise AssertionError("Fake client does not use raw notify().")
 
-    def close(self) -> None:
+    def _close_transport(self) -> None:
         self.close_calls += 1
-        self.closed = True
 
 
 def build_manager(

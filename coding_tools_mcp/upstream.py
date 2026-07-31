@@ -190,6 +190,9 @@ class BaseUpstreamClient:
         self.secret_resolver = secret_resolver
         self._next_id = 1
         self._id_lock = threading.Lock()
+        self._lifecycle_condition = threading.Condition(threading.Lock())
+        self._lifecycle_closed = False
+        self._active_call_leases = 0
 
     def initialize(self) -> None:
         self.request(
@@ -220,14 +223,18 @@ class BaseUpstreamClient:
         return [copy.deepcopy(tool) for tool in tools]
 
     def call_tool_raw(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        response = self.request("tools/call", {"name": name, "arguments": arguments})
-        if not isinstance(response, dict):
-            raise UpstreamError(
-                "UPSTREAM_PROTOCOL_ERROR",
-                "Upstream tools/call result was not an object.",
-                category="protocol",
-            )
-        return response
+        self._acquire_call_lease()
+        try:
+            response = self.request("tools/call", {"name": name, "arguments": arguments})
+            if not isinstance(response, dict):
+                raise UpstreamError(
+                    "UPSTREAM_PROTOCOL_ERROR",
+                    "Upstream tools/call result was not an object.",
+                    category="protocol",
+                )
+            return response
+        finally:
+            self._release_call_lease()
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Backward-compatible raw call followed by normalization only."""
@@ -240,7 +247,37 @@ class BaseUpstreamClient:
         raise NotImplementedError
 
     def close(self) -> None:
+        with self._lifecycle_condition:
+            if self._lifecycle_closed:
+                return
+            self._lifecycle_closed = True
+            while self._active_call_leases:
+                self._lifecycle_condition.wait()
+        self._close_transport()
+
+    def _close_transport(self) -> None:
         return None
+
+    @property
+    def closed(self) -> bool:
+        with self._lifecycle_condition:
+            return self._lifecycle_closed
+
+    def _acquire_call_lease(self) -> None:
+        with self._lifecycle_condition:
+            if self._lifecycle_closed:
+                raise UpstreamError(
+                    "UPSTREAM_DISCONNECTED",
+                    "Upstream MCP client is closed.",
+                    retryable=True,
+                )
+            self._active_call_leases += 1
+
+    def _release_call_lease(self) -> None:
+        with self._lifecycle_condition:
+            self._active_call_leases = max(0, self._active_call_leases - 1)
+            if self._active_call_leases == 0:
+                self._lifecycle_condition.notify_all()
 
     def _next_request_id(self) -> int:
         with self._id_lock:
@@ -493,7 +530,7 @@ class StdioUpstreamClient(BaseUpstreamClient):
         with self._lock:
             self._write(payload)
 
-    def close(self) -> None:
+    def _close_transport(self) -> None:
         process = getattr(self, "process", None)
         if process is None or process.poll() is not None:
             return
@@ -610,6 +647,7 @@ class UpstreamManager:
         self.result_store = result_store or ResultStore()
         self.statuses: dict[str, UpstreamStatus] = {}
         self._state = _registry_state()
+        self._lifecycle_lock = threading.Lock()
         self._closed = False
         try:
             self._initialize_configs(frozenset(reserved_names))
@@ -722,24 +760,25 @@ class UpstreamManager:
                 f"Unknown upstream tool: {name}",
                 category="validation",
             )
-        if self._closed:
-            return upstream_error_result(
-                "UPSTREAM_DISCONNECTED",
-                "Upstream Gateway is closed.",
-                retryable=True,
-                alias=name.partition("__")[0],
-                tool_name=name,
-            )
         alias, _separator, _remote = name.partition("__")
-        client = state.clients.get(alias)
-        if client is None:
-            return upstream_error_result(
-                "UPSTREAM_NOT_AVAILABLE",
-                f"Upstream {alias!r} is not available.",
-                retryable=True,
-                alias=alias,
-                tool_name=name,
-            )
+        with self._lifecycle_lock:
+            if self._closed:
+                return upstream_error_result(
+                    "UPSTREAM_DISCONNECTED",
+                    "Upstream Gateway is closed.",
+                    retryable=True,
+                    alias=alias,
+                    tool_name=name,
+                )
+            client = state.clients.get(alias)
+            if client is None:
+                return upstream_error_result(
+                    "UPSTREAM_NOT_AVAILABLE",
+                    f"Upstream {alias!r} is not available.",
+                    retryable=True,
+                    alias=alias,
+                    tool_name=name,
+                )
         try:
             raw_result = client.call_tool_raw(tool.remote_name, arguments or {})
             normalized = normalize_tool_result(raw_result)
@@ -798,10 +837,11 @@ class UpstreamManager:
         }
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        state = self._state
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            state = self._state
         for client in state.clients.values():
             client.close()
         self.result_store.clear()
