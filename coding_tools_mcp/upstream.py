@@ -15,10 +15,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from http.client import RemoteDisconnected
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 
@@ -119,6 +120,17 @@ class UpstreamTool:
     public_name: str
     remote_name: str
     definition: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class UpstreamRegistryState:
+    """One fixed Runtime-generation snapshot of upstream tools and clients."""
+
+    all_tools: Mapping[str, UpstreamTool]
+    direct_tool_names: tuple[str, ...]
+    catalog: Mapping[str, Any]
+    search_index: Any | None
+    clients: Mapping[str, BaseUpstreamClient]
 
 
 @dataclass
@@ -559,10 +571,8 @@ class UpstreamManager:
         self.protocol_version = protocol_version
         self.secret_resolver = secret_resolver
         self.configs = tuple(configs)
-        self.clients: dict[str, BaseUpstreamClient] = {}
         self.statuses: dict[str, UpstreamStatus] = {}
-        self._tools: dict[str, UpstreamTool] = {}
-        self._tool_order: tuple[str, ...] = ()
+        self._state = _registry_state()
         self._closed = False
         try:
             self._initialize_configs(frozenset(reserved_names))
@@ -595,17 +605,25 @@ class UpstreamManager:
             reserved_names=reserved_names,
         )
 
+    @property
+    def state(self) -> UpstreamRegistryState:
+        return self._state
+
     def tool_definitions(self) -> list[dict[str, Any]]:
-        return [copy.deepcopy(self._tools[name].definition) for name in self._tool_order]
+        state = self._state
+        return [copy.deepcopy(state.all_tools[name].definition) for name in state.direct_tool_names]
 
     def tool_names(self) -> list[str]:
-        return list(self._tool_order)
+        state = self._state
+        return list(state.direct_tool_names)
 
     def has_tool(self, name: str) -> bool:
-        return name in self._tools
+        state = self._state
+        return name in state.all_tools
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        tool = self._tools.get(name)
+        state = self._state
+        tool = state.all_tools.get(name)
         if tool is None:
             return upstream_error_result(
                 "UPSTREAM_TOOL_NOT_FOUND",
@@ -621,7 +639,7 @@ class UpstreamManager:
                 tool_name=name,
             )
         alias, _separator, _remote = name.partition("__")
-        client = self.clients.get(alias)
+        client = state.clients.get(alias)
         if client is None:
             return upstream_error_result(
                 "UPSTREAM_NOT_AVAILABLE",
@@ -652,12 +670,13 @@ class UpstreamManager:
             )
 
     def status_payload(self) -> dict[str, Any]:
+        state = self._state
         statuses = [self.statuses[alias].payload() for alias in sorted(self.statuses)]
         return {
             "enabled": any(status.enabled for status in self.statuses.values()),
             "server_count": len(self.statuses),
             "initialized_count": sum(1 for status in self.statuses.values() if status.initialized),
-            "tool_count": len(self._tool_order),
+            "tool_count": len(state.direct_tool_names),
             "snapshot_immutable": True,
             "remote_capability_boundary": "upstream_server",
             "servers": statuses,
@@ -667,69 +686,97 @@ class UpstreamManager:
         if self._closed:
             return
         self._closed = True
-        for client in list(self.clients.values()):
+        state = self._state
+        for client in state.clients.values():
             client.close()
-        self.clients.clear()
 
     def _initialize_configs(self, reserved_names: frozenset[str]) -> None:
         seen_public_names = set(reserved_names)
         ordered_names: list[str] = []
-        for config in self.configs:
-            status = UpstreamStatus(
-                alias=config.alias,
-                transport=config.transport,
-                enabled=config.enabled,
-                target=safe_target(config),
-            )
-            self.statuses[config.alias] = status
-            if not config.enabled:
-                continue
-            client: BaseUpstreamClient | None = None
-            try:
-                client = build_client(
-                    config,
-                    self.protocol_version,
-                    secret_resolver=self.secret_resolver,
+        next_tools: dict[str, UpstreamTool] = {}
+        next_clients: dict[str, BaseUpstreamClient] = {}
+        try:
+            for config in self.configs:
+                status = UpstreamStatus(
+                    alias=config.alias,
+                    transport=config.transport,
+                    enabled=config.enabled,
+                    target=safe_target(config),
                 )
-                client.initialize()
-                raw_tools = filter_tools(client.list_tools(), config)
-                registered: list[UpstreamTool] = []
-                for raw_tool in raw_tools:
-                    remote_name = raw_tool.get("name")
-                    if not isinstance(remote_name, str) or not remote_name:
-                        raise UpstreamError(
-                            "UPSTREAM_PROTOCOL_ERROR",
-                            "Upstream tool definition had no valid name.",
-                            category="protocol",
-                        )
-                    public_name = namespaced_tool_name(config.alias, remote_name)
-                    if public_name in seen_public_names:
-                        raise UpstreamConfigError(
-                            f"Upstream tool namespace collision: {public_name!r}."
-                        )
-                    seen_public_names.add(public_name)
-                    registered.append(
-                        UpstreamTool(
-                            public_name=public_name,
-                            remote_name=remote_name,
-                            definition=namespaced_tool_definition(public_name, raw_tool),
-                        )
+                self.statuses[config.alias] = status
+                if not config.enabled:
+                    continue
+                client: BaseUpstreamClient | None = None
+                try:
+                    client = build_client(
+                        config,
+                        self.protocol_version,
+                        secret_resolver=self.secret_resolver,
                     )
-                self.clients[config.alias] = client
-                for tool in registered:
-                    self._tools[tool.public_name] = tool
-                    ordered_names.append(tool.public_name)
-                status.initialized = True
-                status.tool_count = len(registered)
-            except UpstreamConfigError:
-                if client is not None:
-                    client.close()
-                raise
-            except (OSError, UpstreamError) as exc:
-                if client is not None:
-                    client.close()
-                status.error = error_payload(exc)
-        self._tool_order = tuple(ordered_names)
+                    client.initialize()
+                    raw_tools = filter_tools(client.list_tools(), config)
+                    registered: list[UpstreamTool] = []
+                    for raw_tool in raw_tools:
+                        remote_name = raw_tool.get("name")
+                        if not isinstance(remote_name, str) or not remote_name:
+                            raise UpstreamError(
+                                "UPSTREAM_PROTOCOL_ERROR",
+                                "Upstream tool definition had no valid name.",
+                                category="protocol",
+                            )
+                        public_name = namespaced_tool_name(config.alias, remote_name)
+                        if public_name in seen_public_names:
+                            raise UpstreamConfigError(
+                                f"Upstream tool namespace collision: {public_name!r}."
+                            )
+                        seen_public_names.add(public_name)
+                        registered.append(
+                            UpstreamTool(
+                                public_name=public_name,
+                                remote_name=remote_name,
+                                definition=namespaced_tool_definition(public_name, raw_tool),
+                            )
+                        )
+                    next_clients[config.alias] = client
+                    for tool in registered:
+                        next_tools[tool.public_name] = tool
+                        ordered_names.append(tool.public_name)
+                    status.initialized = True
+                    status.tool_count = len(registered)
+                except UpstreamConfigError:
+                    if client is not None:
+                        client.close()
+                    raise
+                except (OSError, UpstreamError) as exc:
+                    if client is not None:
+                        client.close()
+                    status.error = error_payload(exc)
+        except BaseException:
+            for client in next_clients.values():
+                client.close()
+            raise
+        self._state = _registry_state(
+            all_tools=next_tools,
+            direct_tool_names=tuple(ordered_names),
+            clients=next_clients,
+        )
+
+
+def _registry_state(
+    *,
+    all_tools: Mapping[str, UpstreamTool] | None = None,
+    direct_tool_names: tuple[str, ...] = (),
+    catalog: Mapping[str, Any] | None = None,
+    search_index: Any | None = None,
+    clients: Mapping[str, BaseUpstreamClient] | None = None,
+) -> UpstreamRegistryState:
+    return UpstreamRegistryState(
+        all_tools=MappingProxyType(dict(all_tools or {})),
+        direct_tool_names=tuple(direct_tool_names),
+        catalog=MappingProxyType(dict(catalog or {})),
+        search_index=search_index,
+        clients=MappingProxyType(dict(clients or {})),
+    )
 
 
 def load_upstream_config_snapshot(path: str | Path) -> UpstreamConfigSnapshot:

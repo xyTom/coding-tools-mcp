@@ -82,6 +82,7 @@ class FakeUpstreamClient(BaseUpstreamClient):
         self.marker = marker
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.closed = False
+        self.close_calls = 0
 
     def initialize(self) -> None:
         return None
@@ -137,6 +138,7 @@ class FakeUpstreamClient(BaseUpstreamClient):
         raise AssertionError("Fake client does not use raw notify().")
 
     def close(self) -> None:
+        self.close_calls += 1
         self.closed = True
 
 
@@ -222,6 +224,62 @@ class UpstreamGatewayTests(unittest.TestCase):
                 reserved_names={"outer__inner__search"},
             )
         self.assertTrue(collision_client.closed)
+
+    def test_registry_is_not_published_partially_when_later_config_collides(self) -> None:
+        first_config = UpstreamServerConfig(
+            alias="first",
+            transport="streamable_http",
+            url="http://127.0.0.1/first",
+        )
+        second_config = UpstreamServerConfig(
+            alias="outer",
+            transport="streamable_http",
+            url="http://127.0.0.1/outer",
+        )
+        nested = copy.deepcopy(REMOTE_TOOLS[0])
+        nested["name"] = "inner__search"
+        first_client = FakeUpstreamClient(first_config, "2025-11-25", tools=[REMOTE_TOOLS[0]])
+        second_client = FakeUpstreamClient(second_config, "2025-11-25", tools=[nested])
+
+        with self.assertRaisesRegex(UpstreamConfigError, "namespace collision"):
+            build_manager(
+                [first_config, second_config],
+                [first_client, second_client],
+                reserved_names={"outer__inner__search"},
+            )
+
+        self.assertEqual(first_client.close_calls, 1)
+        self.assertEqual(second_client.close_calls, 1)
+
+    def test_registry_state_is_read_only_and_close_is_idempotent(self) -> None:
+        config = UpstreamServerConfig(
+            alias="github",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+        )
+        client = FakeUpstreamClient(config, "2025-11-25")
+        manager = build_manager([config], [client])
+        state = manager.state
+
+        self.assertEqual(state.direct_tool_names, ("github__search", "github__create_issue"))
+        self.assertEqual(list(state.all_tools), list(state.direct_tool_names))
+        self.assertEqual(list(state.clients), ["github"])
+        self.assertEqual(dict(state.catalog), {})
+        self.assertIsNone(state.search_index)
+        with self.assertRaises(TypeError):
+            state.all_tools["other"] = state.all_tools["github__search"]  # type: ignore[index]
+        with self.assertRaises(TypeError):
+            state.clients["other"] = client  # type: ignore[index]
+        with self.assertRaises(TypeError):
+            state.catalog["other"] = {}  # type: ignore[index]
+
+        manager.close()
+        manager.close()
+
+        self.assertEqual(client.close_calls, 1)
+        self.assertEqual(manager.tool_names(), ["github__search", "github__create_issue"])
+        closed_result = manager.call_tool("github__search", {"q": "after-close"})
+        self.assertEqual(closed_result["structuredContent"]["error"]["code"], "UPSTREAM_DISCONNECTED")
 
     def test_fake_readonly_never_rewrites_upstream_annotations(self) -> None:
         with TemporaryDirectory() as tmp:
