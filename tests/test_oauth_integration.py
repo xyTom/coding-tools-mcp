@@ -260,7 +260,14 @@ class BearerFailClosedTests(unittest.TestCase):
                     },
                     method="POST",
                 )
-                return urllib.request.urlopen(request, timeout=5).status
+                for attempt in range(3):
+                    try:
+                        return urllib.request.urlopen(request, timeout=5).status
+                    except (ConnectionAbortedError, ConnectionResetError):
+                        if attempt == 2:
+                            raise
+                        time.sleep(0.05 * (attempt + 1))
+                raise AssertionError("unreachable HTTP retry state")
 
             try:
                 self.assertEqual(ping(), 200)

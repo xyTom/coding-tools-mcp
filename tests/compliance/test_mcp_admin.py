@@ -36,6 +36,17 @@ from coding_tools_mcp.upstream import UpstreamConfigSnapshot, UpstreamServerConf
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 
 
+def _cleanup_temporary_directory(temp: TemporaryDirectory[str]) -> None:
+    for attempt in range(10):
+        try:
+            temp.cleanup()
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in {5, 32, 145} or attempt == 9:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 class AdminServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = TemporaryDirectory()
@@ -115,7 +126,7 @@ class AdminServiceTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        self.temp.cleanup()
+        _cleanup_temporary_directory(self.temp)
 
     def test_status_reports_only_privacy_safe_telemetry_mode_and_docs(self) -> None:
         with patch("coding_tools_mcp.admin.telemetry_mode", return_value="debug") as mode:
