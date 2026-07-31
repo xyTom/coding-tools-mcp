@@ -40,6 +40,17 @@ class Phase11PackagingTests(unittest.TestCase):
         self.assertIn("mypy>=2.1,<2.2", extras["dev"])
         self.assertIn("Pillow>=10.0", extras["image"])
 
+    def test_compliance_ci_allows_setup_node_toolchain_under_landlock(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "compliance.yml").read_text(
+            encoding="utf-8"
+        )
+        setup_node = workflow.index("uses: actions/setup-node@v6")
+        allow_root = workflow.index("CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS")
+        unit_discovery = workflow.index("name: Run unit discovery")
+        self.assertLess(setup_node, allow_root)
+        self.assertLess(allow_root, unit_discovery)
+        self.assertIn('readlink -f "$(command -v node)"', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
