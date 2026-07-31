@@ -120,6 +120,7 @@ from .upstream import (
     UpstreamManager,
     load_upstream_config_snapshot,
 )
+from .upstream_search import ToolSearchFilters
 from .workspace_binding import (
     WorkspaceBinding,
     WorkspaceBindingError,
@@ -578,6 +579,13 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     )
 
 
+_BROKER_INSTRUCTIONS = (
+    "Additional external tools may be available through the upstream broker. "
+    "Use upstream_tool_search to find a tool and upstream_tool_describe to inspect "
+    "its sanitized schema and digest. Unknown risk classification is mutating."
+)
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     """Single source of truth for one tool's title, description, and annotation hints.
@@ -615,6 +623,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "server_info": ToolSpec(
         title="Server info",
         description="Return server, workspace, project-context, auth, policy, and fixed-tool metadata.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "upstream_tool_search": ToolSpec(
+        title="Search upstream tools",
+        description="Search the fixed upstream tool catalog using compact public metadata.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "upstream_tool_describe": ToolSpec(
+        title="Describe upstream tool",
+        description="Return one upstream tool's sanitized public definition and schema digest.",
         read_only=True,
         idempotent=True,
     ),
@@ -1470,7 +1490,14 @@ class Runtime:
                 "title": SERVER_TITLE,
                 "version": __version__,
             },
-            "instructions": self.project_context.server_instructions(),
+            "instructions": "\n\n".join(
+                part
+                for part in (
+                    self.project_context.server_instructions(),
+                    _BROKER_INSTRUCTIONS,
+                )
+                if part
+            ),
         }
 
     def list_tools(self) -> dict[str, Any]:
@@ -1642,6 +1669,44 @@ class Runtime:
                 payload["status"] = spec.error_status
             self.emit_tool_trace(name, args, payload, started_at)
             return make_tool_result(name, payload, is_error=True)
+
+    def upstream_tool_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        filters = ToolSearchFilters(
+            server=args.get("server"),
+            read_only=args.get("read_only"),
+            tags=tuple(args.get("tags") or ()),
+            name_prefix=args.get("name_prefix"),
+            limit=int(args.get("limit", 5)),
+        )
+        results = self.upstream_manager.search_catalog(str(args["query"]), filters)
+        return {
+            "query": str(args["query"]),
+            "count": len(results),
+            "results": [
+                {
+                    "name": result.public_name,
+                    "server": result.server_alias,
+                    "remote_name": result.remote_name,
+                    "title": result.title,
+                    "description": result.description,
+                    "tags": list(result.tags),
+                    "risk": result.effective_risk,
+                    "schema_digest": result.public_schema_digest,
+                    "score": result.score,
+                }
+                for result in results
+            ],
+        }
+
+    def upstream_tool_describe(self, args: dict[str, Any]) -> dict[str, Any]:
+        description = self.upstream_manager.describe_catalog_tool(str(args["name"]))
+        if description is None:
+            raise ToolFailure(
+                "UPSTREAM_TOOL_NOT_FOUND",
+                f"Unknown upstream catalog tool: {args['name']}",
+                category="validation",
+            )
+        return description
 
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
@@ -4557,6 +4622,23 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     string_array = {"type": "array", "items": {"type": "string"}}
     return {
         "server_info": object_schema(),
+        "upstream_tool_search": object_schema(
+            {
+                "query": {**string, "minLength": 1},
+                "server": string,
+                "read_only": boolean,
+                "tags": string_array,
+                "name_prefix": string,
+                "limit": {**integer, "minimum": 1, "maximum": 20, "default": 5},
+            },
+            ["query"],
+        ),
+        "upstream_tool_describe": object_schema(
+            {
+                "name": {**string, "minLength": 1},
+            },
+            ["name"],
+        ),
         "check_exec_environment": object_schema(),
         "get_default_cwd": object_schema(),
         "set_default_cwd": object_schema(

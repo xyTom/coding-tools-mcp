@@ -27,6 +27,8 @@ from .upstream_sanitize import raw_schema_digest, sanitize_definition, schema_di
 from .upstream_search import (
     CatalogSearchIndex,
     SearchBackend,
+    ToolSearchFilters,
+    ToolSearchResult,
     UpstreamToolCatalogEntry,
 )
 
@@ -664,6 +666,34 @@ class UpstreamManager:
     def catalog_entry(self, name: str) -> UpstreamToolCatalogEntry | None:
         state = self._state
         return state.catalog.get(name)
+
+    def search_catalog(
+        self,
+        query: str,
+        filters: ToolSearchFilters | None = None,
+    ) -> list[ToolSearchResult]:
+        state = self._state
+        if state.search_index is None:
+            return []
+        return state.search_index.search(query, filters)
+
+    def describe_catalog_tool(self, name: str) -> dict[str, Any] | None:
+        state = self._state
+        entry = state.catalog.get(name)
+        tool = state.all_tools.get(name)
+        if entry is None or tool is None:
+            return None
+        return {
+            "name": entry.public_name,
+            "server": entry.server_alias,
+            "remote_name": entry.remote_name,
+            "title": entry.title,
+            "description": entry.description,
+            "tags": list(entry.tags),
+            "risk": entry.effective_risk,
+            "schema_digest": entry.public_schema_digest,
+            "definition": copy.deepcopy(tool.public_definition),
+        }
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         state = self._state

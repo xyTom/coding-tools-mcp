@@ -6,10 +6,12 @@ properties, annotations, and error codes with the contract.
 
 ## Fixed inventory
 
-The default catalog contains exactly 20 tools:
+The default catalog contains exactly 22 tools:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
+- `upstream_tool_search`: search the fixed upstream catalog using compact sanitized metadata.
+- `upstream_tool_describe`: inspect one sanitized upstream definition and public schema digest.
 - `check_exec_environment`: lightweight execution policy and Landlock status.
 - `get_default_cwd`: inspect this MCP runtime's relative-path base.
 - `set_default_cwd`: change this MCP runtime's relative-path base.
@@ -32,7 +34,7 @@ The default catalog contains exactly 20 tools:
 - `view_image`: one MCP image content block plus structured metadata.
 
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 19 local tools
+content. That capability gate is not a tool profile. The other 21 local tools
 are always advertised.
 
 Optional upstream tools are appended only during Runtime initialization and use
