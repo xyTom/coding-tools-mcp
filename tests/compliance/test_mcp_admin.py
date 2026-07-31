@@ -196,8 +196,15 @@ class AdminServiceTests(unittest.TestCase):
                             "args": ["-y", "example-mcp"],
                             "enabled": True,
                             "env": {"GITHUB_TOKEN": {"secret_ref": "github/token"}},
+                            "expose_mode": "broker",
+                            "pinned_tools": ["search"],
+                            "tags": ["code", "remote"],
+                            "tool_policy": {"create_issue": "readonly"},
                         }
-                    }
+                    },
+                    "tool_search": {
+                        "custom_synonyms": {"仓库": ["search", "repository"]}
+                    },
                 },
             }
         )
@@ -205,7 +212,15 @@ class AdminServiceTests(unittest.TestCase):
         self.assertFalse(saved["dynamic_reload"])
         self.assertEqual(saved["active_status"], self.active_gateway_status)
         self.assertNotIn("github/token", json.dumps(saved))
-        self.assertNotIn("upstream-secret-canary", self.gateway_path.read_text(encoding="utf-8"))
+        persisted_text = self.gateway_path.read_text(encoding="utf-8")
+        self.assertNotIn("upstream-secret-canary", persisted_text)
+        persisted = json.loads(persisted_text)
+        self.assertEqual(persisted["servers"]["github"]["expose_mode"], "broker")
+        self.assertEqual(persisted["servers"]["github"]["pinned_tools"], ["search"])
+        self.assertEqual(
+            persisted["tool_search"]["custom_synonyms"]["仓库"],
+            ["search", "repository"],
+        )
         self.assertEqual(self.active_gateway_status["tool_count"], 1)
         with self.assertRaisesRegex(AdminServiceError, "Sensitive Gateway headers"):
             self.service.save_gateway(
@@ -219,6 +234,36 @@ class AdminServiceTests(unittest.TestCase):
                                 "headers": {"X-API-Key": "plaintext-canary"},
                             }
                         }
+                    },
+                }
+            )
+
+    def test_gateway_rejects_invalid_exposure_and_search_configuration(self) -> None:
+        payload = self.service.gateway_payload()
+        with self.assertRaisesRegex(AdminServiceError, "expose_mode"):
+            self.service.save_gateway(
+                {
+                    "expected_revision": payload["persisted_revision"],
+                    "document": {
+                        "servers": {
+                            "remote": {
+                                "transport": "streamable_http",
+                                "url": "http://127.0.0.1:9000/mcp",
+                                "expose_mode": "live",
+                            }
+                        }
+                    },
+                }
+            )
+        with self.assertRaisesRegex(AdminServiceError, "custom_synonyms"):
+            self.service.save_gateway(
+                {
+                    "expected_revision": payload["persisted_revision"],
+                    "document": {
+                        "servers": {},
+                        "tool_search": {
+                            "custom_synonyms": {"核磁": ["nmr", "nmr"]}
+                        },
                     },
                 }
             )

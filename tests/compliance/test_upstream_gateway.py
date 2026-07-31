@@ -33,6 +33,7 @@ from coding_tools_mcp.upstream import (
     resolve_env_config,
 )
 from coding_tools_mcp.upstream_result import RESULT_INLINE_MAX, result_json_bytes
+from coding_tools_mcp.upstream_search import ToolSearchFilters
 from coding_tools_mcp.workspace_binding import WorkspaceBinding
 
 
@@ -148,6 +149,7 @@ def build_manager(
     clients: list[FakeUpstreamClient],
     *,
     reserved_names: set[str] | None = None,
+    custom_synonyms: dict[str, tuple[str, ...]] | None = None,
 ) -> UpstreamManager:
     pending = list(clients)
 
@@ -169,6 +171,7 @@ def build_manager(
         manager = UpstreamManager(
             configs,
             reserved_names=reserved_names or set(TOOL_REGISTRY),
+            custom_synonyms=custom_synonyms,
         )
     return manager
 
@@ -279,8 +282,8 @@ class UpstreamGatewayTests(unittest.TestCase):
         self.assertEqual(state.direct_tool_names, ("github__search", "github__create_issue"))
         self.assertEqual(list(state.all_tools), list(state.direct_tool_names))
         self.assertEqual(list(state.clients), ["github"])
-        self.assertEqual(dict(state.catalog), {})
-        self.assertIsNone(state.search_index)
+        self.assertEqual(list(state.catalog), list(state.direct_tool_names))
+        self.assertIsNotNone(state.search_index)
         with self.assertRaises(TypeError):
             state.all_tools["other"] = state.all_tools["github__search"]  # type: ignore[index]
         with self.assertRaises(TypeError):
@@ -677,6 +680,184 @@ class UpstreamGatewayTests(unittest.TestCase):
                     "exclude_tools": ["search"],
                 },
             )
+        with self.assertRaisesRegex(UpstreamConfigError, "expose_mode"):
+            parse_server_config(
+                "github",
+                {
+                    "transport": "streamable_http",
+                    "url": "http://127.0.0.1/mcp",
+                    "expose_mode": "live",
+                },
+            )
+        with self.assertRaisesRegex(UpstreamConfigError, "tool_policy"):
+            parse_server_config(
+                "github",
+                {
+                    "transport": "streamable_http",
+                    "url": "http://127.0.0.1/mcp",
+                    "tool_policy": {"search": "sometimes"},
+                },
+            )
+
+    def test_config_snapshot_parses_exposure_catalog_and_synonyms(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mcp-servers.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "servers": {
+                            "github": {
+                                "transport": "streamable_http",
+                                "url": "http://127.0.0.1/mcp",
+                                "expose_mode": "broker",
+                                "pinned_tools": ["search"],
+                                "tags": ["code", "remote"],
+                                "tool_policy": {"create_issue": "readonly"},
+                            }
+                        },
+                        "tool_search": {
+                            "custom_synonyms": {"仓库": ["search", "repository"]}
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            snapshot = load_upstream_config_snapshot(path)
+
+        config = snapshot.configs[0]
+        self.assertEqual(config.expose_mode, "broker")
+        self.assertEqual(config.pinned_tools, ("search",))
+        self.assertEqual(config.tags, ("code", "remote"))
+        self.assertEqual(config.tool_policy, {"create_issue": "readonly"})
+        self.assertEqual(
+            snapshot.custom_synonyms,
+            {"仓库": ("search", "repository")},
+        )
+
+    def test_catalog_and_exposure_are_frozen_in_one_runtime_snapshot(self) -> None:
+        direct_config = UpstreamServerConfig(
+            alias="github",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+            tags=("code",),
+        )
+        direct_client = FakeUpstreamClient(direct_config, "2025-11-25")
+        direct_manager = build_manager(
+            [direct_config],
+            [direct_client],
+            custom_synonyms={"仓库": ("search",)},
+        )
+        self.assertEqual(
+            direct_manager.tool_names(),
+            ["github__search", "github__create_issue"],
+        )
+        self.assertEqual(len(direct_manager.catalog_entries()), 2)
+        self.assertEqual(direct_manager.status_payload()["catalog_tool_count"], 2)
+        self.assertIsNotNone(direct_manager.state.search_index)
+        assert direct_manager.state.search_index is not None
+        search_results = direct_manager.state.search_index.search(
+            "仓库",
+            ToolSearchFilters(server="github", limit=5),
+        )
+        self.assertEqual(search_results[0].tool_id, "github__search")
+        self.assertEqual(search_results[0].tags, ("code",))
+
+        broker_config = UpstreamServerConfig(
+            alias="github",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+            expose_mode="broker",
+            pinned_tools=("search",),
+            tags=("code", "broker"),
+            tool_policy={"create_issue": "readonly"},
+        )
+        broker_client = FakeUpstreamClient(broker_config, "2025-11-25")
+        broker_manager = build_manager([broker_config], [broker_client])
+        self.assertEqual(broker_manager.tool_names(), ["github__search"])
+        self.assertEqual(set(broker_manager.state.all_tools), {
+            "github__search",
+            "github__create_issue",
+        })
+        self.assertEqual(set(broker_manager.state.catalog), set(broker_manager.state.all_tools))
+        self.assertEqual(
+            broker_manager.catalog_entry("github__create_issue").effective_risk,  # type: ignore[union-attr]
+            "readonly",
+        )
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(Path(tmp), upstream_manager=broker_manager)
+            exposed = {definition["name"] for definition in runtime.list_tools()["tools"]}
+            self.assertIn("github__search", exposed)
+            self.assertNotIn("github__create_issue", exposed)
+            runtime.close()
+        direct_manager.close()
+
+    def test_broker_only_collision_is_checked_against_all_tools(self) -> None:
+        config = UpstreamServerConfig(
+            alias="github",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+            expose_mode="broker",
+            pinned_tools=("search",),
+        )
+        client = FakeUpstreamClient(config, "2025-11-25")
+        with self.assertRaisesRegex(UpstreamConfigError, "collision"):
+            build_manager(
+                [config],
+                [client],
+                reserved_names={"github__create_issue"},
+            )
+        self.assertTrue(client.closed)
+
+    def test_old_runtime_snapshot_is_unchanged_after_config_rewrite(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "mcp-servers.json"
+            direct_document = {
+                "servers": {
+                    "github": {
+                        "transport": "streamable_http",
+                        "url": "http://127.0.0.1/mcp",
+                    }
+                }
+            }
+            path.write_text(json.dumps(direct_document), encoding="utf-8")
+            old_snapshot = load_upstream_config_snapshot(path)
+            old_config = old_snapshot.configs[0]
+            old_manager = build_manager(
+                list(old_snapshot.configs),
+                [FakeUpstreamClient(old_config, "2025-11-25")],
+                custom_synonyms=dict(old_snapshot.custom_synonyms),
+            )
+            old_runtime = Runtime(root, upstream_manager=old_manager)
+
+            broker_document = {
+                "servers": {
+                    "github": {
+                        "transport": "streamable_http",
+                        "url": "http://127.0.0.1/mcp",
+                        "expose_mode": "broker",
+                        "pinned_tools": ["search"],
+                    }
+                }
+            }
+            path.write_text(json.dumps(broker_document), encoding="utf-8")
+            new_snapshot = load_upstream_config_snapshot(path)
+            new_config = new_snapshot.configs[0]
+            new_manager = build_manager(
+                list(new_snapshot.configs),
+                [FakeUpstreamClient(new_config, "2025-11-25")],
+                custom_synonyms=dict(new_snapshot.custom_synonyms),
+            )
+            new_runtime = Runtime(root, upstream_manager=new_manager)
+
+            old_names = {item["name"] for item in old_runtime.list_tools()["tools"]}
+            new_names = {item["name"] for item in new_runtime.list_tools()["tools"]}
+            self.assertIn("github__create_issue", old_names)
+            self.assertNotIn("github__create_issue", new_names)
+            self.assertIn("github__search", old_names)
+            self.assertIn("github__search", new_names)
+            old_runtime.close()
+            new_runtime.close()
 
     def test_stdio_base_environment_does_not_inherit_server_secrets(self) -> None:
         with patch.dict(

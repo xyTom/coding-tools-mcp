@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http.client import RemoteDisconnected
 from pathlib import Path
@@ -24,6 +24,11 @@ from typing import Any
 
 from .upstream_result import budget_tool_result
 from .upstream_sanitize import raw_schema_digest, sanitize_definition, schema_digest
+from .upstream_search import (
+    CatalogSearchIndex,
+    SearchBackend,
+    UpstreamToolCatalogEntry,
+)
 
 
 DEFAULT_PROTOCOL_VERSION = "2025-11-25"
@@ -103,6 +108,9 @@ class UpstreamServerConfig:
     authorization_env: str | None = None
     include_tools: tuple[str, ...] = ()
     exclude_tools: tuple[str, ...] = ()
+    expose_mode: str = "direct"
+    pinned_tools: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
     tool_policy: dict[str, str] = field(default_factory=dict)
     timeout_ms: int = DEFAULT_TIMEOUT_MS
 
@@ -112,6 +120,7 @@ class UpstreamConfigSnapshot:
     """Configuration, enable state, and allowlists fixed before Runtime creation."""
 
     configs: tuple[UpstreamServerConfig, ...] = ()
+    custom_synonyms: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     source: str | None = None
 
     @classmethod
@@ -136,8 +145,8 @@ class UpstreamRegistryState:
 
     all_tools: Mapping[str, UpstreamTool]
     direct_tool_names: tuple[str, ...]
-    catalog: Mapping[str, Any]
-    search_index: Any | None
+    catalog: Mapping[str, UpstreamToolCatalogEntry]
+    search_index: SearchBackend | None
     clients: Mapping[str, BaseUpstreamClient]
 
 
@@ -585,10 +594,15 @@ class UpstreamManager:
         protocol_version: str = DEFAULT_PROTOCOL_VERSION,
         secret_resolver: Callable[[str], str] | None = None,
         reserved_names: Collection[str] = (),
+        custom_synonyms: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         self.protocol_version = protocol_version
         self.secret_resolver = secret_resolver
         self.configs = tuple(configs)
+        self.custom_synonyms = {
+            str(key): tuple(str(value) for value in values)
+            for key, values in (custom_synonyms or {}).items()
+        }
         self.statuses: dict[str, UpstreamStatus] = {}
         self._state = _registry_state()
         self._closed = False
@@ -621,6 +635,7 @@ class UpstreamManager:
             protocol_version=protocol_version,
             secret_resolver=secret_resolver,
             reserved_names=reserved_names,
+            custom_synonyms=snapshot.custom_synonyms,
         )
 
     @property
@@ -641,6 +656,14 @@ class UpstreamManager:
     def has_tool(self, name: str) -> bool:
         state = self._state
         return name in state.all_tools
+
+    def catalog_entries(self) -> tuple[UpstreamToolCatalogEntry, ...]:
+        state = self._state
+        return tuple(state.catalog[name] for name in sorted(state.catalog))
+
+    def catalog_entry(self, name: str) -> UpstreamToolCatalogEntry | None:
+        state = self._state
+        return state.catalog.get(name)
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         state = self._state
@@ -704,6 +727,7 @@ class UpstreamManager:
             "server_count": len(self.statuses),
             "initialized_count": sum(1 for status in self.statuses.values() if status.initialized),
             "tool_count": len(state.direct_tool_names),
+            "catalog_tool_count": len(state.catalog),
             "snapshot_immutable": True,
             "remote_capability_boundary": "upstream_server",
             "servers": statuses,
@@ -721,6 +745,7 @@ class UpstreamManager:
         seen_public_names = set(reserved_names)
         ordered_names: list[str] = []
         next_tools: dict[str, UpstreamTool] = {}
+        next_catalog: dict[str, UpstreamToolCatalogEntry] = {}
         next_clients: dict[str, BaseUpstreamClient] = {}
         try:
             for config in self.configs:
@@ -775,7 +800,12 @@ class UpstreamManager:
                     next_clients[config.alias] = client
                     for tool in registered:
                         next_tools[tool.public_name] = tool
-                        ordered_names.append(tool.public_name)
+                        next_catalog[tool.public_name] = tool_catalog_entry(tool, config)
+                        if (
+                            config.expose_mode == "direct"
+                            or tool.remote_name in config.pinned_tools
+                        ):
+                            ordered_names.append(tool.public_name)
                     status.initialized = True
                     status.tool_count = len(registered)
                 except UpstreamConfigError:
@@ -790,9 +820,16 @@ class UpstreamManager:
             for client in next_clients.values():
                 client.close()
             raise
+        search_index: SearchBackend | None = None
+        if next_catalog:
+            index = CatalogSearchIndex(self.custom_synonyms)
+            index.build(next_catalog)
+            search_index = index
         self._state = _registry_state(
             all_tools=next_tools,
             direct_tool_names=tuple(ordered_names),
+            catalog=next_catalog,
+            search_index=search_index,
             clients=next_clients,
         )
 
@@ -801,8 +838,8 @@ def _registry_state(
     *,
     all_tools: Mapping[str, UpstreamTool] | None = None,
     direct_tool_names: tuple[str, ...] = (),
-    catalog: Mapping[str, Any] | None = None,
-    search_index: Any | None = None,
+    catalog: Mapping[str, UpstreamToolCatalogEntry] | None = None,
+    search_index: SearchBackend | None = None,
     clients: Mapping[str, BaseUpstreamClient] | None = None,
 ) -> UpstreamRegistryState:
     return UpstreamRegistryState(
@@ -828,11 +865,24 @@ def load_upstream_config_snapshot(path: str | Path) -> UpstreamConfigSnapshot:
         ) from exc
     if not isinstance(raw, dict):
         raise UpstreamConfigError("Upstream config must be a JSON object.")
-    servers = raw.get("servers", raw)
+    if "servers" in raw:
+        servers = raw.get("servers")
+        custom_synonyms = parse_tool_search_config(raw.get("tool_search"))
+    else:
+        if "tool_search" in raw:
+            raise UpstreamConfigError(
+                "Upstream config with tool_search must contain a servers object."
+            )
+        servers = raw
+        custom_synonyms = {}
     if not isinstance(servers, dict):
         raise UpstreamConfigError("Upstream config must contain a servers object.")
     configs = tuple(parse_server_config(alias, value) for alias, value in servers.items())
-    return UpstreamConfigSnapshot(configs=configs, source=str(config_path.resolve(strict=False)))
+    return UpstreamConfigSnapshot(
+        configs=configs,
+        custom_synonyms=custom_synonyms,
+        source=str(config_path.resolve(strict=False)),
+    )
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -881,6 +931,18 @@ def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
     exclude_tools = _string_tuple(
         value.get("exclude_tools"), field_name="exclude_tools", alias=alias
     )
+    expose_mode = value.get("expose_mode", "direct")
+    if expose_mode not in {"direct", "broker"}:
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} expose_mode must be direct or broker."
+        )
+    pinned_tools = _string_tuple(
+        value.get("pinned_tools"), field_name="pinned_tools", alias=alias
+    )
+    tags = _string_tuple(value.get("tags"), field_name="tags", alias=alias)
+    _validate_nonempty_strings(alias, "pinned_tools", pinned_tools)
+    _validate_nonempty_strings(alias, "tags", tags)
+    tool_policy = _tool_policy_dict(value.get("tool_policy"), alias=alias)
     overlap = sorted(set(include_tools) & set(exclude_tools))
     if overlap:
         raise UpstreamConfigError(
@@ -898,7 +960,84 @@ def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
         authorization_env=_optional_str(value.get("authorization_env")),
         include_tools=include_tools,
         exclude_tools=exclude_tools,
+        expose_mode=expose_mode,
+        pinned_tools=pinned_tools,
+        tags=tags,
+        tool_policy=tool_policy,
         timeout_ms=timeout_ms,
+    )
+
+
+def parse_tool_search_config(value: Any) -> dict[str, tuple[str, ...]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise UpstreamConfigError("tool_search must be an object.")
+    unknown = sorted(set(value) - {"custom_synonyms"})
+    if unknown:
+        raise UpstreamConfigError(
+            f"tool_search contains unsupported fields: {', '.join(unknown)}."
+        )
+    custom = value.get("custom_synonyms")
+    if custom is None:
+        return {}
+    if not isinstance(custom, dict):
+        raise UpstreamConfigError("tool_search.custom_synonyms must be an object.")
+    if len(custom) > 128:
+        raise UpstreamConfigError("tool_search.custom_synonyms supports at most 128 terms.")
+    normalized: dict[str, tuple[str, ...]] = {}
+    for raw_key, raw_values in custom.items():
+        if not isinstance(raw_key, str) or not raw_key or len(raw_key) > 64:
+            raise UpstreamConfigError(
+                "tool_search.custom_synonyms keys must be non-empty strings up to 64 characters."
+            )
+        if any(ord(char) < 32 for char in raw_key):
+            raise UpstreamConfigError(
+                "tool_search.custom_synonyms keys must not contain control characters."
+            )
+        if (
+            not isinstance(raw_values, list)
+            or not raw_values
+            or not all(isinstance(item, str) for item in raw_values)
+        ):
+            raise UpstreamConfigError(
+                f"tool_search.custom_synonyms[{raw_key!r}] must be a non-empty list of strings."
+            )
+        if len(raw_values) > 10 or len(set(raw_values)) != len(raw_values):
+            raise UpstreamConfigError(
+                f"tool_search.custom_synonyms[{raw_key!r}] must contain 1-10 unique values."
+            )
+        if any(
+            not item or len(item) > 64 or any(ord(char) < 32 for char in item)
+            for item in raw_values
+        ):
+            raise UpstreamConfigError(
+                f"tool_search.custom_synonyms[{raw_key!r}] values must be non-empty, control-free strings up to 64 characters."
+            )
+        normalized[raw_key] = tuple(raw_values)
+    return normalized
+
+
+def tool_catalog_entry(
+    tool: UpstreamTool,
+    config: UpstreamServerConfig,
+) -> UpstreamToolCatalogEntry:
+    definition = tool.public_definition
+    title = definition.get("title")
+    description = definition.get("description")
+    input_schema = definition.get("inputSchema")
+    properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
+    argument_names = tuple(properties) if isinstance(properties, dict) else ()
+    return UpstreamToolCatalogEntry(
+        public_name=tool.public_name,
+        server_alias=config.alias,
+        remote_name=tool.remote_name,
+        title=title if isinstance(title, str) else "",
+        description=(description if isinstance(description, str) else "")[:200],
+        tags=tuple(config.tags),
+        argument_names=argument_names,
+        effective_risk=tool.effective_risk,
+        public_schema_digest=tool.public_schema_digest,
     )
 
 
@@ -1219,6 +1358,31 @@ def _string_tuple(value: Any, *, field_name: str, alias: str) -> tuple[str, ...]
             f"Upstream {alias!r} field {field_name} must not contain duplicates."
         )
     return tuple(value)
+
+
+def _validate_nonempty_strings(
+    alias: str,
+    field_name: str,
+    values: tuple[str, ...],
+) -> None:
+    if any(not value or any(ord(char) < 32 for char in value) for value in values):
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} field {field_name} must contain non-empty strings without control characters."
+        )
+
+
+def _tool_policy_dict(value: Any, *, alias: str) -> dict[str, str]:
+    policy = _string_dict(value, field_name="tool_policy", alias=alias)
+    for remote_name, risk in policy.items():
+        if not remote_name or any(ord(char) < 32 for char in remote_name):
+            raise UpstreamConfigError(
+                f"Upstream {alias!r} tool_policy keys must be non-empty tool names."
+            )
+        if risk not in {"readonly", "mutating"}:
+            raise UpstreamConfigError(
+                f"Upstream {alias!r} tool_policy values must be readonly or mutating."
+            )
+    return policy
 
 
 def _string_dict(value: Any, *, field_name: str, alias: str) -> dict[str, str]:

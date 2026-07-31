@@ -24,7 +24,11 @@ from .settings_definition import (
 from .settings_store import ServerSettingsStore, SettingsStoreError, sanitize_settings
 from .telemetry import telemetry_mode
 from .transcript import TranscriptStore, TranscriptStoreError, WorkspaceScope
-from .upstream import UpstreamConfigError, parse_server_config
+from .upstream import (
+    UpstreamConfigError,
+    parse_server_config,
+    parse_tool_search_config,
+)
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 
 ADMIN_API_PREFIX = "/admin/api"
@@ -137,10 +141,18 @@ def _read_gateway_document(path: Path) -> dict[str, Any]:
         raise AdminServiceError(f"Gateway configuration is not valid JSON: {exc}") from exc
     if not isinstance(raw, dict):
         raise AdminServiceError("Gateway configuration must be a JSON object.")
-    servers = raw.get("servers", raw)
-    if not isinstance(servers, dict):
-        raise AdminServiceError("Gateway configuration must contain a servers object.")
-    return {"servers": _json_copy(servers)}
+    if "servers" in raw:
+        servers = raw.get("servers")
+        if not isinstance(servers, dict):
+            raise AdminServiceError("Gateway configuration must contain a servers object.")
+        result: dict[str, Any] = {"servers": _json_copy(servers)}
+        if "tool_search" in raw:
+            tool_search = raw.get("tool_search")
+            if not isinstance(tool_search, dict):
+                raise AdminServiceError("tool_search must be an object.")
+            result["tool_search"] = _json_copy(tool_search)
+        return result
+    return {"servers": _json_copy(raw)}
 
 
 
@@ -166,6 +178,10 @@ def _validate_gateway_document(document: dict[str, Any], vault: SecretVault) -> 
     servers = document.get("servers")
     if not isinstance(servers, dict):
         raise AdminServiceError("Gateway configuration must contain a servers object.")
+    try:
+        custom_synonyms = parse_tool_search_config(document.get("tool_search"))
+    except UpstreamConfigError as exc:
+        raise AdminServiceError(str(exc)) from exc
     normalized: dict[str, Any] = {}
     for alias, value in servers.items():
         if not isinstance(alias, str) or not isinstance(value, dict):
@@ -213,7 +229,14 @@ def _validate_gateway_document(document: dict[str, Any], vault: SecretVault) -> 
                         "Sensitive Gateway headers cannot be persisted as plaintext."
                     )
         normalized[alias] = _json_copy(value)
-    return {"servers": normalized}
+    result: dict[str, Any] = {"servers": normalized}
+    if "tool_search" in document:
+        result["tool_search"] = {
+            "custom_synonyms": {
+                key: list(values) for key, values in custom_synonyms.items()
+            }
+        }
+    return result
 
 
 class AdminService:
