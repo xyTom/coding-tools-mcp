@@ -47,4 +47,5 @@ where = [".", "apps/desktop-client"]
 include = ["coding_tools_mcp*", "mcp_desktop_client*"]
 
 [tool.setuptools.package-data]
+coding_tools_mcp = ["webui_dist/*"]
 mcp_desktop_client = ["locales/*.qm", "locales/*.ts"]

@@ -10,6 +10,9 @@ from scripts.check_final_audit import select_successful_run, workflow_runs_url
 from scripts.check_release_versions import validate_release
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class ReleaseMetadataTests(unittest.TestCase):
     def _write_release_tree(
         self,
@@ -55,6 +58,10 @@ class ReleaseMetadataTests(unittest.TestCase):
             self._write_release_tree(root, npm_version="0.1.0-beta.1")
             with self.assertRaisesRegex(SystemExit, "not stable"):
                 validate_release(root, "v0.2.0")
+
+    def test_current_integration_tree_requires_release_preparation(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "Unreleased"):
+            validate_release(ROOT, "v0.2.2")
 
 
 class FinalAuditTests(unittest.TestCase):

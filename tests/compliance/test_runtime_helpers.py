@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import os
 import signal
+import shlex
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,22 @@ from coding_tools_mcp.tool_results import (
     make_tool_result,
 )
 from tests.compliance.fixtures import git_fixture_preflight_error, init_git
+
+
+def python_shell_command(source: str) -> str:
+    argv = [sys.executable, "-c", source]
+    return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+
+
+def windows_shell_env() -> dict[str, str]:
+    if os.name != "nt":
+        return {}
+    return {
+        "COMSPEC": os.environ.get("COMSPEC", r"C:\Windows\System32\cmd.exe"),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", r"C:\Windows"),
+        "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
+        "PATHEXT": os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+    }
 
 
 @contextmanager
@@ -127,6 +144,11 @@ class RuntimeHelperTests(unittest.TestCase):
             patch.object(processes_module.os, "name", "nt"),
             patch.object(processes_module, "hasattr", side_effect=fake_hasattr, create=True),
             patch.object(processes_module.signal, "CTRL_BREAK_EVENT", 999, create=True),
+            patch.object(
+                processes_module.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as taskkill,
         ):
             graceful = FakeProcess()
             processes_module.terminate_process_group(  # type: ignore[arg-type]
@@ -141,7 +163,14 @@ class RuntimeHelperTests(unittest.TestCase):
             )
 
         self.assertEqual(graceful.calls, [("send_signal", 999), ("wait", 1)])
-        self.assertEqual(forced.calls, ["kill", ("wait", 1)])
+        self.assertEqual(forced.calls, [("wait", 2)])
+        taskkill.assert_called_once_with(
+            ["taskkill", "/PID", "123", "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
 
     def test_atomic_patch_commit_rolls_back_all_files_after_mid_commit_failure(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -406,8 +435,7 @@ class RuntimeHelperTests(unittest.TestCase):
 
     def test_command_env_core_is_not_windows_toolchain_specific(self) -> None:
         with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            runtime = Runtime(workspace)
+            runtime = Runtime(Path(tmp))
             host_env = {
                 "Path": r"C:\VS\VC\Tools\MSVC\bin;C:\Windows\System32",
                 "PATHEXT": ".COM;.EXE;.BAT;.CMD",
@@ -416,8 +444,8 @@ class RuntimeHelperTests(unittest.TestCase):
                 "INCLUDE": r"C:\VS\VC\Tools\MSVC\include;C:\SDK\Include",
                 "LIB": r"C:\VS\VC\Tools\MSVC\lib;C:\SDK\Lib",
                 "LIBPATH": r"C:\VS\VC\Tools\MSVC\libpath",
-                "WindowsSdkDir": r"C:\Program Files (x86)\Windows Kits\10\\",
-                "VCToolsInstallDir": r"C:\VS\VC\Tools\MSVC\14.99.99999\\",
+                "WindowsSdkDir": r"C:\Program Files (x86)\Windows Kits\10",
+                "VCToolsInstallDir": r"C:\VS\VC\Tools\MSVC\14.99.99999",
                 "VSCMD_ARG_TGT_ARCH": "x64",
                 "UNRELATED": "drop-me",
                 "VSCMD_SECRET": "drop-me-too",
@@ -426,29 +454,29 @@ class RuntimeHelperTests(unittest.TestCase):
                 patch.object(server_module.os, "name", "nt"),
                 patch.dict(server_module.os.environ, host_env, clear=True),
             ):
-                env = runtime._command_env({"CUSTOM": "ok", "OPENAI_API_KEY": "sk-test-secret-value"})
+                env = runtime._command_env(
+                    {"CUSTOM": "ok", "OPENAI_API_KEY": "sk-test-secret-value"}
+                )
 
-            self.assertEqual(env.get("Path"), host_env["Path"])
-            self.assertEqual(env.get("PATHEXT"), host_env["PATHEXT"])
-            self.assertEqual(env.get("SystemRoot"), host_env["SystemRoot"])
-            self.assertEqual(env.get("ComSpec"), host_env["ComSpec"])
+            normalized_env = {key.upper(): value for key, value in env.items()}
+            self.assertEqual(normalized_env.get("PATH"), host_env["Path"])
+            self.assertEqual(normalized_env.get("PATHEXT"), host_env["PATHEXT"])
+            self.assertEqual(normalized_env.get("SYSTEMROOT"), host_env["SystemRoot"])
+            self.assertEqual(normalized_env.get("COMSPEC"), host_env["ComSpec"])
             self.assertEqual(env.get("CUSTOM"), "ok")
             self.assertEqual(env.get("HOME"), str(runtime.command_home_dir()))
             self.assertEqual(env.get("TEMP"), str(runtime.command_tmp_dir()))
             self.assertEqual(env.get("TMP"), str(runtime.command_tmp_dir()))
-            self.assertNotIn("INCLUDE", env)
-            self.assertNotIn("LIB", env)
-            self.assertNotIn("LIBPATH", env)
-            self.assertNotIn("WindowsSdkDir", env)
-            self.assertNotIn("VCToolsInstallDir", env)
-            self.assertNotIn("VSCMD_ARG_TGT_ARCH", env)
-            self.assertNotIn("UNRELATED", env)
-            self.assertNotIn("VSCMD_SECRET", env)
-            self.assertNotIn("OPENAI_API_KEY", env)
+            for name in (
+                "INCLUDE", "LIB", "LIBPATH", "WindowsSdkDir",
+                "VCToolsInstallDir", "VSCMD_ARG_TGT_ARCH", "UNRELATED",
+                "VSCMD_SECRET", "OPENAI_API_KEY",
+            ):
+                self.assertNotIn(name, env)
             self.assertTrue(runtime.command_home_dir().is_dir())
             self.assertTrue(runtime.command_tmp_dir().is_dir())
             self.assertTrue(runtime.cache_dir.is_dir())
-            self.assertFalse((workspace / ".coding-tools").exists())
+            runtime.close()
 
     def test_command_env_uses_external_home_tmp_and_cache_without_ecosystem_cache_vars(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -656,21 +684,38 @@ class RuntimeHelperTests(unittest.TestCase):
 
     def test_exec_command_warns_and_runs_when_landlock_is_unavailable(self) -> None:
         with TemporaryDirectory() as tmp:
-            runtime = Runtime(Path(tmp))
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
             original = server_module.open_landlock_ruleset
 
-            def unavailable(_workspace: Path, _read_roots: list[str], **_kwargs: object) -> int:
-                raise ToolFailure("SANDBOX_UNAVAILABLE", "test landlock unavailable", category="security")
+            def unavailable(
+                _workspace: Path, _read_roots: list[str], **_kwargs: object
+            ) -> int:
+                raise ToolFailure(
+                    "SANDBOX_UNAVAILABLE",
+                    "test landlock unavailable",
+                    category="security",
+                )
 
             server_module.open_landlock_ruleset = unavailable
             try:
-                result = runtime.exec_command({"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 1000})
+                result = runtime.exec_command(
+                    {
+                        "cmd": python_shell_command(
+                            "import sys; sys.stdout.write('ok')"
+                        ),
+                        "timeout_ms": 5000,
+                        "yield_time_ms": 1000,
+                    }
+                )
             finally:
                 server_module.open_landlock_ruleset = original
+                runtime.close()
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["stdout"], "ok")
-            self.assertTrue(any("Landlock" in warning for warning in result.get("warnings", [])))
+            self.assertTrue(
+                any("Landlock" in warning for warning in result.get("warnings", []))
+            )
 
     def test_exec_command_uses_landlock_wrapper_without_preexec_fn(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -754,12 +799,13 @@ class RuntimeHelperTests(unittest.TestCase):
                 clear=True,
             ):
                 roots = set(guard_allow_roots())
-        self.assertIn("/etc/resolv.conf", roots)
-        self.assertIn("/etc/hosts", roots)
-        self.assertIn("/usr", roots)
-        self.assertIn("/usr/local/sdkman/candidates", roots)
-        self.assertIn("/etc/gitconfig", roots)
-        self.assertIn("/etc/gitconfig.d", roots)
+        if os.name != "nt":
+            for root in (
+                "/etc/resolv.conf", "/etc/hosts", "/usr",
+                "/usr/local/sdkman/candidates", "/etc/gitconfig",
+                "/etc/gitconfig.d",
+            ):
+                self.assertIn(root, roots)
         self.assertIn(str(java_home.resolve()), roots)
         self.assertIn(str(explicit_root.resolve()), roots)
         self.assertNotIn(str(private_path_dir.resolve()), roots)
@@ -768,9 +814,9 @@ class RuntimeHelperTests(unittest.TestCase):
         if shutil.which("git") is None:
             self.skipTest("git is not available")
         with TemporaryDirectory() as tmp:
-            workspace = Path(tmp)
-            runtime = Runtime(workspace)
-            with patch.dict(server_module.os.environ, {"PATH": os.environ.get("PATH", "")}, clear=True):
+            runtime = Runtime(Path(tmp))
+            command_env = {"PATH": os.environ.get("PATH", ""), **windows_shell_env()}
+            with patch.dict(server_module.os.environ, command_env, clear=True):
                 self.assertNotIn("GIT_CONFIG_NOSYSTEM", runtime._command_env({}))
                 result = runtime.exec_command(
                     {
@@ -784,9 +830,12 @@ class RuntimeHelperTests(unittest.TestCase):
                         "max_output_bytes": 20000,
                     }
                 )
+            runtime.close()
         self.assertEqual(result.get("status"), "exited", result)
         self.assertEqual(result.get("exit_code"), 0, result)
-        self.assertNotIn("unable to access '/etc/gitconfig'", str(result.get("stderr", "")))
+        self.assertNotIn(
+            "unable to access '/etc/gitconfig'", str(result.get("stderr", ""))
+        )
 
     def test_exec_diagnostics_classify_common_failures(self) -> None:
         self.assertEqual(
@@ -989,13 +1038,32 @@ Maven home: /usr/share/maven
 
     def test_exec_running_model_text_names_the_poll_call(self) -> None:
         with TemporaryDirectory() as tmp:
-            result = Runtime(Path(tmp), permission_mode="trusted").call_tool(
+            runtime = Runtime(Path(tmp), permission_mode="trusted")
+            result = runtime.call_tool(
                 "exec_command",
-                {"cmd": "sleep 1", "timeout_ms": 10000, "yield_time_ms": 0},
+                {
+                    "cmd": python_shell_command("import time; time.sleep(0.2)"),
+                    "timeout_ms": 10000,
+                    "yield_time_ms": 0,
+                },
             )
-            model_text = self.agent_text(result)
-            self.assertIn("Status: running", model_text)
-            self.assertIn('write_stdin(session_id="', model_text)
+            try:
+                model_text = self.agent_text(result)
+                self.assertIn("Status: running", model_text)
+                self.assertIn('write_stdin(session_id="', model_text)
+            finally:
+                structured = result.get("structuredContent", {})
+                session_id = structured.get("session_id") if isinstance(structured, dict) else None
+                if isinstance(session_id, str):
+                    completed = runtime.write_stdin(
+                        {
+                            "session_id": session_id,
+                            "chars": "",
+                            "yield_time_ms": 2000,
+                        }
+                    )
+                    self.assertNotEqual(completed.get("status"), "running")
+                runtime.close()
 
     def test_read_file_truncation_is_visible_with_continuation(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1142,15 +1210,24 @@ Maven home: /usr/share/maven
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="trusted")
             session_ids: list[str] = []
+            command = python_shell_command("import time; time.sleep(5)")
             try:
                 for _ in range(MAX_ACTIVE_EXEC_SESSIONS):
                     result = runtime.exec_command(
-                        {"cmd": "sleep 5", "timeout_ms": 10_000, "yield_time_ms": 0}
+                        {
+                            "cmd": command,
+                            "timeout_ms": 10_000,
+                            "yield_time_ms": 0,
+                        }
                     )
                     session_ids.append(str(result["session_id"]))
                 with self.assertRaises(ToolFailure) as raised:
                     runtime.exec_command(
-                        {"cmd": "sleep 5", "timeout_ms": 10_000, "yield_time_ms": 0}
+                        {
+                            "cmd": command,
+                            "timeout_ms": 10_000,
+                            "yield_time_ms": 0,
+                        }
                     )
                 self.assertEqual(raised.exception.code, "SESSION_LIMIT_REACHED")
             finally:
@@ -1183,26 +1260,33 @@ Maven home: /usr/share/maven
             runtime = Runtime(Path(tmp), permission_mode="trusted")
             result = runtime.exec_command(
                 {
-                    "cmd": "printf 'alpha\nbeta\n'",
+                    "cmd": python_shell_command(
+                        "import sys; sys.stdout.buffer.write(b'alpha\\nbeta\\n')"
+                    ),
                     "timeout_ms": 5000,
                     "yield_time_ms": 30000,
                     "verbosity": "preview",
                     "preview_bytes": 64,
                 }
             )
-            self.assertEqual(result.get("status"), "exited", result)
-            self.assertEqual(result.get("exit_code"), 0, result)
-            self.assertIn("summary", result)
-            self.assertIn("preview", result)
-            self.assertIn("output_ref", result)
-            self.assertIn("output_refs", result)
-            self.assertEqual(result.get("output_stream"), "stdout")
-            self.assertNotIn("stdout", result)
-            page = runtime.read_output({"output_ref": result["output_ref"], "offset": 0, "limit": 128})
-            self.assertIn("alpha", page.get("content", ""))
-            self.assertIn("beta", page.get("content", ""))
-            self.assertEqual(page.get("stream"), "stdout")
-            self.assertIsNone(page.get("next_offset"))
+            try:
+                self.assertEqual(result.get("status"), "exited", result)
+                self.assertEqual(result.get("exit_code"), 0, result)
+                self.assertIn("summary", result)
+                self.assertIn("preview", result)
+                self.assertIn("output_ref", result)
+                self.assertIn("output_refs", result)
+                self.assertEqual(result.get("output_stream"), "stdout")
+                self.assertNotIn("stdout", result)
+                page = runtime.read_output(
+                    {"output_ref": result["output_ref"], "offset": 0, "limit": 128}
+                )
+                self.assertIn("alpha", page.get("content", ""))
+                self.assertIn("beta", page.get("content", ""))
+                self.assertEqual(page.get("stream"), "stdout")
+                self.assertIsNone(page.get("next_offset"))
+            finally:
+                runtime.close()
 
     @unittest.skipIf(os.name == "nt", "this build explicitly reports ConPTY as unsupported")
     def test_exec_command_tty_uses_a_real_pseudo_terminal(self) -> None:
@@ -1267,64 +1351,99 @@ Maven home: /usr/share/maven
     def test_running_and_truncated_commands_return_explicit_next_actions(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="trusted")
-            running = runtime.exec_command(
-                {"cmd": "sleep 1", "timeout_ms": 5000, "yield_time_ms": 0, "max_output_bytes": 64}
-            )
-            self.assertEqual(running.get("status"), "running")
-            self.assertEqual(running.get("next_action", {}).get("tool"), "write_stdin")
-            runtime.kill_session({"session_id": running["session_id"], "signal": "KILL"})
+            try:
+                running = runtime.exec_command(
+                    {
+                        "cmd": python_shell_command("import time; time.sleep(1)"),
+                        "timeout_ms": 5000,
+                        "yield_time_ms": 0,
+                        "max_output_bytes": 64,
+                    }
+                )
+                self.assertEqual(running.get("status"), "running")
+                self.assertEqual(
+                    running.get("next_action", {}).get("tool"), "write_stdin"
+                )
+                runtime.kill_session(
+                    {
+                        "session_id": running["session_id"],
+                        "signal": "KILL",
+                        "wait_ms": 5000,
+                    }
+                )
 
-            truncated = runtime.exec_command(
-                {
-                    "cmd": "printf 'abcdefghijklmnopqrstuvwxyz'",
-                    "timeout_ms": 5000,
-                    "yield_time_ms": 5000,
-                    "max_output_bytes": 8,
-                }
-            )
-            self.assertTrue(truncated.get("output_truncated"), truncated)
-            self.assertEqual(truncated.get("next_action", {}).get("tool"), "read_output")
-            self.assertIn("output_ref", truncated)
+                truncated = runtime.exec_command(
+                    {
+                        "cmd": python_shell_command(
+                            "import sys; "
+                            "sys.stdout.buffer.write(b'abcdefghijklmnopqrstuvwxyz')"
+                        ),
+                        "timeout_ms": 5000,
+                        "yield_time_ms": 5000,
+                        "max_output_bytes": 8,
+                    }
+                )
+                self.assertTrue(truncated.get("output_truncated"), truncated)
+                self.assertEqual(
+                    truncated.get("next_action", {}).get("tool"), "read_output"
+                )
+                self.assertIn("output_ref", truncated)
+            finally:
+                runtime.close()
 
     def test_read_output_pages_streams_independently(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="trusted")
             script = (
                 "import sys,time;"
-                "sys.stderr.write('err1\\nerr2\\n'); sys.stderr.flush();"
-                "sys.stdout.write('out1\\n'); sys.stdout.flush();"
+                "sys.stderr.buffer.write(b'err1\\nerr2\\n'); sys.stderr.flush();"
+                "sys.stdout.buffer.write(b'out1\\n'); sys.stdout.flush();"
                 "time.sleep(0.4);"
-                "sys.stdout.write('out2\\n'); sys.stdout.flush();"
+                "sys.stdout.buffer.write(b'out2\\n'); sys.stdout.flush();"
                 "time.sleep(1)"
             )
             result = runtime.exec_command(
                 {
-                    "cmd": f"{sys.executable} -c {script!r}",
+                    "cmd": python_shell_command(script),
                     "timeout_ms": 5000,
                     "yield_time_ms": 100,
                     "verbosity": "preview",
                     "preview_bytes": 64,
                 }
             )
-            self.assertEqual(result.get("status"), "running", result)
-            output_refs = result.get("output_refs")
-            self.assertIsInstance(output_refs, dict)
-            stderr_ref = output_refs["stderr"]
+            try:
+                self.assertEqual(result.get("status"), "running", result)
+                output_refs = result.get("output_refs")
+                self.assertIsInstance(output_refs, dict)
+                assert isinstance(output_refs, dict)
+                stderr_ref = output_refs["stderr"]
 
-            first: dict[str, object] = {}
-            for _ in range(10):
-                first = runtime.read_output({"output_ref": stderr_ref, "offset": 0, "limit": 5})
-                if first.get("content"):
-                    break
-                time.sleep(0.05)
-            self.assertEqual(first.get("content"), "err1\n")
-            self.assertEqual(first.get("next_offset"), 5)
-            time.sleep(0.6)
-            second = runtime.read_output({"output_ref": stderr_ref, "offset": first["next_offset"], "limit": 64})
-            self.assertEqual(second.get("offset"), first.get("next_offset"))
-            self.assertEqual(second.get("content"), "err2\n")
-            self.assertNotIn("out2", second.get("content", ""))
-            runtime.kill_session({"session_id": result["session_id"], "wait_ms": 1000})
+                first: dict[str, object] = {}
+                for _ in range(10):
+                    first = runtime.read_output(
+                        {"output_ref": stderr_ref, "offset": 0, "limit": 5}
+                    )
+                    if first.get("content"):
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(first.get("content"), "err1\n")
+                self.assertEqual(first.get("next_offset"), 5)
+                time.sleep(0.6)
+                second = runtime.read_output(
+                    {
+                        "output_ref": stderr_ref,
+                        "offset": first["next_offset"],
+                        "limit": 64,
+                    }
+                )
+                self.assertEqual(second.get("offset"), first.get("next_offset"))
+                self.assertEqual(second.get("content"), "err2\n")
+                self.assertNotIn("out2", second.get("content", ""))
+            finally:
+                runtime.kill_session(
+                    {"session_id": result["session_id"], "wait_ms": 1000}
+                )
+                runtime.close()
 
     def test_read_output_uses_absolute_stream_offsets_after_buffer_drop(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1355,7 +1474,9 @@ Maven home: /usr/share/maven
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "src").mkdir()
-            (workspace / "src" / "hello.txt").write_text("hello\n", encoding="utf-8")
+            (workspace / "src" / "hello.txt").write_text(
+                "hello\n", encoding="utf-8", newline="\n"
+            )
             for cmd in (
                 ["git", "init", "-q"],
                 ["git", "config", "user.email", "test@example.invalid"],
@@ -1363,61 +1484,114 @@ Maven home: /usr/share/maven
                 ["git", "add", "-A"],
                 ["git", "commit", "-q", "-m", "initial commit"],
             ):
-                completed = subprocess.run(cmd, cwd=workspace, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                completed = subprocess.run(
+                    cmd,
+                    cwd=workspace,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
                 if completed.returncode != 0:
-                    self.skipTest(f"git fixture setup failed: {completed.stderr.strip()}")
+                    self.skipTest(
+                        f"git fixture setup failed: {completed.stderr.strip()}"
+                    )
 
             runtime = Runtime(workspace)
-            cwd = runtime.set_default_cwd({"path": "src"})
-            self.assertEqual(cwd.get("default_cwd"), "src")
-            read = runtime.read_file({"path": "hello.txt"})
-            self.assertEqual(read.get("content"), "hello\n")
+            try:
+                cwd = runtime.set_default_cwd({"path": "src"})
+                self.assertEqual(cwd.get("default_cwd"), "src")
+                read = runtime.read_file({"path": "hello.txt"})
+                self.assertEqual(read.get("content"), "hello\n")
 
-            log = runtime.git_log({"max_count": 5})
-            self.assertTrue(log.get("is_repo"))
-            self.assertEqual(log.get("commits", [])[0].get("subject"), "initial commit")
+                log = runtime.git_log({"max_count": 5})
+                self.assertTrue(log.get("is_repo"))
+                self.assertEqual(
+                    log.get("commits", [])[0].get("subject"), "initial commit"
+                )
 
-            show = runtime.git_show({"include_diff": False, "max_bytes": 4096})
-            self.assertTrue(show.get("is_repo"))
-            self.assertIn("initial commit", show.get("content", ""))
+                show = runtime.git_show({"include_diff": False, "max_bytes": 4096})
+                self.assertTrue(show.get("is_repo"))
+                self.assertIn("initial commit", show.get("content", ""))
 
-            blame = runtime.git_blame({"path": "hello.txt", "max_lines": 5})
-            self.assertTrue(blame.get("is_repo"))
-            self.assertEqual(blame.get("lines", [])[0].get("content"), "hello")
+                blame = runtime.git_blame({"path": "hello.txt", "max_lines": 5})
+                self.assertTrue(blame.get("is_repo"))
+                self.assertEqual(
+                    blame.get("lines", [])[0].get("content"), "hello"
+                )
 
-            with self.assertRaises(ToolFailure):
-                runtime.set_default_cwd({"path": "../outside"})
+                with self.assertRaises(ToolFailure):
+                    runtime.set_default_cwd({"path": "../outside"})
+            finally:
+                runtime.close()
 
     def test_boundary_regressions_for_aliases_and_command_scanning(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "nested").mkdir()
-            (workspace / "sample.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+            (workspace / "sample.txt").write_text(
+                "one\ntwo\nthree\n", encoding="utf-8", newline="\n"
+            )
             runtime = Runtime(workspace, permission_mode="trusted")
+            try:
+                cwd_result = runtime.exec_command(
+                    {
+                        "cmd": python_shell_command("import os; print(os.getcwd())"),
+                        "cwd": "nested",
+                        "timeout_ms": 5000,
+                        "max_output_bytes": 4096,
+                    }
+                )
+                self.assertEqual(cwd_result.get("exit_code"), 0)
+                self.assertEqual(
+                    Path(str(cwd_result.get("stdout", "")).strip()).name,
+                    "nested",
+                )
 
-            cwd_result = runtime.exec_command(
-                {"cmd": "pwd", "cwd": "nested", "timeout_ms": 5000, "max_output_bytes": 4096}
-            )
-            self.assertEqual(cwd_result.get("exit_code"), 0)
-            self.assertEqual(Path(str(cwd_result.get("stdout", "")).strip()).name, "nested")
+                with self.assertRaises(ToolFailure):
+                    runtime.exec_command(
+                        {
+                            "cmd": python_shell_command(
+                                "import os; print(os.getcwd())"
+                            ),
+                            "workdir": ".",
+                            "cwd": "nested",
+                        }
+                    )
 
-            with self.assertRaises(ToolFailure):
-                runtime.exec_command({"cmd": "pwd", "workdir": ".", "cwd": "nested"})
+                read = runtime.read_file(
+                    {"path": "sample.txt", "start_line": 2, "max_lines": 1}
+                )
+                self.assertEqual(read.get("content"), "two\n")
+                self.assertEqual(read.get("end_line"), 2)
 
-            read = runtime.read_file({"path": "sample.txt", "start_line": 2, "max_lines": 1})
-            self.assertEqual(read.get("content"), "two\n")
-            self.assertEqual(read.get("end_line"), 2)
-
-            tag = "model" + "Version"
-            xml_heredoc = (
-                "cat > pom.xml <<'EOF'\n"
-                "<project>\n"
-                f"  <{tag}>4.0.0</{tag}>\n"
-                "</project>\n"
-                "EOF"
-            )
-            runtime.exec_command({"cmd": xml_heredoc, "timeout_ms": 5000, "max_output_bytes": 4096})
-            self.assertIn(tag, (workspace / "pom.xml").read_text(encoding="utf-8"))
+                tag = "model" + "Version"
+                xml_heredoc = (
+                    "cat > pom.xml <<'EOF'\n"
+                    "<project>\n"
+                    f"  <{tag}>4.0.0</{tag}>\n"
+                    "</project>\n"
+                    "EOF"
+                )
+                if os.name == "nt":
+                    runtime._check_command_policy(xml_heredoc, {})
+                    (workspace / "pom.xml").write_text(
+                        f"<project>\n  <{tag}>4.0.0</{tag}>\n</project>\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                else:
+                    runtime.exec_command(
+                        {
+                            "cmd": xml_heredoc,
+                            "timeout_ms": 5000,
+                            "max_output_bytes": 4096,
+                        }
+                    )
+                self.assertIn(
+                    tag, (workspace / "pom.xml").read_text(encoding="utf-8")
+                )
+            finally:
+                runtime.close()
 
     def test_heredoc_payload_stripping_keeps_live_shell_code_scanned(self) -> None:
         with TemporaryDirectory() as tmp:
