@@ -372,6 +372,9 @@ class AdminService:
             "pending_restart": revision != self.active_gateway_revision,
             "restart_required": revision != self.active_gateway_revision,
             "active_status": _redact(status) if isinstance(status, dict) else None,
+            "activation": "new_mcp_session_or_service_restart",
+            "new_server_defaults": {"expose_mode": "broker"},
+            "list_changed": False,
             "dynamic_reload": False,
         }
 

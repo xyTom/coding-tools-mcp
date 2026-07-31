@@ -40,11 +40,15 @@ The default catalog contains exactly 25 tools:
 content. That capability gate is not a tool profile. The other 24 local tools
 are always advertised.
 
-Optional upstream tools are appended only during Runtime initialization and use
-`{alias}__{remote_name}`. Local names are permanently reserved. Upstream schema,
-annotations, extension fields, `content`, `structuredContent`, and `isError` are
-preserved. Namespace collisions fail closed, and an established Runtime never
-changes its snapshot; therefore `listChanged` is `false`.
+Upstream tools are discovered only during Runtime initialization and use
+`{alias}__{remote_name}`. Legacy or `expose_mode=direct` servers append every
+filtered public definition directly. `expose_mode=broker` keeps the complete
+sanitized catalog behind the five fixed Broker tools and appends only pinned
+remote names directly. Local names are permanently reserved. Broker calls
+preserve `content`, `structuredContent`, and `isError` without double wrapping.
+Namespace collisions fail closed, and an established Runtime never changes its
+snapshot; therefore `listChanged` is `false`. See
+[upstream-broker.md](upstream-broker.md).
 
 ## Result envelope
 

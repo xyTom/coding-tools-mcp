@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { containsCredentialControl, sanitizeAdminValue } from '../src/admin.js';
+import { containsCredentialControl, gatewayExposurePreview, gatewayServerTemplate, sanitizeAdminValue } from '../src/admin.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -32,6 +32,44 @@ test('gateway WebUI rejects credential and reference control fields', () => {
   assert.equal(containsCredentialControl({ servers: { x: { command: 'node' } } }), false);
   assert.equal(containsCredentialControl({ servers: { x: { env: { TOKEN: { secret_ref: 'name' } } } } }), true);
   assert.equal(containsCredentialControl({ servers: { x: { headers: { Authorization: 'Bearer canary' } } } }), true);
+});
+
+test('new Gateway server template defaults to restart-only broker exposure', () => {
+  const template = gatewayServerTemplate('chemistry');
+  assert.equal(template.servers.chemistry.expose_mode, 'broker');
+  assert.deepEqual(template.servers.chemistry.pinned_tools, []);
+  assert.deepEqual(template.tool_search.custom_synonyms, {});
+});
+
+test('Gateway exposure preview distinguishes direct, pinned, and broker-only tools', () => {
+  const activeStatus = {
+    exposure_report: {
+      servers: [{
+        alias: 'remote',
+        tools: [
+          { remote_name: 'search', direct: true },
+          { remote_name: 'create_issue', direct: true },
+          { remote_name: 'delete_issue', direct: true },
+        ],
+      }],
+    },
+  };
+  const direct = gatewayExposurePreview({ servers: { remote: {} } }, activeStatus)[0];
+  assert.deepEqual(direct.direct, ['search', 'create_issue', 'delete_issue']);
+  assert.deepEqual(direct.broker_only, []);
+
+  const broker = gatewayExposurePreview({
+    servers: {
+      remote: {
+        expose_mode: 'broker',
+        include_tools: ['search', 'create_issue'],
+        pinned_tools: ['search'],
+      },
+    },
+  }, activeStatus)[0];
+  assert.deepEqual(broker.direct, ['search']);
+  assert.deepEqual(broker.pinned, ['search']);
+  assert.deepEqual(broker.broker_only, ['create_issue']);
 });
 
 test('WebUI source has no obsolete catalog controls or unsafe rendering/storage paths', async () => {

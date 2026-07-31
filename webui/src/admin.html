@@ -92,11 +92,17 @@
 
       <section id="section-gateway" class="page-section" aria-labelledby="gatewayTitle" hidden>
         <div class="section-heading"><div><p class="eyebrow">Restart-only</p><h2 id="gatewayTitle">Gateway 配置</h2></div><button id="reloadGateway" type="button" class="secondary">刷新</button></div>
-        <div class="card-grid"><article class="card"><h3>当前快照</h3><div id="gatewaySummary"></div></article><article class="card"><h3>保存状态</h3><p>Restart required：<strong id="gatewayRestartRequired">—</strong></p><p>Persisted revision：<code id="gatewayRevision">—</code></p><p class="muted">此页面没有 start、stop 或 reload 控件。</p></article></div>
+        <div class="card-grid">
+          <article class="card"><h3>当前快照</h3><div id="gatewaySummary"></div></article>
+          <article class="card"><h3>保存状态</h3><p>Restart required：<strong id="gatewayRestartRequired">—</strong></p><p>Persisted revision：<code id="gatewayRevision">—</code></p><p class="muted">新 MCP Session/Runtime 或服务重启后生效；不会发送 list_changed，也没有 start、stop 或 reload 控件。</p></article>
+          <article class="card"><h3>上游上下文</h3><div id="gatewayExposureReport"></div></article>
+        </div>
         <form id="gatewayForm" class="card" novalidate>
+          <div class="section-heading"><div><h3>Restart-only JSON</h3><p class="muted">新建 server 模板默认使用 broker exposure。</p></div><button id="newGatewayServer" type="button" class="secondary">新建 broker server 模板</button></div>
           <label for="gatewayDocument">替换配置 JSON（仅限不含凭据的配置）</label>
-          <textarea id="gatewayDocument" rows="14" placeholder='{"servers":{}}' aria-describedby="gatewayHelp"></textarea>
+          <textarea id="gatewayDocument" rows="14" placeholder='{"servers":{}}' aria-describedby="gatewayHelp gatewayPreviewHelp"></textarea>
           <p id="gatewayHelp" class="help">不会预填或显示任何上游凭据、摘要值或内部引用。含凭据的现有配置只能查看脱敏摘要；请通过受控配置流程维护。</p>
+          <div class="card" aria-live="polite"><h3>Exposure preview</h3><p id="gatewayPreviewHelp" class="help">按当前 Runtime 已发现的公开工具预览 direct、pinned 与 broker-only 差异；保存不会改变当前 Runtime。</p><div id="gatewayExposurePreview"></div></div>
           <div class="button-row"><button type="submit">保存并标记重启</button><button id="clearGatewayDraft" type="button" class="secondary">清空草稿</button></div>
         </form>
       </section>

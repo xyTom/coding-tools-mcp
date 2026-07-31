@@ -51,6 +51,83 @@ function containsCredentialControl(value) {
   });
 }
 
+function gatewayServerTemplate(alias = 'new-upstream') {
+  return {
+    servers: {
+      [alias]: {
+        transport: 'streamable_http',
+        url: 'http://127.0.0.1:9000/mcp',
+        enabled: true,
+        expose_mode: 'broker',
+        pinned_tools: [],
+        tags: [],
+        tool_policy: {},
+      },
+    },
+    tool_search: { custom_synonyms: {} },
+  };
+}
+
+function gatewayExposurePreview(documentValue, activeStatus = {}) {
+  const servers = documentValue?.servers && typeof documentValue.servers === 'object'
+    ? documentValue.servers
+    : {};
+  const activeServers = new Map(
+    (activeStatus?.exposure_report?.servers || []).map((server) => [server.alias, server]),
+  );
+  return Object.keys(servers).sort().map((alias) => {
+    const config = servers[alias] || {};
+    const mode = config.expose_mode === 'broker' ? 'broker' : 'direct';
+    const include = new Set(Array.isArray(config.include_tools) ? config.include_tools : []);
+    const exclude = new Set(Array.isArray(config.exclude_tools) ? config.exclude_tools : []);
+    const pinned = new Set(Array.isArray(config.pinned_tools) ? config.pinned_tools : []);
+    const active = activeServers.get(alias);
+    const knownTools = Array.isArray(active?.tools) ? active.tools : [];
+    const filtered = knownTools.filter((tool) => {
+      const remote = String(tool.remote_name || '');
+      return (!include.size || include.has(remote)) && !exclude.has(remote);
+    });
+    const direct = mode === 'direct'
+      ? filtered.map((tool) => tool.remote_name)
+      : filtered.filter((tool) => pinned.has(tool.remote_name)).map((tool) => tool.remote_name);
+    const brokerOnly = mode === 'broker'
+      ? filtered.filter((tool) => !pinned.has(tool.remote_name)).map((tool) => tool.remote_name)
+      : [];
+    return {
+      alias,
+      mode,
+      catalog_known: Boolean(active),
+      catalog_count: filtered.length,
+      direct,
+      pinned: mode === 'broker' ? direct : [],
+      broker_only: brokerOnly,
+      configured_pins: [...pinned].sort(),
+    };
+  });
+}
+
+function renderGatewayExposurePreview(container, preview) {
+  const documentRef = container.ownerDocument || document;
+  container.replaceChildren();
+  if (!preview.length) {
+    container.append(createNode(documentRef, 'p', { className: 'muted', text: '草稿中没有 Gateway server。' }));
+    return;
+  }
+  for (const item of preview) {
+    const card = createNode(documentRef, 'article', { className: 'card' });
+    const directText = item.catalog_known ? item.direct.join(', ') || '无' : '当前 Runtime 尚无该 server 的可用 catalog';
+    const brokerText = item.catalog_known ? item.broker_only.join(', ') || '无' : '保存并创建新 Runtime 后才能计算';
+    card.append(
+      createNode(documentRef, 'h4', { text: `${item.alias} · ${item.mode}` }),
+      createNode(documentRef, 'p', { text: `Direct (${item.direct.length}): ${directText}` }),
+      createNode(documentRef, 'p', { text: `Pinned (${item.pinned.length}): ${item.pinned.join(', ') || '无'}` }),
+      createNode(documentRef, 'p', { text: `Broker-only (${item.broker_only.length}): ${brokerText}` }),
+      createNode(documentRef, 'p', { className: 'muted', text: `Catalog after include/exclude: ${item.catalog_known ? item.catalog_count : 'unknown'}；configured pins: ${item.configured_pins.join(', ') || '无'}` }),
+    );
+    container.append(card);
+  }
+}
+
 function createApiClient(getToken, fetchImpl = globalThis.fetch) {
   async function request(path, options = {}) {
     const token = String(getToken?.() || '');
@@ -358,6 +435,21 @@ function initAdminApp(documentRef = document) {
     return payload;
   }
 
+  function updateGatewayExposurePreview() {
+    const container = byId('gatewayExposurePreview');
+    if (!container) return;
+    const draft = byId('gatewayDocument').value.trim();
+    try {
+      const documentValue = draft ? JSON.parse(draft) : (state.gateway?.persisted || { servers: {} });
+      renderGatewayExposurePreview(
+        container,
+        gatewayExposurePreview(documentValue, state.gateway?.active_status || {}),
+      );
+    } catch (error) {
+      container.replaceChildren(createNode(documentRef, 'p', { className: 'danger-text', text: `JSON 无法预览：${error.message}` }));
+    }
+  }
+
   function renderGateway(payload) {
     state.gateway = payload;
     state.gatewayRevision = payload.persisted_revision || '';
@@ -371,13 +463,33 @@ function initAdminApp(documentRef = document) {
     for (const alias of aliases) {
       const raw = servers[alias] || {};
       const item = createNode(documentRef, 'article', { className: 'card' });
+      const mode = raw.expose_mode || 'direct';
+      const pins = Array.isArray(raw.pinned_tools) ? raw.pinned_tools : [];
       item.append(
         createNode(documentRef, 'h4', { text: alias }),
         createNode(documentRef, 'p', { text: `Transport: ${raw.transport || 'unknown'} · Enabled: ${raw.enabled !== false}` }),
+        createNode(documentRef, 'p', { text: `Exposure: ${mode} · Pinned: ${pins.length}` }),
         createNode(documentRef, 'p', { className: 'muted', text: 'Credential fields are configured but intentionally hidden.' }),
       );
       summary.append(item);
     }
+
+    const exposureRoot = byId('gatewayExposureReport');
+    exposureRoot.replaceChildren();
+    const report = payload.active_status?.exposure_report;
+    if (!report) {
+      exposureRoot.append(createNode(documentRef, 'p', { className: 'muted', text: '当前 Runtime 没有可用的上游 exposure report。' }));
+    } else {
+      exposureRoot.append(
+        createNode(documentRef, 'p', { text: `Direct: ${report.direct?.count || 0} tools / ${report.direct?.definition_bytes || 0} bytes` }),
+        createNode(documentRef, 'p', { text: `Catalog: ${report.catalog?.count || 0} total / ${report.catalog?.broker_only_count || 0} broker-only` }),
+        createNode(documentRef, 'p', { className: 'muted', text: '仅统计 upstream public definitions；不包含本地或 Admin 工具。' }),
+      );
+      for (const item of report.largest_public_definitions || []) {
+        exposureRoot.append(createNode(documentRef, 'p', { className: 'muted', text: `${item.name}: ${item.definition_bytes} bytes${item.direct ? ' · direct' : ' · broker-only'}` }));
+      }
+    }
+    updateGatewayExposurePreview();
   }
 
   async function loadGateway() { const payload = await api.request('/gateway'); renderGateway(payload); return payload; }
@@ -535,7 +647,13 @@ function initAdminApp(documentRef = document) {
     } catch (error) { status(error.message, 'danger'); }
   });
   byId('reloadGateway').addEventListener('click', () => loadGateway().catch((error) => status(error.message, 'danger')));
-  byId('clearGatewayDraft').addEventListener('click', () => { byId('gatewayDocument').value = ''; });
+  byId('newGatewayServer').addEventListener('click', () => {
+    byId('gatewayDocument').value = JSON.stringify(gatewayServerTemplate(), null, 2);
+    updateGatewayExposurePreview();
+    byId('gatewayDocument').focus();
+  });
+  byId('gatewayDocument').addEventListener('input', updateGatewayExposurePreview);
+  byId('clearGatewayDraft').addEventListener('click', () => { byId('gatewayDocument').value = ''; updateGatewayExposurePreview(); });
   byId('gatewayForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const draft = byId('gatewayDocument').value;
@@ -545,7 +663,7 @@ function initAdminApp(documentRef = document) {
       const result = await api.request('/gateway', { method: 'PUT', body: { expected_revision: state.gatewayRevision, document: documentValue } });
       byId('gatewayDocument').value = '';
       renderGateway(result);
-      status(`Gateway 配置已持久化。restart_required=${Boolean(result.restart_required)}；现有 Runtime 未热加载。`);
+      status(`Gateway 配置已持久化。restart_required=${Boolean(result.restart_required)}；新 MCP Session/Runtime 或服务重启后生效，不发送 list_changed。`);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         await loadGateway();
@@ -580,6 +698,8 @@ globalThis.McpAdminApp = {
   ApiError,
   sanitizeAdminValue,
   containsCredentialControl,
+  gatewayServerTemplate,
+  gatewayExposurePreview,
   createApiClient,
   renderConversationItems,
   renderConversationDetail,
@@ -593,4 +713,4 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => initAdminApp(document));
 }
 
-export { ApiError, sanitizeAdminValue, containsCredentialControl, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, initAdminApp };
+export { ApiError, sanitizeAdminValue, containsCredentialControl, gatewayServerTemplate, gatewayExposurePreview, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, initAdminApp };

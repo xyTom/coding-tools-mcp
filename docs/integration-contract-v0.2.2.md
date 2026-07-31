@@ -94,14 +94,23 @@ must never describe this switch as safe or genuinely read-only.
 - Public names use the stable form `{alias}__{remote_name}`. `__` is reserved in
   aliases, nested remote names are preserved, every local `TOOL_REGISTRY` name
   remains reserved, and any public-name collision fails Runtime creation.
-- Apart from replacing `name` with its public namespace, upstream tool
-  definitions retain their original title, description, `inputSchema`,
-  `outputSchema`, and real annotations. The local fake-readonly compatibility
-  override never rewrites upstream annotations.
+- Raw definitions remain server-side diagnostics. Public definitions replace
+  `name` with the stable namespace, recursively sanitize untrusted metadata,
+  retain supported public schema and real annotations, and receive a public
+  schema digest. The local fake-readonly compatibility override never changes
+  effective risk or Broker routing.
+- The five Broker tools are fixed local `TOOL_REGISTRY` entries. Search and
+  describe use only the current Runtime's frozen catalog. Read-only and mutating
+  calls are separate routes; mutating calls require the matching public digest,
+  and all Broker calls validate arguments against the public `inputSchema`.
+- `expose_mode=direct` is the legacy default. `expose_mode=broker` retains the
+  complete filtered catalog and directly exposes only pinned remote names.
+  Admin changes are restart-only and do not mutate an existing Runtime.
 - `structuredContent`, `content`, and `isError` from a valid upstream
-  `tools/call` result are preserved. Missing `content` is normalized to an empty
-  array; structured data is never serialized into model text merely to fill the
-  content field.
+  `tools/call` result are preserved and Broker dispatch does not double-wrap the
+  MCP envelope. Missing `content` is normalized to an empty array. Oversized
+  Broker results may be stored before truncation in a short-lived, per-manager,
+  session-owned ResultStore and paged through the fixed fetch tool.
 - Timeout, disconnect, oversized response, invalid JSON-RPC envelope, invalid
   schema/result shape, HTTP failure, and upstream RPC errors use stable
   structured Gateway errors.
@@ -313,7 +322,26 @@ The following block is consumed by the Phase 02 contract tests.
     "content": "normalize_boundary_without_json_assumption",
     "remote_workspace_boundary_claim": false,
     "session_identity_mutation": false,
-    "tool_profile_controls": false
+    "tool_profile_controls": false,
+    "stable_catalog_broker_extension": true,
+    "expose_modes": [
+      "direct",
+      "broker"
+    ],
+    "legacy_missing_expose_mode": "direct",
+    "broker_tools": [
+      "upstream_tool_search",
+      "upstream_tool_describe",
+      "upstream_tool_call",
+      "upstream_tool_call_mutating",
+      "upstream_result_fetch"
+    ],
+    "broker_tools_fixed_local_catalog": true,
+    "broker_public_schema_digest": true,
+    "broker_argument_validation": "public_input_schema",
+    "broker_passthrough": true,
+    "result_store": "session_owned_ttl_in_memory",
+    "dynamic_activation": false
   },
   "admin_api": {
     "phase": 8,
@@ -374,6 +402,10 @@ The following block is consumed by the Phase 02 contract tests.
     "settings_stale_update": "preserve_draft_refresh_revision_conflict",
     "gateway_change": "persist_and_restart_only",
     "gateway_dynamic_reload": false,
+    "gateway_new_server_default_expose_mode": "broker",
+    "gateway_exposure_preview": "direct_pinned_broker_only",
+    "gateway_activation_copy": "new_session_runtime_or_service_restart",
+    "gateway_list_changed_claim": false,
     "secret_material_displayed": false,
     "conversation_list": "summary_only",
     "conversation_detail": "explicit_paginated",

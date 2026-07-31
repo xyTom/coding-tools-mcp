@@ -38,6 +38,10 @@ DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 DEFAULT_TIMEOUT_MS = 30_000
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_TOOL_NAME_CHARS = 512
+MAX_TOOL_FILTER_ITEMS = 256
+MAX_TAG_ITEMS = 32
+MAX_TAG_CHARS = 64
+MAX_TOOL_POLICY_ITEMS = 256
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 FORBIDDEN_STDIO_COMMANDS = {
     "cmd",
@@ -831,6 +835,7 @@ class UpstreamManager:
             "initialized_count": sum(1 for status in self.statuses.values() if status.initialized),
             "tool_count": len(state.direct_tool_names),
             "catalog_tool_count": len(state.catalog),
+            "exposure_report": upstream_exposure_report(state),
             "snapshot_immutable": True,
             "remote_capability_boundary": "upstream_server",
             "servers": statuses,
@@ -1045,8 +1050,34 @@ def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
         value.get("pinned_tools"), field_name="pinned_tools", alias=alias
     )
     tags = _string_tuple(value.get("tags"), field_name="tags", alias=alias)
-    _validate_nonempty_strings(alias, "pinned_tools", pinned_tools)
-    _validate_nonempty_strings(alias, "tags", tags)
+    _validate_bounded_strings(
+        alias,
+        "include_tools",
+        include_tools,
+        max_items=MAX_TOOL_FILTER_ITEMS,
+        max_chars=MAX_TOOL_NAME_CHARS,
+    )
+    _validate_bounded_strings(
+        alias,
+        "exclude_tools",
+        exclude_tools,
+        max_items=MAX_TOOL_FILTER_ITEMS,
+        max_chars=MAX_TOOL_NAME_CHARS,
+    )
+    _validate_bounded_strings(
+        alias,
+        "pinned_tools",
+        pinned_tools,
+        max_items=MAX_TOOL_FILTER_ITEMS,
+        max_chars=MAX_TOOL_NAME_CHARS,
+    )
+    _validate_bounded_strings(
+        alias,
+        "tags",
+        tags,
+        max_items=MAX_TAG_ITEMS,
+        max_chars=MAX_TAG_CHARS,
+    )
     tool_policy = _tool_policy_dict(value.get("tool_policy"), alias=alias)
     overlap = sorted(set(include_tools) & set(exclude_tools))
     if overlap:
@@ -1465,29 +1496,115 @@ def _string_tuple(value: Any, *, field_name: str, alias: str) -> tuple[str, ...]
     return tuple(value)
 
 
-def _validate_nonempty_strings(
+def _validate_bounded_strings(
     alias: str,
     field_name: str,
     values: tuple[str, ...],
+    *,
+    max_items: int,
+    max_chars: int,
 ) -> None:
-    if any(not value or any(ord(char) < 32 for char in value) for value in values):
+    if len(values) > max_items:
         raise UpstreamConfigError(
-            f"Upstream {alias!r} field {field_name} must contain non-empty strings without control characters."
+            f"Upstream {alias!r} field {field_name} supports at most {max_items} entries."
+        )
+    if any(
+        not value
+        or len(value) > max_chars
+        or any(ord(char) < 32 for char in value)
+        for value in values
+    ):
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} field {field_name} must contain non-empty, control-free strings up to {max_chars} characters."
         )
 
 
 def _tool_policy_dict(value: Any, *, alias: str) -> dict[str, str]:
     policy = _string_dict(value, field_name="tool_policy", alias=alias)
+    if len(policy) > MAX_TOOL_POLICY_ITEMS:
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} tool_policy supports at most {MAX_TOOL_POLICY_ITEMS} entries."
+        )
     for remote_name, risk in policy.items():
-        if not remote_name or any(ord(char) < 32 for char in remote_name):
+        if (
+            not remote_name
+            or len(remote_name) > MAX_TOOL_NAME_CHARS
+            or any(ord(char) < 32 for char in remote_name)
+        ):
             raise UpstreamConfigError(
-                f"Upstream {alias!r} tool_policy keys must be non-empty tool names."
+                f"Upstream {alias!r} tool_policy keys must be non-empty, control-free tool names up to {MAX_TOOL_NAME_CHARS} characters."
             )
         if risk not in {"readonly", "mutating"}:
             raise UpstreamConfigError(
                 f"Upstream {alias!r} tool_policy values must be readonly or mutating."
             )
     return policy
+
+
+def upstream_exposure_report(state: UpstreamRegistryState) -> dict[str, Any]:
+    """Return upstream-only context and exposure metrics for operators."""
+
+    direct_names = frozenset(state.direct_tool_names)
+    definition_sizes = {
+        name: len(
+            json.dumps(
+                tool.public_definition,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        for name, tool in state.all_tools.items()
+    }
+    server_tools: dict[str, list[dict[str, Any]]] = {}
+    for name in sorted(state.all_tools):
+        tool = state.all_tools[name]
+        alias, _separator, _remote = name.partition("__")
+        server_tools.setdefault(alias, []).append(
+            {
+                "name": name,
+                "remote_name": tool.remote_name,
+                "direct": name in direct_names,
+                "definition_bytes": definition_sizes[name],
+                "risk": tool.effective_risk,
+            }
+        )
+    largest = sorted(
+        state.all_tools,
+        key=lambda name: (-definition_sizes[name], name),
+    )[:10]
+    return {
+        "scope": "upstream_only",
+        "excludes_local_and_admin_definitions": True,
+        "direct": {
+            "count": len(direct_names),
+            "definition_bytes": sum(definition_sizes[name] for name in direct_names),
+        },
+        "catalog": {
+            "count": len(state.catalog),
+            "broker_only_count": len(set(state.catalog) - direct_names),
+        },
+        "largest_public_definitions": [
+            {
+                "name": name,
+                "server": name.partition("__")[0],
+                "remote_name": state.all_tools[name].remote_name,
+                "definition_bytes": definition_sizes[name],
+                "direct": name in direct_names,
+            }
+            for name in largest
+        ],
+        "servers": [
+            {
+                "alias": alias,
+                "catalog_count": len(tools),
+                "direct_count": sum(1 for tool in tools if tool["direct"]),
+                "broker_only_count": sum(1 for tool in tools if not tool["direct"]),
+                "tools": tools,
+            }
+            for alias, tools in sorted(server_tools.items())
+        ],
+    }
 
 
 def _string_dict(value: Any, *, field_name: str, alias: str) -> dict[str, str]:

@@ -13,7 +13,7 @@ Commit subject: `fix(upstream): harden runtime call and close lifecycle`
 - Added a BaseUpstreamClient lifecycle condition, closed state, and active call-lease count.
 - `call_tool_raw()` now acquires a lease before transport use and always releases it.
 - `close()` atomically marks the client closed, waits for already-acquired leases, then closes the transport.
-- New calls after client close raise retryable `UPSTREAM_DISCONNECTED@.
+- New calls after client close raise retryable `UPSTREAM_DISCONNECTED`.
 - Stdio transport shutdown moved to the Base client `_close_transport()` hook.
 - Added a Manager lifecycle lock.
 - Manager call selects the frozen state and client under the lock, then relies on the client lease.
