@@ -122,6 +122,7 @@ from .upstream import (
     upstream_error_result,
 )
 from .upstream_search import ToolSearchFilters
+from .upstream_result_store import RESULT_FETCH_MAX_CODEPOINTS, ResultNotFound
 from .workspace_binding import (
     WorkspaceBinding,
     WorkspaceBindingError,
@@ -584,7 +585,8 @@ _BROKER_INSTRUCTIONS = (
     "Additional external tools may be available through the upstream broker. "
     "Use upstream_tool_search to find a tool, upstream_tool_describe to inspect "
     "its sanitized schema and digest, then call it through the matching read-only "
-    "or mutating broker route. Unknown risk classification is mutating."
+    "or mutating broker route. Use upstream_result_fetch when an oversized Broker "
+    "result includes a session-owned handle. Unknown risk classification is mutating."
 )
 
 _BROKER_PASSTHROUGH = frozenset(
@@ -656,6 +658,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Call one catalog tool classified as mutating with a required public schema digest.",
         destructive=True,
         open_world=True,
+    ),
+    "upstream_result_fetch": ToolSpec(
+        title="Fetch upstream result page",
+        description="Fetch a Unicode-codepoint page from one session-owned oversized Broker result.",
+        read_only=True,
+        idempotent=True,
     ),
     "check_exec_environment": ToolSpec(
         title="Check exec environment",
@@ -1354,6 +1362,7 @@ class Runtime:
                 details={"supported": list(SHELL_ENV_INHERIT_CHOICES)},
             )
         self.allow_network = allow_network or self.capabilities.network
+        self.transport = transport
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
         self.upstream_manager = upstream_manager or UpstreamManager.empty(
@@ -1392,6 +1401,7 @@ class Runtime:
         self.starting_sessions = 0
         self._closed = False
         self.http_session_id = secrets.token_urlsafe(24)
+        self.stdio_result_owner = f"stdio:{secrets.token_urlsafe(24)}"
         self.protocol_version = PROTOCOL_VERSION
         self.patch_baselines: dict[str, str | None] = {}
         self.patch_lock = threading.Lock()
@@ -1815,7 +1825,47 @@ class Runtime:
                 alias=name.partition("__")[0],
                 tool_name=name,
             )
-        return self.upstream_manager.call_tool(name, arguments)
+        owner = self.current_result_owner()
+        return self.upstream_manager.call_tool(
+            name,
+            arguments,
+            result_owner=owner,
+            store_overflow=owner is not None,
+        )
+
+    def current_result_owner(self) -> str | None:
+        if self.transport == "http":
+            return self.http_session_id
+        if self.transport == "stdio":
+            return self.stdio_result_owner
+        return None
+
+    def upstream_result_fetch(self, args: dict[str, Any]) -> dict[str, Any]:
+        owner = self.current_result_owner()
+        try:
+            if owner is None:
+                raise ResultNotFound("Result handle was not found.")
+            page = self.upstream_manager.result_store.fetch(
+                str(args["handle"]),
+                owner=owner,
+                offset=int(args.get("offset", 0)),
+                limit=int(args.get("limit", 8000)),
+            )
+        except ResultNotFound as exc:
+            raise ToolFailure(
+                "UPSTREAM_RESULT_NOT_FOUND",
+                "Upstream result handle was not found or is no longer available.",
+                category="not_found",
+            ) from exc
+        return {
+            "handle": page.handle,
+            "text": page.text,
+            "offset": page.offset,
+            "next_offset": page.next_offset,
+            "total_codepoints": page.total_codepoints,
+            "eof": page.eof,
+            "server": page.server_alias,
+        }
 
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
@@ -4880,6 +4930,19 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "schema_digest": {**string, "pattern": "^[0-9a-f]{32}$"},
             },
             ["name", "schema_digest"],
+        ),
+        "upstream_result_fetch": object_schema(
+            {
+                "handle": {**string, "minLength": 1},
+                "offset": {**integer, "minimum": 0, "default": 0},
+                "limit": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": RESULT_FETCH_MAX_CODEPOINTS,
+                    "default": 8000,
+                },
+            },
+            ["handle"],
         ),
         "check_exec_environment": object_schema(),
         "get_default_cwd": object_schema(),

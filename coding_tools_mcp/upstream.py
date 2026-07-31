@@ -22,7 +22,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from .upstream_result import budget_tool_result
+from .upstream_result import RESULT_INLINE_MAX, budget_tool_result, result_json_bytes
+from .upstream_result_store import ResultStore
 from .upstream_sanitize import raw_schema_digest, sanitize_definition, schema_digest
 from .upstream_search import (
     CatalogSearchIndex,
@@ -597,6 +598,7 @@ class UpstreamManager:
         secret_resolver: Callable[[str], str] | None = None,
         reserved_names: Collection[str] = (),
         custom_synonyms: Mapping[str, Sequence[str]] | None = None,
+        result_store: ResultStore | None = None,
     ) -> None:
         self.protocol_version = protocol_version
         self.secret_resolver = secret_resolver
@@ -605,6 +607,7 @@ class UpstreamManager:
             str(key): tuple(str(value) for value in values)
             for key, values in (custom_synonyms or {}).items()
         }
+        self.result_store = result_store or ResultStore()
         self.statuses: dict[str, UpstreamStatus] = {}
         self._state = _registry_state()
         self._closed = False
@@ -620,8 +623,14 @@ class UpstreamManager:
         protocol_version: str = DEFAULT_PROTOCOL_VERSION,
         *,
         reserved_names: Collection[str] = (),
+        result_store: ResultStore | None = None,
     ) -> "UpstreamManager":
-        return cls((), protocol_version=protocol_version, reserved_names=reserved_names)
+        return cls(
+            (),
+            protocol_version=protocol_version,
+            reserved_names=reserved_names,
+            result_store=result_store,
+        )
 
     @classmethod
     def from_snapshot(
@@ -631,6 +640,7 @@ class UpstreamManager:
         protocol_version: str = DEFAULT_PROTOCOL_VERSION,
         secret_resolver: Callable[[str], str] | None = None,
         reserved_names: Collection[str] = (),
+        result_store: ResultStore | None = None,
     ) -> "UpstreamManager":
         return cls(
             snapshot.configs,
@@ -638,6 +648,7 @@ class UpstreamManager:
             secret_resolver=secret_resolver,
             reserved_names=reserved_names,
             custom_synonyms=snapshot.custom_synonyms,
+            result_store=result_store,
         )
 
     @property
@@ -695,7 +706,14 @@ class UpstreamManager:
             "definition": copy.deepcopy(tool.public_definition),
         }
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        result_owner: str | None = None,
+        store_overflow: bool = False,
+    ) -> dict[str, Any]:
         state = self._state
         tool = state.all_tools.get(name)
         if tool is None:
@@ -725,7 +743,23 @@ class UpstreamManager:
         try:
             raw_result = client.call_tool_raw(tool.remote_name, arguments or {})
             normalized = normalize_tool_result(raw_result)
-            return budget_tool_result(normalized)
+            serialized = result_json_bytes(normalized)
+            handle: str | None = None
+            if store_overflow and result_owner and len(serialized) > RESULT_INLINE_MAX:
+                handle = self.result_store.store(
+                    serialized.decode("utf-8"),
+                    owner=result_owner,
+                    server_alias=alias,
+                )
+            budgeted = budget_tool_result(normalized)
+            if handle is not None:
+                structured = budgeted.get("structuredContent")
+                if not isinstance(structured, dict):
+                    structured = {}
+                    budgeted["structuredContent"] = structured
+                structured["_result_handle"] = handle
+                structured["_result_fetch_tool"] = "upstream_result_fetch"
+            return budgeted
         except UpstreamError as exc:
             return budget_tool_result(
                 upstream_error_result(
@@ -770,6 +804,7 @@ class UpstreamManager:
         state = self._state
         for client in state.clients.values():
             client.close()
+        self.result_store.clear()
 
     def _initialize_configs(self, reserved_names: frozenset[str]) -> None:
         seen_public_names = set(reserved_names)

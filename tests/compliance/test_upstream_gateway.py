@@ -33,6 +33,7 @@ from coding_tools_mcp.upstream import (
     resolve_env_config,
 )
 from coding_tools_mcp.upstream_result import RESULT_INLINE_MAX, result_json_bytes
+from coding_tools_mcp.upstream_result_store import ResultStore
 from coding_tools_mcp.upstream_search import ToolSearchFilters
 from coding_tools_mcp.workspace_binding import WorkspaceBinding
 
@@ -150,6 +151,7 @@ def build_manager(
     *,
     reserved_names: set[str] | None = None,
     custom_synonyms: dict[str, tuple[str, ...]] | None = None,
+    result_store: ResultStore | None = None,
 ) -> UpstreamManager:
     pending = list(clients)
 
@@ -172,6 +174,7 @@ def build_manager(
             configs,
             reserved_names=reserved_names or set(TOOL_REGISTRY),
             custom_synonyms=custom_synonyms,
+            result_store=result_store,
         )
     return manager
 
