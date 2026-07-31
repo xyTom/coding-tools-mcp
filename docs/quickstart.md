@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts
   | bash -s -- --start --workspace /path/to/repo
 ```
 
-Install and expose a read-only bearer-token tunnel:
+Install and expose an authenticated bearer-token tunnel:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts/install.sh \
@@ -49,26 +49,6 @@ Endpoint:
 ```text
 http://127.0.0.1:8765/mcp
 ```
-
-For browser chat clients such as MCP SuperAssistant, see [Browser chat clients](browser-clients.md).
-
-The same HTTP process also serves the Chinese Web Admin Console by default:
-
-```text
-http://127.0.0.1:8765/admin
-```
-
-For an OAuth-protected personal console that can be opened from another machine:
-
-```bash
-uvx coding-tools-mcp --host 0.0.0.0 --port 8765 --workspace /path/to/repo --oauth-mode
-```
-
-This exposes `/mcp`, `/admin`, and `/oauth/authorize` on the same port. Disable the console with `--no-admin-ui` or `CODING_TOOLS_MCP_ADMIN_UI=0`.
-
-MCP admin configuration defaults to `<workspace>/.coding-tools-mcp/mcp-servers.json`. Override it with `--upstream-config` or choose a directory with `--config-dir`; `server-settings.json` in the same config directory stores next-startup values such as host, port, workspace, OAuth issuer, permission mode, and shell environment policy. Runtime token/default-cwd/session/MCP reload changes apply immediately, while host/port/workspace/OAuth issuer changes require restart.
-
-Admin tokens saved to settings are plaintext and should be treated as sensitive. Use `CODING_TOOLS_MCP_SECRETS_KEY` plus `secret_ref` for MCP server secrets. The admin console does not install skills.
 
 Pass a different workspace, host, port, or extra server flags with Make variables:
 

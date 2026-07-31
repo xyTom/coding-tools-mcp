@@ -3,6 +3,6 @@ message: "If you use this project, please cite it as below."
 title: "Coding Tools MCP"
 authors:
   - name: "Coding Tools MCP Contributors"
-version: "0.1.7"
+version: "0.2.1"
 license: "Apache-2.0"
 repository-code: "https://github.com/xyTom/coding-tools-mcp"

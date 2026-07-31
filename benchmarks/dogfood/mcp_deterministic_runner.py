@@ -26,7 +26,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmarks.mcp_http import McpHttpClient, McpHttpError
+from benchmarks.mcp_http import McpHttpClient, McpHttpError, connect_with_retry  # noqa: E402 - repo path is bootstrapped above
+from benchmarks.runtime_latency import percentile  # noqa: E402 - repo path is bootstrapped above
 
 
 FIXTURE_FILES: dict[str, str] = {
@@ -133,6 +134,9 @@ class ToolCallRecord:
     ok: bool
     expected_rejection: bool = False
     summary: str = ""
+    argument_bytes: int = 0
+    result_bytes: int = 0
+    duration_ms: float = 0.0
 
 
 @dataclass
@@ -192,7 +196,7 @@ class ToolAdapter:
             "timeout_seconds": timeout_seconds,
             "timeout_ms": timeout_seconds * 1000,
             "max_output_bytes": 40_000,
-            "yield_time_ms": min(timeout_seconds * 1000, 20000),
+            "yield_time_ms": 1000 if tty else min(timeout_seconds * 1000, 20000),
             "tty": tty,
             "interactive": tty,
         }
@@ -348,15 +352,31 @@ class DogfoodRunner:
         return case.finalize()
 
     def call(self, tool: str, arguments: dict[str, Any], *, expected_rejection: bool = False) -> dict[str, Any]:
+        argument_bytes = len(json.dumps(arguments, sort_keys=True).encode("utf-8"))
+        started = time.perf_counter()
         try:
             result = self.client.call_tool(tool, arguments)
+            duration_ms = round((time.perf_counter() - started) * 1000, 3)
             ok = not is_error_result(result)
-            self.calls.append(ToolCallRecord(tool, arguments, ok, expected_rejection, summarize(result)))
-            return result
+            summary = summarize(result)
         except McpHttpError as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000, 3)
             result = {"isError": True, "transport_error": str(exc), "payload": exc.payload}
-            self.calls.append(ToolCallRecord(tool, arguments, False, expected_rejection, str(exc)))
-            return result
+            ok = False
+            summary = str(exc)
+        self.calls.append(
+            ToolCallRecord(
+                tool,
+                arguments,
+                ok,
+                expected_rejection,
+                summary,
+                argument_bytes,
+                len(json.dumps(result, sort_keys=True).encode("utf-8")),
+                duration_ms,
+            )
+        )
+        return result
 
 
 def dogfood_fixture_parent() -> Path:
@@ -400,17 +420,7 @@ def start_server(command: str | None, workspace: Path, endpoint: str) -> subproc
 
 
 def connect(endpoint: str, startup_timeout: float) -> tuple[McpHttpClient | None, dict[str, Any] | None, str | None]:
-    deadline = time.monotonic() + startup_timeout
-    last_error: str | None = None
-    while time.monotonic() <= deadline:
-        client = McpHttpClient(endpoint, timeout=10)
-        try:
-            initialize_result = client.initialize()
-            return client, initialize_result, None
-        except McpHttpError as exc:
-            last_error = str(exc)
-            time.sleep(0.25)
-    return None, None, last_error or "startup timeout elapsed"
+    return connect_with_retry(endpoint, startup_timeout, poll_interval=0.25)
 
 
 def result_text(result: dict[str, Any]) -> str:
@@ -426,10 +436,16 @@ def result_text(result: dict[str, Any]) -> str:
     payload = result.get("payload")
     if payload is not None:
         parts.append(json.dumps(payload, sort_keys=True))
+    structured = result.get("structuredContent")
+    if structured is not None:
+        parts.append(json.dumps(structured, sort_keys=True))
     return "\n".join(parts)
 
 
 def parse_text_json(result: dict[str, Any]) -> dict[str, Any]:
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return structured
     text = result_text(result).strip()
     if not text:
         return {}
@@ -513,6 +529,7 @@ def write_transcript(path: Path, report: dict[str, Any]) -> None:
         "endpoint": report.get("endpoint"),
         "workspace": report.get("workspace"),
         "direct_bypass": report.get("direct_bypass"),
+        "metrics": report.get("metrics", {}),
         "tool_calls": report.get("tool_calls", []),
         "cases": report.get("cases", []),
     }
@@ -537,6 +554,25 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- `{tool}`")
     if not report.get("tools"):
         lines.append("- not available")
+    metrics = report.get("metrics", {})
+    lines.extend(
+        [
+            "",
+            "## Efficiency Metrics",
+            "",
+            f"- Completion rate: `{metrics.get('completion_rate', 0)}`",
+            f"- Total elapsed: `{metrics.get('total_elapsed_ms', 0)} ms`",
+            f"- Tool calls: `{metrics.get('tool_call_count', 0)}`",
+            f"- Argument bytes: `{metrics.get('argument_bytes', 0)}`",
+            f"- Result bytes: `{metrics.get('result_bytes', 0)}`",
+            f"- First patch success: `{metrics.get('first_patch_success', False)}`",
+            f"- First patch success rate: `{metrics.get('first_patch_success_rate', 0)}` "
+            f"across `{metrics.get('first_patch_attempts', 0)}` attempts",
+            f"- All case assertions passed: `{metrics.get('all_cases_passed', False)}`",
+            f"- Session poll calls: `{metrics.get('session_poll_count', 0)}`",
+            f"- Tool latency p50/p95: `{metrics.get('tool_latency_p50_ms', 0)} / {metrics.get('tool_latency_p95_ms', 0)} ms`",
+        ]
+    )
     lines.extend(["", "## Prompt", "", report["prompt"], "", "## Case Results", ""])
     for case in report.get("cases", []):
         lines.append(f"### {case['name']}: {case['status']}")
@@ -551,10 +587,61 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- `{call['tool']}` ok={call['ok']}{expected} args={json.dumps(call['arguments'], sort_keys=True)}")
     if not report.get("tool_calls"):
         lines.append("- none")
-    lines.extend(["", "## Final Git Diff", "", report.get("final_git_diff") or "Not available.", "", "## Known Limitations", ""])
+    raw_diff = str(report.get("final_git_diff") or "Not available.")
+    display_diff = "\n".join(line.rstrip() for line in raw_diff.splitlines())
+    lines.extend(
+        [
+            "",
+            "## Final Git Diff",
+            "",
+            "```diff",
+            display_diff,
+            "```",
+            "",
+            "## Known Limitations",
+            "",
+        ]
+    )
     for item in report.get("known_limitations", []):
         lines.append(f"- {item}")
     return "\n".join(lines) + "\n"
+
+
+def efficiency_metrics(
+    calls: list[ToolCallRecord],
+    cases: list[CaseResult],
+    *,
+    started_at: float,
+) -> dict[str, Any]:
+    first_patch_attempts = [
+        call for call in calls if call.tool == "apply_patch" and not call.expected_rejection
+    ]
+    successful_first_patches = sum(call.ok for call in first_patch_attempts)
+    completed = sum(case.status == "PASS" for case in cases)
+    durations = sorted(call.duration_ms for call in calls)
+    return {
+        "completion_rate": round(completed / len(cases), 3) if cases else 0.0,
+        "total_elapsed_ms": round((time.perf_counter() - started_at) * 1000, 3),
+        "tool_call_count": len(calls),
+        "argument_bytes": sum(call.argument_bytes for call in calls),
+        "result_bytes": sum(call.result_bytes for call in calls),
+        "first_patch_success": bool(
+            first_patch_attempts and successful_first_patches == len(first_patch_attempts)
+        ),
+        "first_patch_attempts": len(first_patch_attempts),
+        "first_patch_success_rate": (
+            round(successful_first_patches / len(first_patch_attempts), 3)
+            if first_patch_attempts
+            else 0.0
+        ),
+        "all_cases_passed": bool(cases and completed == len(cases)),
+        "session_poll_count": sum(
+            call.tool == "write_stdin" and not str(call.arguments.get("chars", ""))
+            for call in calls
+        ),
+        "tool_latency_p50_ms": round(percentile(durations, 50), 3),
+        "tool_latency_p95_ms": round(percentile(durations, 95), 3),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -567,6 +654,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report-md", type=Path, default=ROOT / "reports/dogfood/coding-tools-dogfood.md")
     parser.add_argument("--transcript-json", type=Path, default=ROOT / "docs/dogfood/coding-tools-dogfood-transcript.json")
     args = parser.parse_args(argv)
+    benchmark_started = time.perf_counter()
 
     fixture_root, workspace = prepare_workspace(args.fixture_root)
     server = start_server(args.server_command, workspace, args.endpoint)
@@ -583,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
         "tools": [],
         "cases": [],
         "tool_calls": [],
+        "metrics": {},
         "final_git_diff": None,
         "known_limitations": [],
     }
@@ -632,6 +721,7 @@ def main(argv: list[str] | None = None) -> int:
         final_diff = runner.call("git_diff", adapter.git_diff_args())
         report["cases"] = [case.__dict__ for case in cases]
         report["tool_calls"] = [call.__dict__ for call in runner.calls]
+        report["metrics"] = efficiency_metrics(runner.calls, cases, started_at=benchmark_started)
         report["final_git_diff"] = result_text(final_diff)
         report["conclusion"] = "PASS" if all(case.status == "PASS" for case in cases) else "FAIL"
         write_reports(args.report_json, args.report_md, report)

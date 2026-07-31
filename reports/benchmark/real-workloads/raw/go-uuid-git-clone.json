@@ -5,10 +5,10 @@
     "--depth",
     "1",
     "https://github.com/google/uuid.git",
-    "/tmp/codex-real-workloads-jfos6ieh/go-uuid"
+    "/tmp/codex-real-workloads-sluu9_7_/go-uuid"
   ],
-  "elapsed_seconds": 0.47,
+  "elapsed_seconds": 0.761,
   "returncode": 0,
-  "stderr": "Cloning into '/tmp/codex-real-workloads-jfos6ieh/go-uuid'...\n",
+  "stderr": "Cloning into '/tmp/codex-real-workloads-sluu9_7_/go-uuid'...\n",
   "stdout": ""
 }

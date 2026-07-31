@@ -1,0 +1,168 @@
+{
+  "baseline": {
+    "metrics": {
+      "argument_bytes": {
+        "max": 1682.0,
+        "median": 1682.0,
+        "min": 1682.0
+      },
+      "completion_rate": {
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0
+      },
+      "first_patch_success_rate": {
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0
+      },
+      "result_bytes": {
+        "max": 18898.0,
+        "median": 18898.0,
+        "min": 18898.0
+      },
+      "session_poll_count": {
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0
+      },
+      "tool_call_count": {
+        "max": 18.0,
+        "median": 18.0,
+        "min": 18.0
+      },
+      "tool_latency_p50_ms": {
+        "max": 4.955,
+        "median": 4.214,
+        "min": 3.519
+      },
+      "tool_latency_p95_ms": {
+        "max": 383.579,
+        "median": 337.949,
+        "min": 332.685
+      },
+      "total_elapsed_ms": {
+        "max": 1919.195,
+        "median": 1875.665,
+        "min": 1842.357
+      }
+    },
+    "pass_rate": 1.0,
+    "runs": 5,
+    "versions": [
+      "0.1.7"
+    ]
+  },
+  "candidate": {
+    "metrics": {
+      "argument_bytes": {
+        "max": 1682.0,
+        "median": 1682.0,
+        "min": 1682.0
+      },
+      "completion_rate": {
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0
+      },
+      "first_patch_success_rate": {
+        "max": 1.0,
+        "median": 1.0,
+        "min": 1.0
+      },
+      "result_bytes": {
+        "max": 11854.0,
+        "median": 11853.0,
+        "min": 11853.0
+      },
+      "session_poll_count": {
+        "max": 0.0,
+        "median": 0.0,
+        "min": 0.0
+      },
+      "tool_call_count": {
+        "max": 18.0,
+        "median": 18.0,
+        "min": 18.0
+      },
+      "tool_latency_p50_ms": {
+        "max": 5.291,
+        "median": 4.717,
+        "min": 4.157
+      },
+      "tool_latency_p95_ms": {
+        "max": 391.387,
+        "median": 329.82,
+        "min": 318.916
+      },
+      "total_elapsed_ms": {
+        "max": 1928.43,
+        "median": 1881.306,
+        "min": 1804.851
+      }
+    },
+    "pass_rate": 1.0,
+    "runs": 5,
+    "versions": [
+      "0.2.0"
+    ]
+  },
+  "comparison": [
+    {
+      "baseline_median": 1.0,
+      "candidate_median": 1.0,
+      "change_percent": 0.0,
+      "metric": "completion_rate"
+    },
+    {
+      "baseline_median": 1875.665,
+      "candidate_median": 1881.306,
+      "change_percent": 0.301,
+      "metric": "total_elapsed_ms"
+    },
+    {
+      "baseline_median": 18.0,
+      "candidate_median": 18.0,
+      "change_percent": 0.0,
+      "metric": "tool_call_count"
+    },
+    {
+      "baseline_median": 1682.0,
+      "candidate_median": 1682.0,
+      "change_percent": 0.0,
+      "metric": "argument_bytes"
+    },
+    {
+      "baseline_median": 18898.0,
+      "candidate_median": 11853.0,
+      "change_percent": -37.279,
+      "metric": "result_bytes"
+    },
+    {
+      "baseline_median": 1.0,
+      "candidate_median": 1.0,
+      "change_percent": 0.0,
+      "metric": "first_patch_success_rate"
+    },
+    {
+      "baseline_median": 0.0,
+      "candidate_median": 0.0,
+      "change_percent": null,
+      "metric": "session_poll_count"
+    },
+    {
+      "baseline_median": 4.214,
+      "candidate_median": 4.717,
+      "change_percent": 11.936,
+      "metric": "tool_latency_p50_ms"
+    },
+    {
+      "baseline_median": 337.949,
+      "candidate_median": 329.82,
+      "change_percent": -2.405,
+      "metric": "tool_latency_p95_ms"
+    }
+  ],
+  "generated_at": "2026-07-11T02:17:31.468976Z",
+  "method": "same deterministic MCP-only runner, fixture, task order, and machine"
+}

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmarks.mcp_http import McpHttpClient, McpHttpError  # noqa: E402
+from benchmarks.mcp_http import McpHttpClient, connect_with_retry  # noqa: E402
 
 
 @dataclass
@@ -89,17 +89,10 @@ def start_server(command: str, workspace: Path, port: int) -> subprocess.Popen[b
 
 
 def connect(endpoint: str, timeout_seconds: float) -> McpHttpClient:
-    deadline = time.monotonic() + timeout_seconds
-    last_error: Exception | None = None
-    while time.monotonic() <= deadline:
-        client = McpHttpClient(endpoint, timeout=10)
-        try:
-            client.initialize()
-            return client
-        except McpHttpError as exc:
-            last_error = exc
-            time.sleep(0.1)
-    raise RuntimeError(f"MCP server did not initialize: {last_error}")
+    client, _, error = connect_with_retry(endpoint, timeout_seconds)
+    if client is None:
+        raise RuntimeError(f"MCP server did not initialize: {error}")
+    return client
 
 
 def measure(name: str, iterations: int, warmup: int, func: Callable[[], None]) -> Metric:

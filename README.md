@@ -1,169 +1,59 @@
 # Coding Tools MCP
 
-Coding Tools MCP is a model-neutral coding-agent runtime MCP server. It exposes local coding primitives to any MCP client:
+**English** | [简体中文](README.zh-CN.md)
 
-```text
-inspect repo -> search/read files -> apply structured patches -> run tests/commands
--> interact with stdin sessions -> inspect git status/diff
-```
+> Give any MCP-capable AI client a bounded, auditable pair of hands on your codebase.
 
-It is not a prompt wrapper. It does not expose external agent accounts, memory, cloud tasks, web search, image generation, model routing, plugin marketplace, or subagent orchestration as MCP tools.
+[![PyPI](https://img.shields.io/pypi/v/coding-tools-mcp)](https://pypi.org/project/coding-tools-mcp/)
+[![npm](https://img.shields.io/npm/v/coding-tools-mcp)](https://www.npmjs.com/package/coding-tools-mcp)
+[![Python](https://img.shields.io/pypi/pyversions/coding-tools-mcp)](https://pypi.org/project/coding-tools-mcp/)
+[![compliance](https://github.com/xyTom/coding-tools-mcp/actions/workflows/compliance.yml/badge.svg)](https://github.com/xyTom/coding-tools-mcp/actions/workflows/compliance.yml)
+[![release](https://github.com/xyTom/coding-tools-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/xyTom/coding-tools-mcp/actions/workflows/release.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## Documentation Map
+Coding Tools MCP is a model-neutral coding runtime served over the Model Context
+Protocol. It provides bounded file reads and search, atomic multi-file patches,
+command execution, interactive process sessions, Git inspection, optional
+upstream MCP composition, persistent OAuth, Workspace-bound HTTP sessions, and
+an authenticated Admin WebUI.
 
-- [中文版 README](README.zh-CN.md)
-- [Quickstart](docs/quickstart.md)
-- [MCP client configuration](docs/mcp-client-config.md)
-- [Browser chat clients](docs/browser-clients.md)
-- [Remote MCP](docs/remote-mcp.md)
-- [Tools and schemas](docs/tools-and-schemas.md)
-- [Permission modes](docs/permission-modes.md)
-- [Exec command recipes](docs/exec-command-recipes.md)
-- [Docker sandbox](docs/docker.md)
-- [Security policy](SECURITY.md)
-- [Security boundary](docs/security-boundary.md)
-- [CI and test commands](docs/ci-and-tests.md)
-- [Dogfood](docs/dogfood.md)
-- [SWE-bench evaluation](docs/swe-bench.md)
-- [Known limitations](docs/limitations.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Exec troubleshooting](docs/troubleshooting-exec.md)
-- [Competitive analysis](docs/competitive-analysis.md)
-- Normative MCP runtime profile: [docs/profile-v0.1.md](docs/profile-v0.1.md)
+The default local catalog contains 20 stable, truthfully annotated tools. Permission
+modes change command policy, never `tools/list`. Optional upstream tools are
+snapshotted at Runtime initialization and exposed under stable namespaces; their
+remote capabilities remain governed by the upstream server, not by this
+server's local Workspace boundary.
+
+## Why people use it
+
+- **One runtime contract across clients.** Claude Desktop, Claude Code, Codex,
+  Cursor, Cline, and custom agents use the same MCP schemas and result envelopes.
+- **A real safety boundary.** Each MCP Session is immutably bound to one validated
+  Workspace. Local path tools reject absolute paths outside that root, `..`
+  traversal, and symlink escapes. Linux Landlock adds kernel-level confinement
+  when available.
+- **Stable tools instead of profiles.** The removed v0.1 `tool_profile` setting is
+  migration input only. It cannot hide tools, alter annotations, or change the
+  fixed local catalog.
+- **Persistent remote identity.** OAuth Clients, Grants, access-token metadata,
+  refresh-token families, and signing-key state survive restart and can be
+  revoked precisely by ID.
+- **Operational management without secret disclosure.** `/admin` exposes
+  revision-aware Settings, Workspace, Gateway, OAuth, Secret Vault, and
+  conversation/session management through a dedicated Admin credential.
+- **Bounded outputs for context windows.** Tool results are summarized and
+  paginated while `structuredContent` retains the complete machine interface.
 
 ## Quickstart
 
-Install the published command from PyPI:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts/install.sh | bash
-```
-
-Install and start local Streamable HTTP against a workspace:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts/install.sh \
-  | bash -s -- --start --workspace /path/to/repo
-```
-
-Install and expose a read-only bearer-token tunnel:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/xyTom/coding-tools-mcp/main/scripts/install.sh \
-  | bash -s -- --tunnel cloudflared --auto-install-tunnel --workspace /path/to/repo
-```
-
-Or, from this checkout:
-
-```bash
-scripts/install.sh
-```
-
-Run the published package without a persistent install:
-
-```bash
-uvx coding-tools-mcp --workspace .
-```
-
-Use stdio for MCP clients:
+The Python package requires Python 3.11 or newer. The npm package is a thin
+launcher that starts the pinned Python server through `uvx` or `pipx`.
 
 ```bash
 uvx coding-tools-mcp --stdio --workspace /path/to/repo
+npx coding-tools-mcp --stdio --workspace /path/to/repo
 ```
 
-If you are working from this checkout instead of a published package:
-
-```bash
-make start
-```
-
-Pass a different workspace, host, port, or extra server flags with Make variables:
-
-```bash
-make start MCP_WORKSPACE=/path/to/repo MCP_PORT=8000 MCP_ARGS="--permission-mode trusted"
-```
-
-If dependencies are missing, install the runtime in editable mode:
-
-```bash
-python -m pip install -e ".[dev]"
-```
-
-HTTP endpoint:
-
-```text
-http://127.0.0.1:8765/mcp
-```
-
-The HTTP server also serves the built-in Web Admin Console on the same port by default:
-
-```text
-http://127.0.0.1:8765/admin
-```
-
-For a personal OAuth-protected admin console:
-
-```bash
-uvx coding-tools-mcp --host 0.0.0.0 --port 8765 --workspace /path/to/repo --oauth-mode
-```
-
-That single process exposes `/mcp`, `/admin`, and `/oauth/authorize`. Use `--no-admin-ui` or `CODING_TOOLS_MCP_ADMIN_UI=0` to disable `/admin`. The legacy `--admin-ui --admin-port 8766` mode is still available, but same-port `/admin` is the default HTTP experience.
-
-Admin-managed MCP servers are stored in `mcp-servers.json`. Path priority is `--upstream-config`, then `CODING_TOOLS_MCP_UPSTREAM_CONFIG`, then `--config-dir`, then `CODING_TOOLS_MCP_CONFIG_DIR`, then `<workspace>/.coding-tools-mcp/mcp-servers.json`. Startup settings such as host, port, workspace, OAuth issuer, permission mode, and shell environment policy are saved in `server-settings.json` next to that config and require a restart to take effect. Runtime changes such as admin token, auth token, default cwd, session termination, secret changes, and MCP reloads apply immediately.
-
-Token values can be edited for personal use from the admin console. If you persist tokens in `server-settings.json`, treat that file as sensitive plaintext. MCP server secrets should use `CODING_TOOLS_MCP_SECRETS_KEY` and `secret_ref`. Skills installation is intentionally not part of this admin console.
-
-## Chat Transcript Sync
-
-Clients can sync Codex or ChatGPT conversation text into the local transcript store by calling `record_chat_transcript` or `record_chat_message` with stable `conversation_id` and `message_id` values. Use `list_chat_projects` and `list_chat_conversations` to find persisted records, then `recall_chat_context` or `recall_project_context` to load messages and Markdown context back into a client session.
-
-This is an explicit client-submitted transcript store. It does not read external agent accounts or native Codex session files automatically.
-
-Install the optional image extra when you want `view_image` auto-resize support:
-
-```bash
-python -m pip install -e ".[image]"
-```
-
-Stdio:
-
-```bash
-coding-tools-mcp --stdio --workspace /path/to/repo
-```
-
-Set `CODING_TOOLS_MCP_TRACE=1` to emit redacted JSON tool-call trace events to stderr for local debugging. Logs stay off stdout so stdio JSON-RPC remains clean.
-
-By default, `exec_command` passes a core shell environment only. For local toolchains that depend on inherited environment variables, such as MSVC developer prompts, start with:
-
-```bash
-CODING_TOOLS_MCP_SHELL_ENV_INHERIT=all coding-tools-mcp --workspace /path/to/repo
-```
-
-`inherit=all` still filters secret-looking and loader/startup variables unless dangerous mode is also enabled. For local development with dependency downloads, shell expansion, and inline interpreter snippets, use:
-
-```bash
-coding-tools-mcp --permission-mode trusted --workspace /path/to/repo
-```
-
-`--allow-network` remains available as a compatibility flag when you only want to open network-looking commands. If your MCP client does not support permission elicitation and you explicitly want to disable `exec_command` permission gates inside an isolated container or VM, start with:
-
-```bash
-coding-tools-mcp --permission-mode dangerous --workspace /path/to/repo
-```
-
-This disables `exec_command` permission gates such as network-looking commands, destructive command checks, shell expansion, inline scripts, and sensitive env checks. Workspace path boundaries for direct file tools still apply. `--dangerously-skip-all-permissions` remains as a compatibility alias.
-
-## MCP Client Examples
-
-Generic stdio client:
-
-```toml
-[mcp_servers.coding_tools]
-command = "uvx"
-args = ["coding-tools-mcp", "--stdio", "--workspace", "/path/to/repo"]
-```
-
-Claude Code:
+Example MCP client configuration:
 
 ```json
 {
@@ -176,127 +66,152 @@ Claude Code:
 }
 ```
 
-Cursor:
+For Streamable HTTP, omit `--stdio`. The default endpoint is
+`http://127.0.0.1:8765/mcp`. The primary protocol is MCP `2025-11-25`, with
+explicit `2025-06-18` compatibility.
 
-```json
-{
-  "mcpServers": {
-    "coding-tools": {
-      "command": "uvx",
-      "args": ["coding-tools-mcp", "--stdio", "--workspace", "/path/to/repo"]
-    }
-  }
-}
-```
+## Integrated v0.2.2 architecture
 
-Generic Streamable HTTP clients should use MCP protocol version `2025-06-18` and point at `http://127.0.0.1:8765/mcp`.
+The current fork development release is Python `0.3.0.dev0`, with npm launcher
+version `0.3.0-dev.0`. It preserves the upstream v0.2.2 telemetry default and
+privacy schema.
 
-Browser chat clients such as MCP SuperAssistant can connect through the MCP SuperAssistant proxy, or directly with an explicit browser extension origin allowlist. See [Browser chat clients](docs/browser-clients.md).
+### Sessions and Workspaces
 
-## Remote MCP
+Every successful HTTP `initialize` creates an independent Runtime with its own
+Workspace binding, cwd, process table, retained output, project instructions,
+and upstream-tool snapshot. The binding cannot change during the Session.
+Subsequent POST and DELETE requests must match the authorization context used at
+initialization. stdio uses the explicitly configured default Workspace and does
+not invent an OAuth identity.
 
-For remote MCP clients and local development over an HTTPS tunnel, keep the server bound to loopback and expose the tunnel URL with the safest profile your client can use. Anonymous tunnel testing should use `read-only` mode:
+### Persistent OAuth
 
-```bash
-CODING_TOOLS_MCP_AUTH_MODE=noauth \
-CODING_TOOLS_MCP_TOOL_PROFILE=read-only \
-./scripts/tunnel.sh cloudflared /path/to/repo
-```
+OAuth supports Authorization Code + PKCE S256, RFC 7591 dynamic registration,
+`authorization_code` and `refresh_token` grants, refresh rotation and family
+reuse detection, access-token `jti` revocation, and active/retired/revoked
+signing keys. Client secrets are stored only as digests, refresh tokens only as
+peppered hashes, and signing material only in the encrypted Secret Vault.
 
-Configure the remote MCP client with the HTTPS tunnel URL:
+OAuth startup is fail-closed: the persistent Store and
+`CODING_TOOLS_MCP_SECRETS_KEY`-backed Vault must be available. See
+[Remote MCP](docs/remote-mcp.md) and the
+[upgrade guide](docs/migration-v0.1-to-v0.2.2.md).
 
-```text
-URL: https://<tunnel-host>/mcp
-```
+### Gateway
 
-The tunnel scripts support `cloudflared`, `ngrok`, and Microsoft Dev Tunnel. If the selected tunnel CLI is missing, the script asks before installing it:
+Upstream MCP configuration is fixed before Runtime initialization. Each Runtime
+gets an immutable namespaced snapshot, so `listChanged: false` remains truthful.
+Local tool names are reserved; namespace collisions fail closed. Admin Gateway
+changes are persisted for restart only—there is no hot reload, start, or stop
+control path.
 
-```bash
-scripts/tunnel.sh cloudflared /path/to/repo
-scripts/tunnel.sh ngrok /path/to/repo
-scripts/tunnel.sh devtunnel /path/to/repo
-```
+### Admin WebUI
 
-For clients that support custom headers, use bearer-token auth with `Authorization: Bearer <token>`. For MCP clients that speak OAuth 2.1 Authorization Code + PKCE, use `CODING_TOOLS_MCP_AUTH_MODE=oauth` with `scripts/tunnel.sh` (or `scripts/install.sh --auth-mode oauth`). The server can infer its OAuth issuer from the tunnel request URL, so one-shot tunnels like cloudflared work without setting `CODING_TOOLS_MCP_SERVER_URL` before startup; set it only when you want to pin a stable issuer. The script prints a generated OAuth password, accepts any non-empty client_id by default, and lets you opt into `CODING_TOOLS_MCP_OAUTH_CLIENT_ID`/`CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET` only when you need to lock down a confidential client. Clients that cannot send custom bearer headers and do not speak OAuth should use anonymous `read-only` mode only for local/testing tunnels, or be placed behind an external auth proxy for production use.
+Configure a dedicated Admin token and open `/admin`. Ordinary MCP bearer and
+OAuth access tokens are never promoted to Admin authority. Settings writes use
+revision checks; a stale HTTP 409 preserves the browser draft and requires an
+explicit conflict resolution. Secret values, token material, hashes, digests,
+and Vault references are never displayed.
 
-See [docs/remote-mcp.md](docs/remote-mcp.md) for the exact modes and security notes.
+## The local tool catalog
 
-## Tool Profiles
+| Group | Tools |
+| --- | --- |
+| Files and search | `read_file`, `list_dir`, `list_files`, `search_text`, `apply_patch`, `view_image` |
+| Execution | `exec_command`, `write_stdin`, `read_output`, `kill_session`, `request_permissions` |
+| Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame` |
+| Runtime | `server_info`, `check_exec_environment`, `get_default_cwd`, `set_default_cwd` |
 
-- `full`: exposes all tools with truthful annotations. This is the default for backward compatibility.
-- `read-only`: recommended for remote or safe-mode clients; exposes only inspection tools, git read tools, image viewing, and default-cwd helpers.
-- `compat-readonly-all`: exposes all tools but advertises every tool as read-only for clients that gate availability on `readOnlyHint`. This is not a safety mode; mutation-capable tools such as `apply_patch`, `exec_command`, `write_stdin`, and `kill_session` can still mutate local state.
-
-## Tools
-
-P0 tools exposed by default:
-
-- `server_info`
-- `get_default_cwd`
-- `set_default_cwd`
-- `read_file`
-- `list_dir`
-- `list_files`
-- `search_text`
-- `apply_patch`
-- `exec_command`
-- `write_stdin`
-- `kill_session`
-- `git_status`
-- `git_diff`
-- `git_log`
-- `git_show`
-- `git_blame`
-- `request_permissions`
-
-Additional image tool exposed by default:
-
-- `view_image`
-
-For input/output schemas and result envelopes, see [docs/tools-and-schemas.md](docs/tools-and-schemas.md) and [docs/profile-v0.1.md](docs/profile-v0.1.md).
+`apply_patch` is the only direct local file-mutation primitive. Root
+`AGENTS.md`/`CLAUDE.md` instructions are loaded during initialization. Tool
+`content` is concise agent-facing text; `structuredContent` is the stable
+machine-readable result.
 
 ## Safety Boundary
 
-The runtime binds one workspace root per server process. Paths are workspace-relative by default. Absolute paths, `..` traversal, and symlink escapes are rejected. Recursive listing/search excludes `.git`, `.reference`, `node_modules`, `target`, `dist`, build outputs, virtualenvs, and common caches by default.
+| Mode | Intended use | Actual behavior |
+| --- | --- | --- |
+| `safe` | daily agent work | network-looking commands, shell expansion, inline scripts, and destructive commands require permission |
+| `trusted` | normal local development | enables network, expansion, and inline snippets while retaining secret and destructive-command checks |
+| `dangerous` | isolated container or VM | disables command permission gates; direct local path tools remain Workspace-bound |
 
-`exec_command` runs under policy controls with workspace-bound cwd, configurable shell environment inheritance, timeout, output caps, sensitive-value and loader/startup environment rejection, destructive command checks, network-looking command checks, shell-expansion permission gates, indirect absolute-path checks, cancellation/kill cleanup, session deadline watchdogs, and bounded session buffers. On Linux hosts with Landlock support it also applies filesystem confinement; on Windows, macOS, or Linux hosts without Landlock, command results include a warning and external sandboxing is required before running untrusted commands. This is still not a complete OS/container sandbox; see [SECURITY.md](SECURITY.md).
+Permission modes never hide mutation tools. The advanced
+`--dangerously-fake-readonly-annotations` compatibility switch only rewrites
+exposure hints in `tools/list`; it does not prevent execution or mutation and is
+not a security boundary.
 
-`--permission-mode safe` is the default. `--permission-mode trusted` opens local-development gates while keeping secret filtering and destructive-command checks. `--permission-mode dangerous` disables `exec_command` permission gates for operators who accept that risk inside an isolated runner. Do not use dangerous mode for untrusted workspaces or untrusted MCP clients.
+The server is not a complete OS sandbox on every platform. Use the Docker image,
+a VM, or another external sandbox for untrusted repositories. An upstream MCP
+tool is a remote capability and is controlled by that upstream server's own
+security model.
 
-## Compliance
+## Remote access and management
+
+Keep HTTP bound to loopback and publish it through an authenticated HTTPS tunnel.
+The fixed local catalog includes mutation and execution, so never expose
+`noauth` publicly. See [Remote MCP](docs/remote-mcp.md).
+
+The Admin WebUI and API are documented separately:
+
+- [Admin API](docs/admin-api.md)
+- [Admin WebUI](docs/admin-webui.md)
+- [Chat and Codex session persistence](docs/chat-persistence.md)
+
+## Desktop client versus Admin WebUI
+
+The optional Desktop client is a local launcher and tunnel/profile manager:
 
 ```bash
-make compliance
+python -m pip install "coding-tools-mcp[desktop]"
+coding-tools-mcp-desktop
 ```
 
-Compliance and CI commands are documented in [docs/ci-and-tests.md](docs/ci-and-tests.md). The checked-in report files are generated artifacts; inspect their `suite` field before treating them as full compliance evidence.
+Desktop profile and secret storage remain separate from server Settings and the
+server Secret Vault. The Admin WebUI manages a running HTTP server through its
+dedicated Admin API; it is not the Desktop application and does not start or stop
+the Desktop runtime.
 
-## Dogfood And Benchmark
+## Telemetry
 
-Dogfood and SWE-bench notes live in [docs/dogfood.md](docs/dogfood.md), [docs/swe-bench.md](docs/swe-bench.md), and [BENCHMARK.md](BENCHMARK.md). This repository does not claim a model-generated SWE-bench leaderboard result.
+Anonymous usage telemetry is enabled by default upstream and contains closed
+schemas of counters, enums, durations, and version/platform dimensions—never
+paths, Workspace/Agent/Client IDs, commands, arguments, file contents, chat
+content, or transcript summaries. Disable it with
+`CODING_TOOLS_MCP_TELEMETRY=off` or `DO_NOT_TRACK=1`; CI disables it
+automatically. `CODING_TOOLS_MCP_TELEMETRY=debug` prints events to stderr instead
+of sending them. See [docs/telemetry.md](docs/telemetry.md).
 
-## Development Commands
+## Evidence, Dogfood and SWE-bench
+
+The repository includes reproducible compliance, dogfood, latency, and
+SWE-bench harnesses. It does not claim a model-generated SWE-bench leaderboard
+result. See [COMPLIANCE.md](COMPLIANCE.md), [BENCHMARK.md](BENCHMARK.md), and
+[docs/swe-bench.md](docs/swe-bench.md).
+
+## Documentation
+
+| Topic | Documents |
+| --- | --- |
+| Getting started | [Quickstart](docs/quickstart.md), [Client configuration](docs/mcp-client-config.md), [Troubleshooting](docs/troubleshooting.md) |
+| Runtime contract | [Tools and schemas](docs/tools-and-schemas.md), [Runtime contract](docs/runtime-contract-v0.2.md), [Permission modes](docs/permission-modes.md) |
+| Remote and OAuth | [Remote MCP](docs/remote-mcp.md), [Upgrade and rollback](docs/migration-v0.1-to-v0.2.2.md) |
+| Administration | [Admin API](docs/admin-api.md), [Admin WebUI](docs/admin-webui.md), [Chat persistence](docs/chat-persistence.md) |
+| Security and sandboxing | [Security policy](SECURITY.md), [Security boundary](docs/security-boundary.md), [Docker](docs/docker.md) |
+| Packaging and clients | [Desktop README](apps/desktop-client/README.md), [npm launcher](npm/coding-tools-mcp/README.md) |
+| Quality | [CI and tests](docs/ci-and-tests.md), [Dogfood](docs/dogfood.md), [SWE-bench](docs/swe-bench.md), [Limitations](docs/limitations.md) |
+
+## Development
 
 ```bash
-make lint
-make typecheck
-make test
-make compliance
+python -m pip install -e ".[dev]"
 make ci
 ```
 
-See [docs/ci-and-tests.md](docs/ci-and-tests.md) for the full test matrix.
+The full gate matrix is in [docs/ci-and-tests.md](docs/ci-and-tests.md).
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
-
-If you use code, documentation, substantial implementation details, or
-derivative work from this project, preserve the copyright notice, license
-notice, and [NOTICE](NOTICE) file, and clearly attribute the original project.
-
-Project: Coding Tools MCP  
-Author: Coding Tools MCP Contributors  
-Source: https://github.com/xyTom/coding-tools-mcp
-
-Citation metadata is available in [CITATION.cff](CITATION.cff).
+Licensed under the [Apache License 2.0](LICENSE). Preserve the copyright,
+license, [NOTICE](NOTICE), and attribution requirements when redistributing
+substantial code or documentation.

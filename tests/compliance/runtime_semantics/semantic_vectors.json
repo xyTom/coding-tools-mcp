@@ -1,5 +1,5 @@
 {
-  "profile": "coding-tools-mcp-v0.1",
+  "contract": "coding-tools-mcp-v0.2",
   "source": "Semantic vectors for patch envelope and shell/session behavior.",
   "apply_patch": [
     {

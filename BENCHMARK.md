@@ -26,7 +26,30 @@ Current conclusion: `PASS`.
 The checked-in dogfood report is generated through the `coding-tools-mcp`
 console entrypoint.
 
-The runner completes repository inspection, JavaScript and Python failing/passing tests, patching, git status/diff, timeout handling, long-running stdin, kill/closed-session behavior, binary/image behavior with `view_image`, and workspace escape denial using MCP calls only.
+The runner completes repository search/read, JavaScript and Python
+patch-and-test loops, git diff inspection, a real PTY stdin interaction,
+kill/closed-session handling, and workspace escape denial using MCP calls only.
+The compliance dogfood suite covers the remaining catalog and transport cases.
+
+### 0.1.7 versus 0.2.0 deterministic comparison
+
+Reports:
+
+- [reports/benchmark/dogfood-v0.1-v0.2.md](reports/benchmark/dogfood-v0.1-v0.2.md)
+- [reports/benchmark/dogfood-v0.1-v0.2.json](reports/benchmark/dogfood-v0.1-v0.2.json)
+- [reports/benchmark/dogfood-v0.1-baseline.md](reports/benchmark/dogfood-v0.1-baseline.md)
+
+The same current runner, fixtures, task order, machine, and MCP-only loop were
+run five times against the checked-in 0.1.7 commit and five times against
+0.2.0. Both completed 100%, used 18 calls, had two of two first-attempt patches
+succeed, and needed no empty session polls. Median serialized result bytes fell
+from 18,898 to 11,853 (`-37.279%`). Median total elapsed time changed by
+`+0.301%`, while aggregate tool p95 changed by `-2.405%`; those timing changes
+are small enough to treat as local noise, not a claim of faster editing.
+
+`benchmarks/dogfood/compare_reports.py` aggregates repeated raw reports. This
+comparison measures the runtime contract, not model reasoning and not
+Codex/OpenCode/Devspace end-to-end performance.
 
 ## SWE-bench Smoke Scaffold
 
@@ -48,6 +71,21 @@ Artifacts:
 - [reports/benchmark/swebench-official-attempt/raw](reports/benchmark/swebench-official-attempt/raw)
 
 Default smoke conclusion: `PREFLIGHT_ONLY`.
+
+## Aider Polyglot Tool-Chain Evaluation
+
+Reports:
+
+- [reports/benchmark/aider-polyglot-mcp-20260725.md](reports/benchmark/aider-polyglot-mcp-20260725.md)
+- [reports/benchmark/aider-polyglot-mcp-20260725.json](reports/benchmark/aider-polyglot-mcp-20260725.json)
+
+A deterministic run over the 225 Aider Polyglot Exercism tasks that exercises
+the `read_file -> apply_patch -> read-back verification -> exec_command` chain
+using repository reference implementations. It measures the tool chain, not
+model problem-solving: all 225 patches were accepted by `apply_patch`, 224/225
+read-backs matched the reference exactly, and 211/225 official test suites
+passed, with every failure traced to missing benchmark fixtures or sandbox
+dependencies rather than incorrect patch application.
 
 ## MCP Runtime Latency
 
@@ -103,6 +141,8 @@ Both numbers must come from official SWE-bench harness output over the same subs
 
 ## Remaining Benchmark TODOs
 
+- Run a controlled same-model, same-prompt task set against Codex, OpenCode,
+  Devspace, and this runtime before making an agent-speed ranking.
 - Generate real baseline and MCP-candidate predictions instead of placeholder patches.
 - Run at least one official SWE-bench Lite instance end-to-end with Docker.
 - Save raw harness logs and resolved counts as artifacts from a successful official run.

@@ -5,10 +5,10 @@
     "--depth",
     "1",
     "https://github.com/jshttp/mime-types.git",
-    "/tmp/codex-real-workloads-jfos6ieh/node-mime-types"
+    "/tmp/codex-real-workloads-sluu9_7_/node-mime-types"
   ],
-  "elapsed_seconds": 0.457,
+  "elapsed_seconds": 0.45,
   "returncode": 0,
-  "stderr": "Cloning into '/tmp/codex-real-workloads-jfos6ieh/node-mime-types'...\n",
+  "stderr": "Cloning into '/tmp/codex-real-workloads-sluu9_7_/node-mime-types'...\n",
   "stdout": ""
 }

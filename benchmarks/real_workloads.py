@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.mcp_http import McpHttpClient, McpHttpError  # noqa: E402
+from benchmarks.mcp_http import McpHttpClient, McpHttpError, connect_with_retry  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -171,6 +171,10 @@ def start_server(workspace: Path, port: int, raw_dir: Path, name: str) -> subpro
         "127.0.0.1",
         "--port",
         str(port),
+        # The workloads model local development (`node -e`/`python -c` smoke
+        # commands), which safe mode's inline-script gate rejects by design.
+        "--permission-mode",
+        "trusted",
     ]
     raw_dir.mkdir(parents=True, exist_ok=True)
     stdout = (raw_dir / f"{name}-server.stdout.txt").open("wb")
@@ -182,16 +186,10 @@ def start_server(workspace: Path, port: int, raw_dir: Path, name: str) -> subpro
 
 
 def initialize_client(endpoint: str) -> McpHttpClient:
-    last_error: Exception | None = None
-    for _ in range(50):
-        client = McpHttpClient(endpoint, timeout=10)
-        try:
-            client.initialize()
-            return client
-        except Exception as exc:
-            last_error = exc
-            time.sleep(0.1)
-    raise RuntimeError(f"MCP server did not become ready: {last_error}")
+    client, _, error = connect_with_retry(endpoint, 5.0, catch=(Exception,))
+    if client is None:
+        raise RuntimeError(f"MCP server did not become ready: {error}")
+    return client
 
 
 def clone_repo(workload: Workload, checkout_root: Path, raw_dir: Path) -> tuple[Path, dict[str, Any], str | None]:

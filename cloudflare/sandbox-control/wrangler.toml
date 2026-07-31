@@ -1,0 +1,22 @@
+name = "coding-tools-sandbox-control"
+main = "src/index.mjs"
+compatibility_date = "2026-07-06"
+
+[vars]
+GITHUB_OWNER = "xyTom"
+GITHUB_REPO = "coding-tools-mcp"
+GITHUB_REF = "main"
+WORKFLOW_ID = "start-sandbox.yml"
+
+DEFAULT_IMAGE = "ghcr.io/xytom/coding-tools-mcp-sandbox:latest"
+DEFAULT_PORT = "8765"
+DEFAULT_DURATION_MINUTES = "120"
+DEFAULT_PERMISSION_MODE = "trusted"
+DEFAULT_TUNNEL_TYPE = "named"
+TUNNEL_HOSTNAME = "mcp.example.com"
+
+ALLOW_DANGEROUS = "false"
+ALLOW_IMAGE_OVERRIDE = "false"
+
+[secrets]
+required = ["CONTROL_TOKEN", "GITHUB_TOKEN"]

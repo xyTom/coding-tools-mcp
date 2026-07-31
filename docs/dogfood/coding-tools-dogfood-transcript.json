@@ -2,11 +2,11 @@
   "cases": [
     {
       "checks": [
-        "PASS search_text finds add: {\"matches\": [{\"after\": [], \"before\": [], \"column\": 1, \"line\": 1, \"path\": \"tiny-js-project/src/math.js\", \"preview\": \"function add(a, b) {\"}], \"ok\": true, \"query\": \"function add\",...",
-        "PASS read_file returns buggy source: {\"bytes_read\": 66, \"content\": \"function add(a, b) {\\n  return a - b;\\n}\\n\\nmodule.exports = { add };\\n\", \"encoding\": \"utf-8\", \"end_line\": 5, \"next_start_line\": null, \"ok\": true,...",
-        "PASS apply_patch fixes add: {\"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-js-project/src/math.js\"}], \"clean\": true, \"dry_run\": false, \"ok\": true, \"summary\": \"M tiny-js-project/src/math.js\", \"wa...",
-        "PASS exec_command npm test passes: {\"elapsed_ms\": 713, \"exit_code\": 0, \"ok\": true, \"session_id\": \"etdyVu5lHMjRrpZrl8Rjl-Vq\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_om...",
-        "PASS git_diff shows only math.js fix: {\"diff\": \"--- a/tiny-js-project/src/math.js\\n+++ b/tiny-js-project/src/math.js\\n@@ -1,5 +1,5 @@\\n function add(a, b) {\\n\\n-  return a - b;\\n\\n+  return a + b;\\n\\n }\\n\\n \\n\\n mod..."
+        "PASS search_text finds add: tiny-js-project/src/math.js:1:1: function add(a, b) {\\n{\"engine\": \"rg\", \"matches\": [{\"after\": [], \"before\": [], \"column\": 1, \"line\": 1, \"path\": \"tiny-js-project/src/math.js\", \"p...",
+        "PASS read_file returns buggy source: function add(a, b) {\\n  return a - b;\\n}\\n\\nmodule.exports = { add };\\n\\n{\"bytes_read\": 66, \"content\": \"function add(a, b) {\\n  return a - b;\\n}\\n\\nmodule.exports = { add };\\n\",...",
+        "PASS apply_patch fixes add: Patch applied to 1 file (+1 -1).\\nM tiny-js-project/src/math.js\\n{\"additions\": 1, \"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-js-project/src/math.js\"}], \"clean\": tr...",
+        "PASS exec_command npm test passes: \\n> test\\n> node test/math.test.js\\n\\njs ok\\n\\n{\"elapsed_ms\": 698, \"exit_code\": 0, \"ok\": true, \"session_id\": \"zgpQvTvtcvPJXS6GEdHa3Ep5\", \"signal\": null, \"status\": \"exited\", \"std...",
+        "PASS git_diff shows only math.js fix: --- a/tiny-js-project/src/math.js\\n+++ b/tiny-js-project/src/math.js\\n@@ -1,5 +1,5 @@\\n function add(a, b) {\\n\\n-  return a - b;\\n\\n+  return a + b;\\n\\n }\\n\\n \\n\\n module.export..."
       ],
       "failures": [],
       "name": "js_bugfix",
@@ -14,10 +14,10 @@
     },
     {
       "checks": [
-        "PASS read_file returns python source: {\"bytes_read\": 32, \"content\": \"def add(a, b):\\n    return a + b\\n\", \"encoding\": \"utf-8\", \"end_line\": 2, \"next_start_line\": null, \"ok\": true, \"output_bytes\": 32, \"output_lines\": ...",
-        "PASS apply_patch adds multiply: {\"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-python-project/src/math_utils.py\"}], \"clean\": true, \"dry_run\": false, \"ok\": true, \"summary\": \"M tiny-python-project/src...",
-        "PASS exec_command unittest passes: {\"elapsed_ms\": 136, \"exit_code\": 0, \"ok\": true, \"session_id\": \"Jbsd8Ibepw2fEvXSseToUcOi\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"..\\n------------------------------------...",
-        "PASS git_diff shows multiply: {\"diff\": \"--- a/tiny-python-project/src/math_utils.py\\n+++ b/tiny-python-project/src/math_utils.py\\n@@ -1,2 +1,6 @@\\n def add(a, b):\\n\\n     return a + b\\n\\n+\\n\\n+\\n\\n+def multi..."
+        "PASS read_file returns python source: def add(a, b):\\n    return a + b\\n\\n{\"bytes_read\": 32, \"content\": \"def add(a, b):\\n    return a + b\\n\", \"encoding\": \"utf-8\", \"end_line\": 2, \"next_start_line\": null, \"ok\": true, ...",
+        "PASS apply_patch adds multiply: Patch applied to 1 file (+4 -0).\\nM tiny-python-project/src/math_utils.py\\n{\"additions\": 4, \"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-python-project/src/math_util...",
+        "PASS exec_command unittest passes: stderr:\\n..\\n----------------------------------------------------------------------\\nRan 2 tests in 0.000s\\n\\nOK\\n\\n{\"elapsed_ms\": 228, \"exit_code\": 0, \"ok\": true, \"session_id\":...",
+        "PASS git_diff shows multiply: --- a/tiny-python-project/src/math_utils.py\\n+++ b/tiny-python-project/src/math_utils.py\\n@@ -1,2 +1,6 @@\\n def add(a, b):\\n\\n     return a + b\\n\\n+\\n\\n+\\n\\n+def multiply(a, b):..."
       ],
       "failures": [],
       "name": "python_new_function",
@@ -25,10 +25,10 @@
     },
     {
       "checks": [
-        "PASS exec_command returns session_id: {\"elapsed_ms\": 94, \"exit_code\": null, \"ok\": true, \"session_id\": \"Y-zeUu11DSAZBpwWXa6QMhT0\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr...",
-        "PASS write_stdin accepts hello: {\"exit_code\": null, \"ok\": true, \"session_id\": \"Y-zeUu11DSAZBpwWXa6QMhT0\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0...",
-        "PASS write_stdin accepts exit: {\"exit_code\": 0, \"ok\": true, \"session_id\": \"Y-zeUu11DSAZBpwWXa6QMhT0\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0, \"s...",
-        "PASS kill_session terminates or reports already closed: {\"exit_code\": 0, \"killed\": false, \"ok\": true, \"session_id\": \"Y-zeUu11DSAZBpwWXa6QMhT0\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omit..."
+        "PASS exec_command returns session_id: ready\r\\n\\n{\"elapsed_ms\": 69, \"exit_code\": null, \"next_action\": {\"arguments\": {\"chars\": \"\", \"session_id\": \"7VIBSjPE-CWys7vpvwf5cfYN\", \"yield_time_ms\": 10000}, \"tool\": \"write_stdi...",
+        "PASS write_stdin accepts hello: hello\r\\necho:hello\r\\n\\n{\"exit_code\": null, \"next_action\": {\"arguments\": {\"chars\": \"\", \"session_id\": \"7VIBSjPE-CWys7vpvwf5cfYN\", \"yield_time_ms\": 10000}, \"tool\": \"write_stdin\"}, ...",
+        "PASS write_stdin accepts exit: exit\r\\nbye\r\\n\\n{\"exit_code\": 0, \"ok\": true, \"session_id\": \"7VIBSjPE-CWys7vpvwf5cfYN\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitte...",
+        "PASS kill_session terminates or reports already closed: Session 7VIBSjPE-CWys7vpvwf5cfYN: exited.\\n{\"evicted\": true, \"exit_code\": 0, \"killed\": false, \"ok\": true, \"session_id\": \"7VIBSjPE-CWys7vpvwf5cfYN\", \"signal\": null, \"signal_sent\"..."
       ],
       "failures": [],
       "name": "long_running_stdin",
@@ -36,9 +36,9 @@
     },
     {
       "checks": [
-        "PASS read_file rejects ../ escape: {\"error\": {\"category\": \"security\", \"code\": \"PATH_OUTSIDE_WORKSPACE\", \"details\": {}, \"message\": \"Path escapes the configured workspace.\", \"retryable\": false}, \"ok\": false}",
-        "PASS apply_patch rejects ../ escape: {\"error\": {\"category\": \"security\", \"code\": \"PATH_OUTSIDE_WORKSPACE\", \"details\": {}, \"message\": \"Path escapes the configured workspace.\", \"retryable\": false}, \"ok\": false}",
-        "PASS exec_command does not expose outside secret: {\"error\": {\"category\": \"permission\", \"code\": \"PERMISSION_REQUIRED\", \"details\": {\"path\": \"../outside-secret.txt\", \"permission\": \"filesystem_escape\"}, \"message\": \"Command path esc..."
+        "PASS read_file rejects ../ escape: PATH_OUTSIDE_WORKSPACE: Path escapes the configured workspace.\\n{\"error\": {\"category\": \"security\", \"code\": \"PATH_OUTSIDE_WORKSPACE\", \"details\": {}, \"message\": \"Path escapes the ...",
+        "PASS apply_patch rejects ../ escape: PATH_OUTSIDE_WORKSPACE: Path escapes the configured workspace.\\n{\"error\": {\"category\": \"security\", \"code\": \"PATH_OUTSIDE_WORKSPACE\", \"details\": {}, \"message\": \"Path escapes the ...",
+        "PASS exec_command does not expose outside secret: PERMISSION_REQUIRED: Command path escapes the workspace and is blocked.\\n{\"error\": {\"category\": \"permission\", \"code\": \"PERMISSION_REQUIRED\", \"details\": {\"path\": \"../outside-secr..."
       ],
       "failures": [],
       "name": "workspace_escape",
@@ -46,168 +46,241 @@
     }
   ],
   "direct_bypass": false,
-  "endpoint": "http://127.0.0.1:8765/mcp",
+  "endpoint": "http://127.0.0.1:18772/mcp",
+  "metrics": {
+    "all_cases_passed": true,
+    "argument_bytes": 1682,
+    "completion_rate": 1.0,
+    "first_patch_attempts": 2,
+    "first_patch_success": true,
+    "first_patch_success_rate": 1.0,
+    "result_bytes": 11853,
+    "session_poll_count": 0,
+    "tool_call_count": 18,
+    "tool_latency_p50_ms": 4.166,
+    "tool_latency_p95_ms": 301.214,
+    "total_elapsed_ms": 1753.589
+  },
   "tool_calls": [
     {
+      "argument_bytes": 2,
+      "arguments": {},
+      "duration_ms": 1.279,
+      "expected_rejection": false,
+      "ok": true,
+      "result_bytes": 1550,
+      "summary": "coding-tools-mcp 0.2.0\\nWorkspace: /tmp/coding-tools-mcp-dogfood-773iw14h/workspace\\n{\"auth_enabled\": false, \"cache_dir\": \"/tmp/coding-tools-mcp/df76f7878b905669/2CMR9xhbBZ9rSqj...",
+      "tool": "server_info"
+    },
+    {
+      "argument_bytes": 52,
       "arguments": {
         "path": "tiny-js-project",
         "query": "function add"
       },
+      "duration_ms": 7.377,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"matches\": [{\"after\": [], \"before\": [], \"column\": 1, \"line\": 1, \"path\": \"tiny-js-project/src/math.js\", \"preview\": \"function add(a, b) {\"}], \"ok\": true, \"query\": \"function add\",...",
+      "result_bytes": 415,
+      "summary": "tiny-js-project/src/math.js:1:1: function add(a, b) {\\n{\"engine\": \"rg\", \"matches\": [{\"after\": [], \"before\": [], \"column\": 1, \"line\": 1, \"path\": \"tiny-js-project/src/math.js\", \"p...",
       "tool": "search_text"
     },
     {
+      "argument_bytes": 39,
       "arguments": {
         "path": "tiny-js-project/src/math.js"
       },
+      "duration_ms": 1.616,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"bytes_read\": 66, \"content\": \"function add(a, b) {\\n  return a - b;\\n}\\n\\nmodule.exports = { add };\\n\", \"encoding\": \"utf-8\", \"end_line\": 5, \"next_start_line\": null, \"ok\": true,...",
+      "result_bytes": 522,
+      "summary": "function add(a, b) {\\n  return a - b;\\n}\\n\\nmodule.exports = { add };\\n\\n{\"bytes_read\": 66, \"content\": \"function add(a, b) {\\n  return a - b;\\n}\\n\\nmodule.exports = { add };\\n\",...",
       "tool": "read_file"
     },
     {
+      "argument_bytes": 158,
       "arguments": {
         "patch": "*** Begin Patch\n*** Update File: tiny-js-project/src/math.js\n@@\n function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n*** End Patch\n"
       },
+      "duration_ms": 3.907,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-js-project/src/math.js\"}], \"clean\": true, \"dry_run\": false, \"ok\": true, \"summary\": \"M tiny-js-project/src/math.js\", \"wa...",
+      "result_bytes": 367,
+      "summary": "Patch applied to 1 file (+1 -1).\\nM tiny-js-project/src/math.js\\n{\"additions\": 1, \"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-js-project/src/math.js\"}], \"clean\": tr...",
       "tool": "apply_patch"
     },
     {
+      "argument_bytes": 161,
       "arguments": {
         "cmd": "npm test",
+        "cwd": "tiny-js-project",
         "max_output_bytes": 40000,
         "timeout_ms": 20000,
         "tty": false,
         "workdir": "tiny-js-project",
         "yield_time_ms": 20000
       },
+      "duration_ms": 701.761,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"elapsed_ms\": 713, \"exit_code\": 0, \"ok\": true, \"session_id\": \"etdyVu5lHMjRrpZrl8Rjl-Vq\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_om...",
+      "result_bytes": 692,
+      "summary": "\\n> test\\n> node test/math.test.js\\n\\njs ok\\n\\n{\"elapsed_ms\": 698, \"exit_code\": 0, \"ok\": true, \"session_id\": \"zgpQvTvtcvPJXS6GEdHa3Ep5\", \"signal\": null, \"status\": \"exited\", \"std...",
       "tool": "exec_command"
     },
     {
+      "argument_bytes": 81,
       "arguments": {
         "path": "tiny-js-project/src/math.js",
         "paths": [
           "tiny-js-project/src/math.js"
         ]
       },
+      "duration_ms": 5.311,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"diff\": \"--- a/tiny-js-project/src/math.js\\n+++ b/tiny-js-project/src/math.js\\n@@ -1,5 +1,5 @@\\n function add(a, b) {\\n\\n-  return a - b;\\n\\n+  return a + b;\\n\\n }\\n\\n \\n\\n mod...",
+      "result_bytes": 703,
+      "summary": "--- a/tiny-js-project/src/math.js\\n+++ b/tiny-js-project/src/math.js\\n@@ -1,5 +1,5 @@\\n function add(a, b) {\\n\\n-  return a - b;\\n\\n+  return a + b;\\n\\n }\\n\\n \\n\\n module.export...",
       "tool": "git_diff"
     },
     {
+      "argument_bytes": 49,
       "arguments": {
         "path": "tiny-python-project/src/math_utils.py"
       },
+      "duration_ms": 1.518,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"bytes_read\": 32, \"content\": \"def add(a, b):\\n    return a + b\\n\", \"encoding\": \"utf-8\", \"end_line\": 2, \"next_start_line\": null, \"ok\": true, \"output_bytes\": 32, \"output_lines\": ...",
+      "result_bytes": 458,
+      "summary": "def add(a, b):\\n    return a + b\\n\\n{\"bytes_read\": 32, \"content\": \"def add(a, b):\\n    return a + b\\n\", \"encoding\": \"utf-8\", \"end_line\": 2, \"next_start_line\": null, \"ok\": true, ...",
       "tool": "read_file"
     },
     {
+      "argument_bytes": 188,
       "arguments": {
         "patch": "*** Begin Patch\n*** Update File: tiny-python-project/src/math_utils.py\n@@\n def add(a, b):\n     return a + b\n+\n+\n+def multiply(a, b):\n+    return a * b\n*** End Patch\n"
       },
+      "duration_ms": 3.842,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-python-project/src/math_utils.py\"}], \"clean\": true, \"dry_run\": false, \"ok\": true, \"summary\": \"M tiny-python-project/src...",
+      "result_bytes": 397,
+      "summary": "Patch applied to 1 file (+4 -0).\\nM tiny-python-project/src/math_utils.py\\n{\"additions\": 4, \"affected_files\": [{\"operation\": \"update\", \"path\": \"tiny-python-project/src/math_util...",
       "tool": "apply_patch"
     },
     {
+      "argument_bytes": 213,
       "arguments": {
-        "cmd": "/home/codespace/.python/current/bin/python3 -m unittest discover -s tests",
+        "cmd": "/usr/local/bin/python3 -m unittest discover -s tests",
+        "cwd": "tiny-python-project",
         "max_output_bytes": 40000,
         "timeout_ms": 20000,
         "tty": false,
         "workdir": "tiny-python-project",
         "yield_time_ms": 20000
       },
+      "duration_ms": 230.529,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"elapsed_ms\": 136, \"exit_code\": 0, \"ok\": true, \"session_id\": \"Jbsd8Ibepw2fEvXSseToUcOi\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"..\\n------------------------------------...",
+      "result_bytes": 822,
+      "summary": "stderr:\\n..\\n----------------------------------------------------------------------\\nRan 2 tests in 0.000s\\n\\nOK\\n\\n{\"elapsed_ms\": 228, \"exit_code\": 0, \"ok\": true, \"session_id\":...",
       "tool": "exec_command"
     },
     {
+      "argument_bytes": 101,
       "arguments": {
         "path": "tiny-python-project/src/math_utils.py",
         "paths": [
           "tiny-python-project/src/math_utils.py"
         ]
       },
+      "duration_ms": 4.866,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"diff\": \"--- a/tiny-python-project/src/math_utils.py\\n+++ b/tiny-python-project/src/math_utils.py\\n@@ -1,2 +1,6 @@\\n def add(a, b):\\n\\n     return a + b\\n\\n+\\n\\n+\\n\\n+def multi...",
+      "result_bytes": 731,
+      "summary": "--- a/tiny-python-project/src/math_utils.py\\n+++ b/tiny-python-project/src/math_utils.py\\n@@ -1,2 +1,6 @@\\n def add(a, b):\\n\\n     return a + b\\n\\n+\\n\\n+\\n\\n+def multiply(a, b):...",
       "tool": "git_diff"
     },
     {
+      "argument_bytes": 191,
       "arguments": {
-        "cmd": "/home/codespace/.python/current/bin/python3 repl.py",
+        "cmd": "/usr/local/bin/python3 repl.py",
+        "cwd": "long-running-project",
         "max_output_bytes": 40000,
         "timeout_ms": 30000,
         "tty": true,
         "workdir": "long-running-project",
-        "yield_time_ms": 20000
+        "yield_time_ms": 1000
       },
+      "duration_ms": 72.076,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"elapsed_ms\": 94, \"exit_code\": null, \"ok\": true, \"session_id\": \"Y-zeUu11DSAZBpwWXa6QMhT0\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr...",
+      "result_bytes": 756,
+      "summary": "ready\r\\n\\n{\"elapsed_ms\": 69, \"exit_code\": null, \"next_action\": {\"arguments\": {\"chars\": \"\", \"session_id\": \"7VIBSjPE-CWys7vpvwf5cfYN\", \"yield_time_ms\": 10000}, \"tool\": \"write_stdi...",
       "tool": "exec_command"
     },
     {
+      "argument_bytes": 62,
       "arguments": {
         "chars": "hello\n",
-        "session_id": "Y-zeUu11DSAZBpwWXa6QMhT0"
+        "session_id": "7VIBSjPE-CWys7vpvwf5cfYN"
       },
+      "duration_ms": 81.916,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"exit_code\": null, \"ok\": true, \"session_id\": \"Y-zeUu11DSAZBpwWXa6QMhT0\", \"signal\": null, \"status\": \"running\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0...",
+      "result_bytes": 767,
+      "summary": "hello\r\\necho:hello\r\\n\\n{\"exit_code\": null, \"next_action\": {\"arguments\": {\"chars\": \"\", \"session_id\": \"7VIBSjPE-CWys7vpvwf5cfYN\", \"yield_time_ms\": 10000}, \"tool\": \"write_stdin\"}, ...",
       "tool": "write_stdin"
     },
     {
+      "argument_bytes": 61,
       "arguments": {
         "chars": "exit\n",
-        "session_id": "Y-zeUu11DSAZBpwWXa6QMhT0"
+        "session_id": "7VIBSjPE-CWys7vpvwf5cfYN"
       },
+      "duration_ms": 21.582,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"exit_code\": 0, \"ok\": true, \"session_id\": \"Y-zeUu11DSAZBpwWXa6QMhT0\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitted_bytes\": 0, \"s...",
+      "result_bytes": 613,
+      "summary": "exit\r\\nbye\r\\n\\n{\"exit_code\": 0, \"ok\": true, \"session_id\": \"7VIBSjPE-CWys7vpvwf5cfYN\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omitte...",
       "tool": "write_stdin"
     },
     {
+      "argument_bytes": 42,
       "arguments": {
-        "session_id": "Y-zeUu11DSAZBpwWXa6QMhT0"
+        "session_id": "7VIBSjPE-CWys7vpvwf5cfYN"
       },
+      "duration_ms": 1.211,
       "expected_rejection": true,
       "ok": true,
-      "summary": "{\"exit_code\": 0, \"killed\": false, \"ok\": true, \"session_id\": \"Y-zeUu11DSAZBpwWXa6QMhT0\", \"signal\": null, \"status\": \"exited\", \"stderr\": \"\", \"stderr_dropped_bytes\": 0, \"stderr_omit...",
+      "result_bytes": 683,
+      "summary": "Session 7VIBSjPE-CWys7vpvwf5cfYN: exited.\\n{\"evicted\": true, \"exit_code\": 0, \"killed\": false, \"ok\": true, \"session_id\": \"7VIBSjPE-CWys7vpvwf5cfYN\", \"signal\": null, \"signal_sent\"...",
       "tool": "kill_session"
     },
     {
+      "argument_bytes": 33,
       "arguments": {
         "path": "../outside-secret.txt"
       },
+      "duration_ms": 1.025,
       "expected_rejection": true,
       "ok": false,
-      "summary": "{\"error\": {\"category\": \"security\", \"code\": \"PATH_OUTSIDE_WORKSPACE\", \"details\": {}, \"message\": \"Path escapes the configured workspace.\", \"retryable\": false}, \"ok\": false}",
+      "result_bytes": 315,
+      "summary": "PATH_OUTSIDE_WORKSPACE: Path escapes the configured workspace.\\n{\"error\": {\"category\": \"security\", \"code\": \"PATH_OUTSIDE_WORKSPACE\", \"details\": {}, \"message\": \"Path escapes the ...",
       "tool": "read_file"
     },
     {
+      "argument_bytes": 125,
       "arguments": {
         "patch": "*** Begin Patch\n*** Update File: ../outside-secret.txt\n@@\n-DOGFOOD-OUTSIDE-SECRET\n+MODIFIED\n*** End Patch\n"
       },
+      "duration_ms": 1.022,
       "expected_rejection": true,
       "ok": false,
-      "summary": "{\"error\": {\"category\": \"security\", \"code\": \"PATH_OUTSIDE_WORKSPACE\", \"details\": {}, \"message\": \"Path escapes the configured workspace.\", \"retryable\": false}, \"ok\": false}",
+      "result_bytes": 315,
+      "summary": "PATH_OUTSIDE_WORKSPACE: Path escapes the configured workspace.\\n{\"error\": {\"category\": \"security\", \"code\": \"PATH_OUTSIDE_WORKSPACE\", \"details\": {}, \"message\": \"Path escapes the ...",
       "tool": "apply_patch"
     },
     {
+      "argument_bytes": 122,
       "arguments": {
         "cmd": "cat ../outside-secret.txt",
         "max_output_bytes": 40000,
@@ -215,18 +288,23 @@
         "tty": false,
         "yield_time_ms": 10000
       },
+      "duration_ms": 1.567,
       "expected_rejection": true,
       "ok": false,
-      "summary": "{\"error\": {\"category\": \"permission\", \"code\": \"PERMISSION_REQUIRED\", \"details\": {\"path\": \"../outside-secret.txt\", \"permission\": \"filesystem_escape\"}, \"message\": \"Command path esc...",
+      "result_bytes": 550,
+      "summary": "PERMISSION_REQUIRED: Command path escapes the workspace and is blocked.\\n{\"error\": {\"category\": \"permission\", \"code\": \"PERMISSION_REQUIRED\", \"details\": {\"path\": \"../outside-secr...",
       "tool": "exec_command"
     },
     {
+      "argument_bytes": 2,
       "arguments": {},
+      "duration_ms": 4.425,
       "expected_rejection": false,
       "ok": true,
-      "summary": "{\"diff\": \"--- a/tiny-js-project/src/math.js\\n+++ b/tiny-js-project/src/math.js\\n@@ -1,5 +1,5 @@\\n function add(a, b) {\\n\\n-  return a - b;\\n\\n+  return a + b;\\n\\n }\\n\\n \\n\\n mod...",
+      "result_bytes": 1197,
+      "summary": "--- a/tiny-js-project/src/math.js\\n+++ b/tiny-js-project/src/math.js\\n@@ -1,5 +1,5 @@\\n function add(a, b) {\\n\\n-  return a - b;\\n\\n+  return a + b;\\n\\n }\\n\\n \\n\\n module.export...",
       "tool": "git_diff"
     }
   ],
-  "workspace": "/tmp/codex-mcp-dogfood-xf95irl4/workspace"
+  "workspace": "/tmp/coding-tools-mcp-dogfood-773iw14h/workspace"
 }

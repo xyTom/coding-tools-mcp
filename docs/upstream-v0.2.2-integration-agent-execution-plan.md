@@ -567,47 +567,107 @@ Agent 不得声称已经撤销 PAT，除非用户明确确认。
 
 10. 创建 `docs/integration-handoffs/STATUS.md`，列出 Phase 00～14；Phase 00 为 complete，Phase 01 为 in progress，其余 pending。
 
-11. 安装上游开发依赖：
+11. 安装上游开发依赖，但不要让依赖安装改写受版本控制的 `uv.lock`。
+
+   如果 `.venv` 不存在，先创建环境：
 
    ```powershell
-   uv sync --extra dev
+   uv venv --python 3.11
    ```
 
-12. 运行核心 unittest：
+   然后使用 pip interface 安装项目和 dev extra：
+
+   ```powershell
+   uv pip install --python .venv -e ".[dev]"
+   ```
+
+   若 `.venv` 已由早期 `uv sync` 创建，可以复用，但后续统一使用
+   `uv run --frozen`，不得保留自动生成的 `uv.lock` 漂移。
+
+12. 检查当前平台：
 
     ```powershell
-    uv run python -m unittest discover -s tests -p "test_*.py"
+    uv run --frozen python -c "import sys; print(sys.platform)"
     ```
 
-13. 运行 lint：
+13. 根据平台运行官方基线门禁。
+
+    在 Linux/WSL 上运行完整 unittest：
 
     ```powershell
-    uv run python -m ruff check --exclude benchmarks/dogfood --ignore=E501 coding_tools_mcp apps/desktop-client/mcp_desktop_client tests benchmarks
+    uv run --frozen python -m unittest discover -s tests -p "test_*.py"
     ```
 
-14. 运行核心协议测试：
+    在原生 Windows 上，不把完整 unittest discovery 作为硬门禁。上游完整
+    unittest 的正式 CI job 运行于 `ubuntu-latest`，其中包含 POSIX 命令、LF
+    和 `/etc/*` 假设；Windows 的官方门禁是：
 
     ```powershell
-    uv run python -m tests.compliance.runner --suite mcp-contract
+    uv run --frozen python -m unittest tests.compliance.test_windows_msvc_smoke
     ```
 
-15. 运行工具 golden：
+    Windows 全量 unittest 可以作为诊断运行，但其中已确认的 POSIX-only
+    失败不得单独把 Phase 01 标记为 blocked。出现新的 Windows smoke 失败仍然
+    必须阻塞。
+
+14. 对精确的上游 SHA 核对 GitHub Actions。必须确认 `headSha` 等于
+    `311c1f2529d0f047ad2a8b68db6bf92dbb93d6bc`，并记录 URL：
+
+    - `compliance` workflow 成功；
+    - `release` 的 `Evidence / compliance` 成功；
+    - Windows MSVC smoke 成功。
+
+    如果不能取得精确 SHA 的成功证据，则必须在 Linux/WSL 本地运行完整
+    unittest、protocol 和 integration gates，不能用旧的 checked-in report
+    替代。仓库内 `reports/compliance/latest.*` 只有在其 `commit` 字段匹配目标
+    SHA 时才可作为证据。
+
+15. 运行 lint：
 
     ```powershell
-    uv run python -m tests.compliance.runner --suite tool-golden
+    uv run --frozen python -m ruff check --exclude benchmarks/dogfood --ignore=E501 coding_tools_mcp apps/desktop-client/mcp_desktop_client tests benchmarks
     ```
 
-16. 在不改变当前目录的情况下运行 npm launcher 测试：
+16. 运行核心协议测试：
+
+    ```powershell
+    uv run --frozen python -m tests.compliance.runner --suite mcp-contract
+    ```
+
+17. 运行工具 golden：
+
+    ```powershell
+    uv run --frozen python -m tests.compliance.runner --suite tool-golden
+    ```
+
+18. 在不改变当前目录的情况下运行 npm launcher 测试：
 
    ```powershell
    npm --prefix npm/coding-tools-mcp test
    ```
 
-17. 记录所有命令、exit code、跳过项和失败项。不得为了让 baseline 变绿而修改上游代码。
+   当前 v0.2.2 的 launcher test fixture 使用 `#!/bin/sh`、`chmod` 和无扩展名
+   的假 `uvx`/`pipx`。原生 Windows 无法执行这些 POSIX fixture；如果失败精确
+   限于“找不到 fixture runner/child exit code”且目标 SHA 的 GitHub npm gate
+   已成功，则把它记录为非阻塞平台诊断。其他 npm 失败仍然阻塞。最终集成
+   候选必须在 Linux CI 或修复后的跨平台 fixture 上重新通过 npm gate。
 
-18. 创建 Phase 01 handoff 和 STATUS 更新。
+19. 记录所有命令、exit code、跳过项和失败项。必须区分：
 
-19. 由于本阶段除 plan/handoff 外不应有实现改动，只创建 handoff 文档提交：
+    - 正式平台门禁；
+    - 精确 SHA 的远程 CI 证据；
+    - 非阻塞的跨平台诊断失败；
+    - 未知的新失败。
+
+    不得为了让 baseline 变绿而修改上游产品代码或测试。
+
+20. 创建 Phase 01 handoff 和 STATUS 更新。
+
+    如果先前 Phase 01 因 Windows 全量 unittest 被标为 blocked，不要重写或
+    删除原 handoff。新增 `phase-01-unblock.md`，记录根因、精确 SHA 的 CI
+    证据、Windows smoke 和补跑门禁；然后把 `STATUS.md` 更新为 complete。
+
+21. 由于本阶段除 plan/handoff 外不应有实现改动，只创建 handoff 文档提交：
 
     ```text
     docs(handoff): record upstream v0.2.2 baseline
@@ -619,7 +679,14 @@ Agent 不得声称已经撤销 PAT，除非用户明确确认。
 - 分支基于精确的 `311c1f2`。
 - 上游代码未被修改。
 - baseline 测试结果完整记录。
-- 若 baseline 失败，必须标记 blocked，下一阶段不得开始。
+- Linux 全量 unittest 已在本地/WSL通过，或精确 SHA 的 GitHub
+  `compliance`/release evidence 已成功。
+- Windows 环境下官方 `test_windows_msvc_smoke` 通过；完整 Windows unittest
+  中已确认的 POSIX-only 诊断失败已记录但不作为硬门禁。
+- lint 通过。mcp-contract、tool-golden 和 npm launcher 在当前平台真实执行并
+  通过，或其本地 skip/failure 已证明只来自上述 Windows/POSIX fixture 差异，
+  且精确 SHA 的 Linux GitHub gate 已成功。
+- 任何未知的新正式门禁失败都必须标记 blocked，下一阶段不得开始。
 
 ---
 

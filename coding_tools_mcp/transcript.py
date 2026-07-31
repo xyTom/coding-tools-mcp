@@ -1,1321 +1,673 @@
+"""Workspace-partitioned chat, context, and imported-session persistence."""
+
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
-from contextlib import closing
-from datetime import datetime, timezone
+import time
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 
-TRANSCRIPT_SCHEMA_VERSION = 4
-SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+class TranscriptStoreError(RuntimeError):
+    pass
+
+
+MAX_PAGE_SIZE = 200
+MAX_CONTENT_CHARS = 2_000_000
+SCHEMA_VERSION = 1
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _require_id(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 256:
+        raise TranscriptStoreError(f"{field} must be a non-empty string up to 256 characters.")
+    if value in {".", ".."} or any(char in value for char in "\x00/\\"):
+        raise TranscriptStoreError(f"{field} contains unsupported characters.")
+    return value
+
+
+def _text(value: Any, *, limit: int = MAX_CONTENT_CHARS) -> str:
+    if value is None:
+        return ""
+    result = str(value).replace("\x00", "\ufffd")
+    result = result.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+    if len(result) > limit:
+        raise TranscriptStoreError(f"Text exceeds the {limit}-character limit.")
+    return result
+
+
+def _json(value: Any) -> str:
+    try:
+        return json.dumps(value if value is not None else {}, ensure_ascii=False, sort_keys=True)
+    except TypeError as exc:
+        raise TranscriptStoreError(f"Metadata must be JSON serializable: {exc}") from exc
+
+
+def _page(page: int, page_size: int) -> tuple[int, int]:
+    try:
+        normalized_page = max(1, int(page))
+        normalized_size = max(1, min(int(page_size), MAX_PAGE_SIZE))
+    except (TypeError, ValueError) as exc:
+        raise TranscriptStoreError("page and page_size must be integers.") from exc
+    return normalized_page, normalized_size
+
+
+def _summary(text: str, limit: int = 240) -> str:
+    flattened = " ".join(text.split())
+    return flattened if len(flattened) <= limit else flattened[: limit - 1] + "\u2026"
+
+
+@dataclass(frozen=True)
+class WorkspaceScope:
+    workspace_id: str
+    workspace_root: Path
+
+    @classmethod
+    def create(cls, workspace_id: str, workspace_root: str | Path) -> "WorkspaceScope":
+        identifier = _require_id(workspace_id, "workspace_id")
+        try:
+            root = Path(workspace_root).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise TranscriptStoreError(f"Workspace root cannot be resolved: {exc}") from exc
+        if not root.is_dir():
+            raise TranscriptStoreError("Workspace root must be an existing directory.")
+        return cls(identifier, root)
 
 
 class TranscriptStore:
-    def __init__(self, db_path: Path, *, markdown_dir: Path | None = None) -> None:
-        self.db_path = db_path
-        self.markdown_dir = markdown_dir or db_path.parent / "transcripts-md"
-        self._lock = threading.Lock()
-        self._initialized = False
+    """SQLite store where every key is partitioned by explicit Workspace identity."""
 
-    def status(self) -> dict[str, Any]:
-        self._ensure_schema()
-        with closing(self._connect()) as conn, conn:
-            session_count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-            event_count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-            chat_conversation_count = conn.execute("SELECT COUNT(DISTINCT conversation_id) FROM chat_messages").fetchone()[0]
-            chat_project_count = conn.execute("SELECT COUNT(*) FROM chat_projects").fetchone()[0]
-            chat_message_count = conn.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0]
-            chat_context_entry_count = conn.execute("SELECT COUNT(*) FROM chat_context_entries").fetchone()[0]
-        return {
-            "ok": True,
-            "schema_version": TRANSCRIPT_SCHEMA_VERSION,
-            "db_path": str(self.db_path),
-            "markdown_dir": str(self.markdown_dir),
-            "session_count": int(session_count),
-            "event_count": int(event_count),
-            "chat_project_count": int(chat_project_count),
-            "chat_conversation_count": int(chat_conversation_count),
-            "chat_message_count": int(chat_message_count),
-            "chat_context_entry_count": int(chat_context_entry_count),
-        }
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path).expanduser()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_lock = threading.RLock()
+        self._migrate()
 
-    def record_http_request(self, event: dict[str, Any]) -> None:
-        self._record_event(event, request_increment=1)
-
-    def record_tool_call(self, event: dict[str, Any]) -> None:
-        self._record_event(event, request_increment=0)
-
-    def record_chat_messages(
-        self,
-        *,
-        conversation_id: str,
-        messages: list[dict[str, Any]],
-        source: str | None = None,
-        conversation_title: str | None = None,
-        conversation_uid: str | None = None,
-        project_id: str | None = None,
-        project_name: str | None = None,
-        project_path: str | None = None,
-        project_workspace: str | None = None,
-        project_metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        self._ensure_schema()
-        conversation_id = normalized_conversation_id(conversation_id)
-        project = normalized_project_fields(
-            project_id=project_id,
-            project_name=project_name,
-            project_path=project_path,
-            project_workspace=project_workspace,
-        )
-        now = utc_now()
-        rows: list[tuple[str, str | None, str, str, str, str | None, str | None]] = []
-        skipped = 0
-        for message in messages:
-            if not isinstance(message, dict):
-                skipped += 1
-                continue
-            content = message.get("content")
-            if content is None:
-                skipped += 1
-                continue
-            metadata = message.get("metadata")
-            metadata_json = None
-            if metadata is not None:
-                metadata_json = safe_json_dumps(metadata)
-            rows.append(
-                (
-                    conversation_id,
-                    normalized_optional_text(message.get("message_id") or message.get("id"), limit=192),
-                    normalized_role(message.get("role")),
-                    sanitized_text(message.get("timestamp") or now),
-                    sanitized_text(content),
-                    normalized_optional_text(message.get("source") or source, limit=128),
-                    metadata_json,
-                )
-            )
-        inserted = 0
-        if rows:
-            with self._lock:
-                with closing(self._connect()) as conn, conn:
-                    self._upsert_chat_conversation(
-                        conn,
-                        conversation_id=conversation_id,
-                        title=conversation_title,
-                        unique_id=conversation_uid,
-                        source=source,
-                        timestamp=now,
-                        project=project,
-                        project_metadata=project_metadata,
-                    )
-                    for row in rows:
-                        cursor = conn.execute(
-                            """
-                            INSERT OR IGNORE INTO chat_messages (
-                                conversation_id, message_id, role, timestamp, content, source, metadata_json
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            row,
-                        )
-                        inserted += max(0, int(cursor.rowcount or 0))
-        return {
-            "ok": True,
-            "conversation_id": conversation_id,
-            "project_id": project.get("project_id"),
-            "message_count": len(rows),
-            "inserted_count": inserted,
-            "duplicate_count": max(0, len(rows) - inserted),
-            "skipped_count": skipped,
-        }
-
-    def record_context_entries(
-        self,
-        *,
-        conversation_id: str,
-        entries: list[dict[str, Any]],
-        source: str | None = None,
-        conversation_title: str | None = None,
-        conversation_uid: str | None = None,
-        project_id: str | None = None,
-        project_name: str | None = None,
-        project_path: str | None = None,
-        project_workspace: str | None = None,
-        project_metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        self._ensure_schema()
-        conversation_id = normalized_conversation_id(conversation_id)
-        project = normalized_project_fields(
-            project_id=project_id,
-            project_name=project_name,
-            project_path=project_path,
-            project_workspace=project_workspace,
-        )
-        now = utc_now()
-        rows: list[tuple[str, str | None, str, str, str, str | None, str | None]] = []
-        skipped = 0
-        for entry in entries:
-            if not isinstance(entry, dict):
-                skipped += 1
-                continue
-            content = entry.get("content")
-            if content is None:
-                skipped += 1
-                continue
-            metadata = entry.get("metadata")
-            metadata_json = None
-            if metadata is not None:
-                metadata_json = safe_json_dumps(metadata)
-            rows.append(
-                (
-                    conversation_id,
-                    normalized_optional_text(entry.get("entry_id") or entry.get("id"), limit=192),
-                    normalized_context_kind(entry.get("kind")),
-                    sanitized_text(entry.get("timestamp") or now),
-                    sanitized_text(content),
-                    normalized_optional_text(entry.get("source") or source, limit=128),
-                    metadata_json,
-                )
-            )
-        inserted = 0
-        if rows:
-            with self._lock:
-                with closing(self._connect()) as conn, conn:
-                    self._upsert_chat_conversation(
-                        conn,
-                        conversation_id=conversation_id,
-                        title=conversation_title,
-                        unique_id=conversation_uid,
-                        source=source,
-                        timestamp=now,
-                        project=project,
-                        project_metadata=project_metadata,
-                    )
-                    for row in rows:
-                        cursor = conn.execute(
-                            """
-                            INSERT OR IGNORE INTO chat_context_entries (
-                                conversation_id, entry_id, kind, timestamp, content, source, metadata_json
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            row,
-                        )
-                        inserted += max(0, int(cursor.rowcount or 0))
-        return {
-            "ok": True,
-            "conversation_id": conversation_id,
-            "project_id": project.get("project_id"),
-            "entry_count": len(rows),
-            "inserted_count": inserted,
-            "duplicate_count": max(0, len(rows) - inserted),
-            "skipped_count": skipped,
-        }
-
-    def list_sessions(self, *, limit: int = 100) -> dict[str, Any]:
-        limit = max(1, min(int(limit), 500))
-        self._ensure_schema()
-        with closing(self._connect()) as conn, conn:
-            rows = conn.execute(
-                """
-                SELECT s.session_id, s.first_seen, s.last_seen, s.request_count,
-                       s.workspace, s.default_cwd, s.default_cwd_display,
-                       s.remote_addr, s.user_agent, s.protocol_version,
-                       COUNT(e.id) AS event_count
-                FROM sessions s
-                LEFT JOIN events e ON e.session_id = s.session_id
-                GROUP BY s.session_id
-                ORDER BY s.last_seen DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        return {"ok": True, "sessions": [dict(row) for row in rows], "session_count": len(rows)}
-
-    def list_chat_projects(self, *, limit: int = 100, query: str | None = None) -> dict[str, Any]:
-        limit = max(1, min(int(limit), 500))
-        self._ensure_schema()
-        rows = self._load_chat_projects(limit=limit, query=query)
-        return {"ok": True, "projects": rows, "project_count": len(rows)}
-
-    def list_chat_conversations(
-        self,
-        *,
-        limit: int = 100,
-        query: str | None = None,
-        project_id: str | None = None,
-    ) -> dict[str, Any]:
-        limit = max(1, min(int(limit), 500))
-        self._ensure_schema()
-        rows = self._load_chat_conversations(limit=limit, query=query, project_id=project_id)
-        return {"ok": True, "conversations": rows, "conversation_count": len(rows)}
-
-    def list_chat_messages(self, *, conversation_id: str, limit: int = 500) -> dict[str, Any]:
-        limit = max(1, min(int(limit), 5000))
-        conversation_id = normalized_conversation_id(conversation_id)
-        messages = self._load_chat_messages(conversation_id=conversation_id, max_messages=limit)
-        return {"ok": True, "conversation_id": conversation_id, "messages": messages, "message_count": len(messages)}
-
-    def list_context_entries(self, *, conversation_id: str, limit: int = 200) -> dict[str, Any]:
-        limit = max(1, min(int(limit), 5000))
-        conversation_id = normalized_conversation_id(conversation_id)
-        entries = self._load_context_entries(conversation_id=conversation_id, max_entries=limit)
-        return {"ok": True, "conversation_id": conversation_id, "entries": entries, "entry_count": len(entries)}
-
-    def update_chat_message(self, *, row_id: int, updates: dict[str, Any]) -> dict[str, Any]:
-        self._ensure_schema()
-        assignments: list[str] = []
-        values: list[Any] = []
-        if "role" in updates:
-            assignments.append("role = ?")
-            values.append(normalized_role(updates.get("role")))
-        if "timestamp" in updates:
-            assignments.append("timestamp = ?")
-            values.append(sanitized_text(updates.get("timestamp") or utc_now()))
-        if "content" in updates:
-            assignments.append("content = ?")
-            values.append(sanitized_text(updates.get("content") or ""))
-        if "source" in updates:
-            assignments.append("source = ?")
-            values.append(normalized_optional_text(updates.get("source"), limit=128))
-        if "metadata" in updates:
-            assignments.append("metadata_json = ?")
-            metadata = updates.get("metadata")
-            values.append(None if metadata is None else safe_json_dumps(metadata))
-        if not assignments:
-            raise ValueError("No chat message fields were provided to update.")
-        values.append(int(row_id))
-        with self._lock:
-            with closing(self._connect()) as conn, conn:
-                cursor = conn.execute(f"UPDATE chat_messages SET {', '.join(assignments)} WHERE id = ?", values)
-                if cursor.rowcount == 0:
-                    raise ValueError(f"Chat message not found: {row_id}")
-                row = conn.execute("SELECT * FROM chat_messages WHERE id = ?", (int(row_id),)).fetchone()
-        return {"ok": True, "updated": True, "message": dict(row) if row else None}
-
-    def delete_chat_message(self, *, row_id: int) -> dict[str, Any]:
-        self._ensure_schema()
-        with self._lock:
-            with closing(self._connect()) as conn, conn:
-                cursor = conn.execute("DELETE FROM chat_messages WHERE id = ?", (int(row_id),))
-        return {"ok": True, "deleted_count": int(cursor.rowcount or 0), "message_id": int(row_id)}
-
-    def update_context_entry(self, *, row_id: int, updates: dict[str, Any]) -> dict[str, Any]:
-        self._ensure_schema()
-        assignments: list[str] = []
-        values: list[Any] = []
-        if "entry_id" in updates:
-            assignments.append("entry_id = ?")
-            values.append(normalized_optional_text(updates.get("entry_id"), limit=192))
-        if "kind" in updates:
-            assignments.append("kind = ?")
-            values.append(normalized_context_kind(updates.get("kind")))
-        if "timestamp" in updates:
-            assignments.append("timestamp = ?")
-            values.append(sanitized_text(updates.get("timestamp") or utc_now()))
-        if "content" in updates:
-            assignments.append("content = ?")
-            values.append(sanitized_text(updates.get("content") or ""))
-        if "source" in updates:
-            assignments.append("source = ?")
-            values.append(normalized_optional_text(updates.get("source"), limit=128))
-        if "metadata" in updates:
-            assignments.append("metadata_json = ?")
-            metadata = updates.get("metadata")
-            values.append(None if metadata is None else safe_json_dumps(metadata))
-        if not assignments:
-            raise ValueError("No context entry fields were provided to update.")
-        values.append(int(row_id))
-        with self._lock:
-            with closing(self._connect()) as conn, conn:
-                cursor = conn.execute(f"UPDATE chat_context_entries SET {', '.join(assignments)} WHERE id = ?", values)
-                if cursor.rowcount == 0:
-                    raise ValueError(f"Context entry not found: {row_id}")
-                row = conn.execute("SELECT * FROM chat_context_entries WHERE id = ?", (int(row_id),)).fetchone()
-        return {"ok": True, "updated": True, "entry": dict(row) if row else None}
-
-    def delete_context_entry(self, *, row_id: int) -> dict[str, Any]:
-        self._ensure_schema()
-        with self._lock:
-            with closing(self._connect()) as conn, conn:
-                cursor = conn.execute("DELETE FROM chat_context_entries WHERE id = ?", (int(row_id),))
-        return {"ok": True, "deleted_count": int(cursor.rowcount or 0), "entry_id": int(row_id)}
-
-    def delete_chat_conversation(self, *, conversation_id: str) -> dict[str, Any]:
-        self._ensure_schema()
-        conversation_id = normalized_conversation_id(conversation_id)
-        with self._lock:
-            with closing(self._connect()) as conn, conn:
-                cursor = conn.execute("DELETE FROM chat_messages WHERE conversation_id = ?", (conversation_id,))
-                context_cursor = conn.execute("DELETE FROM chat_context_entries WHERE conversation_id = ?", (conversation_id,))
-                conn.execute("DELETE FROM chat_conversations WHERE conversation_id = ?", (conversation_id,))
-        return {
-            "ok": True,
-            "conversation_id": conversation_id,
-            "deleted_count": int(cursor.rowcount or 0),
-            "context_deleted_count": int(context_cursor.rowcount or 0),
-        }
-
-    def clear_chat_messages(self) -> dict[str, Any]:
-        self._ensure_schema()
-        with self._lock:
-            with closing(self._connect()) as conn, conn:
-                count = conn.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0]
-                context_count = conn.execute("SELECT COUNT(*) FROM chat_context_entries").fetchone()[0]
-                conn.execute("DELETE FROM chat_messages")
-                conn.execute("DELETE FROM chat_context_entries")
-                conn.execute("DELETE FROM chat_conversations")
-                conn.execute("DELETE FROM chat_projects")
-        return {"ok": True, "deleted_count": int(count), "context_deleted_count": int(context_count)}
-
-    def merge_chat_conversations(self, *, target_conversation_id: str, source_conversation_ids: list[str]) -> dict[str, Any]:
-        self._ensure_schema()
-        target = normalized_conversation_id(target_conversation_id)
-        sources = [normalized_conversation_id(item) for item in source_conversation_ids if normalized_conversation_id(item) != target]
-        moved = 0
-        duplicate_deleted = 0
-        with self._lock:
-            with closing(self._connect()) as conn, conn:
-                for source in sources:
-                    rows = conn.execute("SELECT id FROM chat_messages WHERE conversation_id = ? ORDER BY id ASC", (source,)).fetchall()
-                    for row in rows:
-                        cursor = conn.execute("UPDATE OR IGNORE chat_messages SET conversation_id = ? WHERE id = ?", (target, row["id"]))
-                        if cursor.rowcount:
-                            moved += 1
-                        else:
-                            conn.execute("DELETE FROM chat_messages WHERE id = ?", (row["id"],))
-                            duplicate_deleted += 1
-                    context_rows = conn.execute(
-                        "SELECT id FROM chat_context_entries WHERE conversation_id = ? ORDER BY id ASC",
-                        (source,),
-                    ).fetchall()
-                    for row in context_rows:
-                        cursor = conn.execute("UPDATE OR IGNORE chat_context_entries SET conversation_id = ? WHERE id = ?", (target, row["id"]))
-                        if cursor.rowcount:
-                            moved += 1
-                        else:
-                            conn.execute("DELETE FROM chat_context_entries WHERE id = ?", (row["id"],))
-                            duplicate_deleted += 1
-                    conn.execute("DELETE FROM chat_conversations WHERE conversation_id = ?", (source,))
-        return {
-            "ok": True,
-            "target_conversation_id": target,
-            "source_conversation_ids": sources,
-            "moved_count": moved,
-            "duplicate_deleted_count": duplicate_deleted,
-        }
-
-    def export_markdown(self, *, session_id: str | None = None, max_events: int = 1000, write_file: bool = True) -> dict[str, Any]:
-        max_events = max(1, min(int(max_events), 5000))
-        sessions = self._load_sessions(session_id=session_id)
-        if session_id and not sessions:
-            raise ValueError(f"Transcript session not found: {session_id}")
-        events = self._load_events(session_id=session_id, max_events=max_events)
-        markdown = self._render_markdown(sessions, events, session_id=session_id, max_events=max_events)
-        output_path: Path | None = None
-        if write_file:
-            self.markdown_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = safe_filename(session_id or "all-sessions")
-            output_path = self.markdown_dir / f"{safe_name}.md"
-            output_path.write_text(markdown, encoding="utf-8")
-        return {
-            "ok": True,
-            "session_id": session_id,
-            "event_count": len(events),
-            "sessions": sessions,
-            "path": str(output_path) if output_path else None,
-            "markdown": markdown,
-        }
-
-    def export_chat_markdown(
-        self,
-        *,
-        conversation_id: str | None = None,
-        project_id: str | None = None,
-        max_messages: int = 5000,
-        write_file: bool = True,
-    ) -> dict[str, Any]:
-        max_messages = max(1, min(int(max_messages), 20000))
-        normalized_id = normalized_conversation_id(conversation_id) if conversation_id else None
-        normalized_project_id = normalized_optional_project_id(project_id)
-        messages = self._load_chat_messages(
-            conversation_id=normalized_id,
-            project_id=normalized_project_id,
-            max_messages=max_messages,
-        )
-        if normalized_id and not messages:
-            raise ValueError(f"Chat conversation not found: {normalized_id}")
-        conversations = self._load_chat_conversations(limit=500, project_id=normalized_project_id)
-        if normalized_id:
-            conversations = [item for item in conversations if item.get("conversation_id") == normalized_id]
-        markdown = self._render_chat_markdown(
-            conversations,
-            messages,
-            conversation_id=normalized_id,
-            project_id=normalized_project_id,
-            max_messages=max_messages,
-        )
-        output_path: Path | None = None
-        if write_file:
-            self.markdown_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = safe_filename(normalized_id or normalized_project_id or "all-chat-conversations")
-            output_path = self.markdown_dir / f"chat-{safe_name}.md"
-            output_path.write_text(markdown, encoding="utf-8")
-        return {
-            "ok": True,
-            "conversation_id": normalized_id,
-            "project_id": normalized_project_id,
-            "message_count": len(messages),
-            "conversations": conversations,
-            "path": str(output_path) if output_path else None,
-            "markdown": markdown,
-        }
-
-    def export_context_markdown(
-        self,
-        *,
-        conversation_id: str | None = None,
-        project_id: str | None = None,
-        max_entries: int = 200,
-        write_file: bool = True,
-    ) -> dict[str, Any]:
-        max_entries = max(1, min(int(max_entries), 5000))
-        normalized_id = normalized_conversation_id(conversation_id) if conversation_id else None
-        normalized_project_id = normalized_optional_project_id(project_id)
-        entries = self._load_context_entries(
-            conversation_id=normalized_id,
-            project_id=normalized_project_id,
-            max_entries=max_entries,
-        )
-        conversations = self._load_chat_conversations(limit=500, project_id=normalized_project_id)
-        if normalized_id:
-            conversations = [item for item in conversations if item.get("conversation_id") == normalized_id]
-        markdown = self._render_context_markdown(
-            conversations,
-            entries,
-            conversation_id=normalized_id,
-            project_id=normalized_project_id,
-            max_entries=max_entries,
-        )
-        output_path: Path | None = None
-        if write_file:
-            self.markdown_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = safe_filename(normalized_id or normalized_project_id or "all-chat-context")
-            output_path = self.markdown_dir / f"context-{safe_name}.md"
-            output_path.write_text(markdown, encoding="utf-8")
-        return {
-            "ok": True,
-            "conversation_id": normalized_id,
-            "project_id": normalized_project_id,
-            "entry_count": len(entries),
-            "conversations": conversations,
-            "path": str(output_path) if output_path else None,
-            "markdown": markdown,
-        }
-
-    def _record_event(self, event: dict[str, Any], *, request_increment: int) -> None:
-        self._ensure_schema()
-        session_id = normalized_session_id(event.get("session_id"))
-        timestamp = sanitized_text(event.get("timestamp") or utc_now())
-        payload_json = safe_json_dumps(event)
-        with self._lock:
-            with closing(self._connect()) as conn, conn:
-                conn.execute(
-                    """
-                    INSERT INTO sessions (
-                        session_id, first_seen, last_seen, request_count, workspace,
-                        default_cwd, default_cwd_display, remote_addr, user_agent, protocol_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(session_id) DO UPDATE SET
-                        last_seen=excluded.last_seen,
-                        request_count=sessions.request_count + excluded.request_count,
-                        workspace=COALESCE(excluded.workspace, sessions.workspace),
-                        default_cwd=COALESCE(excluded.default_cwd, sessions.default_cwd),
-                        default_cwd_display=COALESCE(excluded.default_cwd_display, sessions.default_cwd_display),
-                        remote_addr=COALESCE(excluded.remote_addr, sessions.remote_addr),
-                        user_agent=COALESCE(excluded.user_agent, sessions.user_agent),
-                        protocol_version=COALESCE(excluded.protocol_version, sessions.protocol_version)
-                    """,
-                    (
-                        session_id,
-                        timestamp,
-                        timestamp,
-                        request_increment,
-                        event.get("workspace"),
-                        event.get("default_cwd"),
-                        event.get("default_cwd_display"),
-                        event.get("remote_addr"),
-                        event.get("user_agent"),
-                        event.get("protocol_version"),
-                    ),
-                )
-                conn.execute(
-                    """
-                    INSERT INTO events (session_id, timestamp, event_type, tool, rpc_method, status, ok, payload_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session_id,
-                        timestamp,
-                        sanitized_text(event.get("event") or "event"),
-                        event.get("tool"),
-                        event.get("rpc_method"),
-                        sanitized_text(event.get("status")) if event.get("status") is not None else None,
-                        bool_to_int(event.get("ok")),
-                        payload_json,
-                    ),
-                )
-
-    def _ensure_schema(self) -> None:
-        if self._initialized:
-            return
-        with self._lock:
-            if self._initialized:
-                return
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            with closing(self._connect()) as conn, conn:
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute(f"PRAGMA user_version = {TRANSCRIPT_SCHEMA_VERSION}")
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS sessions (
-                        session_id TEXT PRIMARY KEY,
-                        first_seen TEXT NOT NULL,
-                        last_seen TEXT NOT NULL,
-                        request_count INTEGER NOT NULL DEFAULT 0,
-                        workspace TEXT,
-                        default_cwd TEXT,
-                        default_cwd_display TEXT,
-                        remote_addr TEXT,
-                        user_agent TEXT,
-                        protocol_version TEXT
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS events (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        session_id TEXT NOT NULL,
-                        timestamp TEXT NOT NULL,
-                        event_type TEXT NOT NULL,
-                        tool TEXT,
-                        rpc_method TEXT,
-                        status TEXT,
-                        ok INTEGER,
-                        payload_json TEXT NOT NULL
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_projects (
-                        project_id TEXT PRIMARY KEY,
-                        name TEXT,
-                        path TEXT,
-                        workspace TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        source TEXT,
-                        metadata_json TEXT
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_conversations (
-                        conversation_id TEXT PRIMARY KEY,
-                        title TEXT,
-                        unique_id TEXT,
-                        project_id TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        source TEXT,
-                        metadata_json TEXT
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_messages (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        conversation_id TEXT NOT NULL,
-                        message_id TEXT,
-                        role TEXT NOT NULL,
-                        timestamp TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        source TEXT,
-                        metadata_json TEXT,
-                        UNIQUE(conversation_id, message_id)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chat_context_entries (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        conversation_id TEXT NOT NULL,
-                        entry_id TEXT,
-                        kind TEXT NOT NULL,
-                        timestamp TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        source TEXT,
-                        metadata_json TEXT,
-                        UNIQUE(conversation_id, entry_id)
-                    )
-                    """
-                )
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_transcript_events_session ON events(session_id, id)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_transcript_events_time ON events(timestamp)")
-                ensure_column(conn, "chat_conversations", "project_id", "project_id TEXT")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_projects_updated ON chat_projects(updated_at)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_conversations_project ON chat_conversations(project_id, updated_at)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_time ON chat_messages(timestamp)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_context_conversation ON chat_context_entries(conversation_id, id)")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_context_time ON chat_context_entries(timestamp)")
-            self._initialized = True
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=10)
+    @contextmanager
+    def _connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.path, timeout=5.0)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+            if write:
+                conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            if write:
+                conn.commit()
+        except BaseException:
+            if write:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
 
-    def _load_sessions(self, *, session_id: str | None) -> list[dict[str, Any]]:
-        self._ensure_schema()
-        with closing(self._connect()) as conn, conn:
-            if session_id:
-                rows = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchall()
-            else:
-                rows = conn.execute("SELECT * FROM sessions ORDER BY last_seen DESC").fetchall()
-        return [dict(row) for row in rows]
-
-    def _load_events(self, *, session_id: str | None, max_events: int) -> list[dict[str, Any]]:
-        self._ensure_schema()
-        with closing(self._connect()) as conn, conn:
-            if session_id:
-                rows = conn.execute(
-                    "SELECT * FROM events WHERE session_id = ? ORDER BY id ASC LIMIT ?",
-                    (session_id, max_events),
-                ).fetchall()
-            else:
-                rows = conn.execute("SELECT * FROM events ORDER BY id ASC LIMIT ?", (max_events,)).fetchall()
-        return [dict(row) for row in rows]
-
-    def _load_chat_projects(self, *, limit: int, query: str | None = None) -> list[dict[str, Any]]:
-        self._ensure_schema()
-        normalized_query = sanitized_text(query or "").strip().lower()
-        where_clause = ""
-        params: list[Any] = []
-        if normalized_query:
-            like_query = f"%{normalized_query}%"
-            where_clause = """
-                WHERE LOWER(p.project_id) LIKE ?
-                   OR LOWER(COALESCE(p.name, '')) LIKE ?
-                   OR LOWER(COALESCE(p.path, '')) LIKE ?
-                   OR LOWER(COALESCE(p.workspace, '')) LIKE ?
+    def _migrate(self) -> None:
+        with self._write_lock, self._connection(write=True) as conn:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version > SCHEMA_VERSION:
+                raise TranscriptStoreError("Transcript database was written by a newer version.")
+            conn.execute(
                 """
-            params.extend([like_query, like_query, like_query, like_query])
-        params.append(limit)
-        with closing(self._connect()) as conn, conn:
-            rows = conn.execute(
-                f"""
-                SELECT p.project_id,
-                       p.name,
-                       p.path,
-                       p.workspace,
-                       p.created_at,
-                       p.updated_at,
-                       p.source,
-                       p.metadata_json,
-                       COUNT(DISTINCT c.conversation_id) AS conversation_count,
-                       COUNT(DISTINCT m.id) AS message_count,
-                       COUNT(DISTINCT ctx.id) AS context_entry_count,
-                       COALESCE(MAX(m.timestamp), MAX(ctx.timestamp), MAX(c.updated_at), p.updated_at) AS last_seen
-                FROM chat_projects p
-                LEFT JOIN chat_conversations c ON c.project_id = p.project_id
-                LEFT JOIN chat_messages m ON m.conversation_id = c.conversation_id
-                LEFT JOIN chat_context_entries ctx ON ctx.conversation_id = c.conversation_id
-                {where_clause}
-                GROUP BY p.project_id
-                ORDER BY last_seen DESC
-                LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
-        projects = [dict(row) for row in rows]
-        for project in projects:
-            project["date"] = str(project.get("last_seen") or project.get("updated_at") or "")[:10]
-        return projects
-
-    def _load_chat_conversations(
-        self,
-        *,
-        limit: int,
-        query: str | None = None,
-        project_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        self._ensure_schema()
-        normalized_query = sanitized_text(query or "").strip().lower()
-        normalized_project_id = normalized_optional_project_id(project_id)
-        where_parts: list[str] = []
-        params: list[Any] = []
-        if normalized_project_id:
-            where_parts.append("c.project_id = ?")
-            params.append(normalized_project_id)
-        if normalized_query:
-            like_query = f"%{normalized_query}%"
-            where_parts.append(
-                "(" 
-                "LOWER(all_ids.conversation_id) LIKE ? "
-                "OR LOWER(COALESCE(c.title, '')) LIKE ? "
-                "OR LOWER(COALESCE(c.unique_id, '')) LIKE ? "
-                "OR LOWER(COALESCE(c.project_id, '')) LIKE ? "
-                "OR LOWER(COALESCE(p.name, '')) LIKE ? "
-                "OR LOWER(COALESCE(p.path, '')) LIKE ? "
-                "OR LOWER(COALESCE(p.workspace, '')) LIKE ?"
-                ")"
+                CREATE TABLE IF NOT EXISTS chat_conversations(
+                    workspace_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    title TEXT,
+                    source TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(workspace_id, conversation_id)
+                )
+                """
             )
-            params.extend([like_query, like_query, like_query, like_query, like_query, like_query, like_query])
-        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
-        params.append(limit)
-        with closing(self._connect()) as conn, conn:
-            rows = conn.execute(
-                f"""
-                SELECT all_ids.conversation_id,
-                       c.title,
-                       c.unique_id,
-                       c.project_id,
-                       p.name AS project_name,
-                       p.path AS project_path,
-                       p.workspace AS project_workspace,
-                       COALESCE(MIN(m.timestamp), MIN(ctx.timestamp), c.created_at) AS first_seen,
-                       COALESCE(MAX(m.timestamp), MAX(ctx.timestamp), c.updated_at) AS last_seen,
-                       COUNT(DISTINCT m.id) AS message_count,
-                       COUNT(DISTINCT ctx.id) AS context_entry_count,
-                       COALESCE(MAX(m.source), MAX(ctx.source), c.source, p.source) AS source
-                FROM (
-                    SELECT conversation_id FROM chat_messages
-                    UNION
-                    SELECT conversation_id FROM chat_context_entries
-                    UNION
-                    SELECT conversation_id FROM chat_conversations
-                ) AS all_ids
-                LEFT JOIN chat_messages m ON m.conversation_id = all_ids.conversation_id
-                LEFT JOIN chat_context_entries ctx ON ctx.conversation_id = all_ids.conversation_id
-                LEFT JOIN chat_conversations c ON c.conversation_id = all_ids.conversation_id
-                LEFT JOIN chat_projects p ON p.project_id = c.project_id
-                {where_clause}
-                GROUP BY all_ids.conversation_id
-                ORDER BY last_seen DESC
-                LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
-        conversations = [dict(row) for row in rows]
-        for conversation in conversations:
-            conversation["date"] = str(conversation.get("last_seen") or "")[:10]
-        return conversations
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_messages(
+                    workspace_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    timestamp TEXT,
+                    content TEXT NOT NULL,
+                    source TEXT,
+                    metadata_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(workspace_id, message_id),
+                    FOREIGN KEY(workspace_id, conversation_id)
+                      REFERENCES chat_conversations(workspace_id, conversation_id)
+                      ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_context_entries(
+                    workspace_id TEXT NOT NULL,
+                    context_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    timestamp TEXT,
+                    content TEXT NOT NULL,
+                    source TEXT,
+                    metadata_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(workspace_id, context_id),
+                    FOREIGN KEY(workspace_id, conversation_id)
+                      REFERENCES chat_conversations(workspace_id, conversation_id)
+                      ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS imported_sessions(
+                    workspace_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    conversation_id TEXT,
+                    relative_path TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    title TEXT,
+                    summary TEXT,
+                    message_count INTEGER NOT NULL DEFAULT 0,
+                    parse_error_count INTEGER NOT NULL DEFAULT 0,
+                    parse_errors_json TEXT NOT NULL DEFAULT '[]',
+                    file_size INTEGER NOT NULL DEFAULT 0,
+                    file_mtime_ns INTEGER NOT NULL DEFAULT 0,
+                    imported_at REAL,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY(workspace_id, session_id)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conversations_updated ON chat_conversations(workspace_id, updated_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON chat_messages(workspace_id, conversation_id, created_at, message_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_context_conversation ON chat_context_entries(workspace_id, conversation_id, created_at, context_id)"
+            )
+            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
-    def _load_chat_messages(
-        self,
-        *,
-        conversation_id: str | None,
-        max_messages: int,
-        project_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        self._ensure_schema()
-        normalized_project_id = normalized_optional_project_id(project_id)
-        with closing(self._connect()) as conn, conn:
-            if conversation_id:
-                rows = conn.execute(
-                    "SELECT * FROM chat_messages WHERE conversation_id = ? ORDER BY id ASC LIMIT ?",
-                    (conversation_id, max_messages),
-                ).fetchall()
-            elif normalized_project_id:
-                rows = conn.execute(
-                    """
-                    SELECT m.*
-                    FROM chat_messages m
-                    INNER JOIN chat_conversations c ON c.conversation_id = m.conversation_id
-                    WHERE c.project_id = ?
-                    ORDER BY c.updated_at DESC, m.conversation_id ASC, m.id ASC
-                    LIMIT ?
-                    """,
-                    (normalized_project_id, max_messages),
-                ).fetchall()
-            else:
-                rows = conn.execute("SELECT * FROM chat_messages ORDER BY conversation_id ASC, id ASC LIMIT ?", (max_messages,)).fetchall()
-        return [dict(row) for row in rows]
+    def scoped(self, workspace_id: str, workspace_root: str | Path) -> "WorkspaceTranscriptService":
+        return WorkspaceTranscriptService(self, WorkspaceScope.create(workspace_id, workspace_root))
 
-    def _load_context_entries(
+    def record_messages(
         self,
-        *,
-        conversation_id: str | None,
-        max_entries: int,
-        project_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        self._ensure_schema()
-        normalized_project_id = normalized_optional_project_id(project_id)
-        with closing(self._connect()) as conn, conn:
-            if conversation_id:
-                rows = conn.execute(
-                    "SELECT * FROM chat_context_entries WHERE conversation_id = ? ORDER BY id ASC LIMIT ?",
-                    (conversation_id, max_entries),
-                ).fetchall()
-            elif normalized_project_id:
-                rows = conn.execute(
-                    """
-                    SELECT ctx.*
-                    FROM chat_context_entries ctx
-                    INNER JOIN chat_conversations c ON c.conversation_id = ctx.conversation_id
-                    WHERE c.project_id = ?
-                    ORDER BY c.updated_at DESC, ctx.conversation_id ASC, ctx.id ASC
-                    LIMIT ?
-                    """,
-                    (normalized_project_id, max_entries),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM chat_context_entries ORDER BY conversation_id ASC, id ASC LIMIT ?",
-                    (max_entries,),
-                ).fetchall()
-        return [dict(row) for row in rows]
-
-    def _upsert_chat_conversation(
-        self,
-        conn: sqlite3.Connection,
-        *,
+        workspace_id: str,
         conversation_id: str,
-        title: str | None,
-        unique_id: str | None,
-        source: str | None,
-        timestamp: str,
-        metadata: dict[str, Any] | None = None,
-        project: dict[str, str | None] | None = None,
-        project_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        metadata_json = None if metadata is None else json.dumps(metadata, ensure_ascii=False, sort_keys=True, default=str)
-        project_id = project.get("project_id") if project else None
-        if project_id and project:
-            self._upsert_chat_project(
-                conn,
-                project=project,
-                source=source,
-                timestamp=timestamp,
-                metadata=project_metadata,
-            )
-        conn.execute(
-            """
-            INSERT INTO chat_conversations (
-                conversation_id, title, unique_id, project_id, created_at, updated_at, source, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(conversation_id) DO UPDATE SET
-                title=COALESCE(excluded.title, chat_conversations.title),
-                unique_id=COALESCE(excluded.unique_id, chat_conversations.unique_id),
-                project_id=COALESCE(excluded.project_id, chat_conversations.project_id),
-                updated_at=excluded.updated_at,
-                source=COALESCE(excluded.source, chat_conversations.source),
-                metadata_json=COALESCE(excluded.metadata_json, chat_conversations.metadata_json)
-            """,
-            (
-                conversation_id,
-                normalized_optional_text(title, limit=192),
-                normalized_optional_text(unique_id, limit=96),
-                project_id,
-                timestamp,
-                timestamp,
-                normalized_optional_text(source, limit=128),
-                metadata_json,
-            ),
-        )
-
-    def _upsert_chat_project(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        project: dict[str, str | None],
-        source: str | None,
-        timestamp: str,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        project_id = project.get("project_id")
-        if not project_id:
-            return
-        metadata_json = None if metadata is None else safe_json_dumps(metadata)
-        conn.execute(
-            """
-            INSERT INTO chat_projects (
-                project_id, name, path, workspace, created_at, updated_at, source, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(project_id) DO UPDATE SET
-                name=COALESCE(excluded.name, chat_projects.name),
-                path=COALESCE(excluded.path, chat_projects.path),
-                workspace=COALESCE(excluded.workspace, chat_projects.workspace),
-                updated_at=excluded.updated_at,
-                source=COALESCE(excluded.source, chat_projects.source),
-                metadata_json=COALESCE(excluded.metadata_json, chat_projects.metadata_json)
-            """,
-            (
-                project_id,
-                project.get("project_name"),
-                project.get("project_path"),
-                project.get("project_workspace"),
-                timestamp,
-                timestamp,
-                normalized_optional_text(source, limit=128),
-                metadata_json,
-            ),
-        )
-
-    def _render_markdown(
-        self,
-        sessions: list[dict[str, Any]],
-        events: list[dict[str, Any]],
-        *,
-        session_id: str | None,
-        max_events: int,
-    ) -> str:
-        title = f"MCP Session Transcript: {session_id}" if session_id else "MCP Session Transcripts"
-        lines = [f"# {title}", ""]
-        lines.append(f"Generated: {utc_now()}")
-        lines.append(f"Database: `{self.db_path}`")
-        lines.append("")
-        lines.append("## Sessions")
-        if sessions:
-            for session in sessions:
-                lines.extend(render_session_summary(session))
-        else:
-            lines.append("No sessions recorded.")
-        lines.append("")
-        lines.append(f"## Events ({len(events)} shown, max {max_events})")
-        if not events:
-            lines.append("No events recorded.")
-            lines.append("")
-            return "\n".join(lines)
-        for row in events:
-            payload = load_payload(row.get("payload_json"))
-            lines.extend(render_event(row, payload))
-        return "\n".join(lines).rstrip() + "\n"
-
-    def _render_chat_markdown(
-        self,
-        conversations: list[dict[str, Any]],
         messages: list[dict[str, Any]],
         *,
-        conversation_id: str | None,
-        project_id: str | None,
-        max_messages: int,
-    ) -> str:
-        if conversation_id:
-            title = f"聊天备份记录：{conversation_id}"
-        elif project_id:
-            title = f"聊天备份记录：项目 {project_id}"
-        else:
-            title = "聊天备份记录"
-        lines = [f"# {title}", ""]
-        lines.append(f"生成时间：{utc_now()}")
-        lines.append(f"数据库：`{self.db_path}`")
-        lines.append("")
-        lines.append("## 会话")
-        if conversations:
-            for conversation in conversations:
-                lines.extend(render_chat_conversation_summary(conversation))
-        else:
-            lines.append("暂无聊天会话记录。")
-        lines.append("")
-        lines.append(f"## 消息（显示 {len(messages)} 条，最多 {max_messages} 条）")
-        if not messages:
-            lines.append("暂无聊天消息记录。")
-            lines.append("")
-            return "\n".join(lines)
-        current_conversation = None
-        for message in messages:
-            if not conversation_id and message.get("conversation_id") != current_conversation:
-                current_conversation = str(message.get("conversation_id") or "")
-                lines.extend(["", f"## 会话 `{current_conversation}`"])
-            lines.extend(render_chat_message(message))
-        return "\n".join(lines).rstrip() + "\n"
+        title: str | None = None,
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        conversation_id = _require_id(conversation_id, "conversation_id")
+        if not isinstance(messages, list) or len(messages) > 10_000:
+            raise TranscriptStoreError("messages must be a list with at most 10000 items.")
+        inserted = 0
+        duplicates = 0
+        now = _now()
+        with self._write_lock, self._connection(write=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_conversations(workspace_id, conversation_id, title, source, created_at, updated_at)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(workspace_id, conversation_id) DO UPDATE SET
+                  title=COALESCE(excluded.title, chat_conversations.title),
+                  source=COALESCE(excluded.source, chat_conversations.source),
+                  updated_at=excluded.updated_at
+                """,
+                (workspace_id, conversation_id, _text(title, limit=500) or None, _text(source, limit=200) or None, now, now),
+            )
+            for index, message in enumerate(messages):
+                if not isinstance(message, dict):
+                    raise TranscriptStoreError("Each message must be an object.")
+                message_id = _require_id(
+                    message.get("message_id") or message.get("id") or f"msg-{uuid.uuid4().hex}",
+                    "message_id",
+                )
+                role = _text(message.get("role") or "unknown", limit=64).lower()
+                if role not in {"user", "assistant", "system", "tool", "developer", "unknown"}:
+                    role = "unknown"
+                content = _text(message.get("content"))
+                timestamp = _text(message.get("timestamp"), limit=128) or None
+                item_source = _text(message.get("source") or source, limit=200) or None
+                metadata = message.get("metadata", message.get("metadata_json", {}))
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except json.JSONDecodeError:
+                        metadata = {"raw": _text(metadata, limit=20_000)}
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO chat_messages(
+                      workspace_id, message_id, conversation_id, role, timestamp,
+                      content, source, metadata_json, created_at, updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (workspace_id, message_id, conversation_id, role, timestamp, content, item_source, _json(metadata), now + index / 1_000_000, now),
+                )
+                if cursor.rowcount:
+                    inserted += 1
+                else:
+                    duplicates += 1
+            conn.execute(
+                "UPDATE chat_conversations SET updated_at=? WHERE workspace_id=? AND conversation_id=?",
+                (now, workspace_id, conversation_id),
+            )
+        return {
+            "workspace_id": workspace_id,
+            "conversation_id": conversation_id,
+            "inserted_count": inserted,
+            "duplicate_count": duplicates,
+        }
 
-    def _render_context_markdown(
+    def record_context(
         self,
-        conversations: list[dict[str, Any]],
+        workspace_id: str,
+        conversation_id: str,
         entries: list[dict[str, Any]],
         *,
-        conversation_id: str | None,
-        project_id: str | None,
-        max_entries: int,
-    ) -> str:
-        if conversation_id:
-            title = f"恢复上下文：{conversation_id}"
-        elif project_id:
-            title = f"恢复上下文：项目 {project_id}"
-        else:
-            title = "恢复上下文记录"
-        lines = [f"# {title}", ""]
-        lines.append(f"生成时间：{utc_now()}")
-        lines.append(f"数据库：`{self.db_path}`")
-        lines.append("")
-        lines.append("## 会话")
-        if conversations:
-            for conversation in conversations:
-                lines.extend(render_chat_conversation_summary(conversation))
-        else:
-            lines.append("暂无聊天会话记录。")
-        lines.append("")
-        lines.append(f"## 上下文条目（显示 {len(entries)} 条，最多 {max_entries} 条）")
-        if not entries:
-            lines.append("暂无恢复上下文条目。")
-            lines.append("")
-            return "\n".join(lines)
-        current_conversation = None
-        for entry in entries:
-            if not conversation_id and entry.get("conversation_id") != current_conversation:
-                current_conversation = str(entry.get("conversation_id") or "")
-                lines.extend(["", f"## 会话 `{current_conversation}`"])
-            lines.extend(render_context_entry(entry))
-        return "\n".join(lines).rstrip() + "\n"
+        title: str | None = None,
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        conversation_id = _require_id(conversation_id, "conversation_id")
+        if not isinstance(entries, list) or len(entries) > 10_000:
+            raise TranscriptStoreError("entries must be a list with at most 10000 items.")
+        inserted = 0
+        duplicates = 0
+        now = _now()
+        with self._write_lock, self._connection(write=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_conversations(workspace_id, conversation_id, title, source, created_at, updated_at)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(workspace_id, conversation_id) DO UPDATE SET
+                  title=COALESCE(excluded.title, chat_conversations.title),
+                  source=COALESCE(excluded.source, chat_conversations.source),
+                  updated_at=excluded.updated_at
+                """,
+                (workspace_id, conversation_id, _text(title, limit=500) or None, _text(source, limit=200) or None, now, now),
+            )
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    raise TranscriptStoreError("Each context entry must be an object.")
+                context_id = _require_id(
+                    entry.get("context_id") or entry.get("entry_id") or entry.get("id") or f"ctx-{uuid.uuid4().hex}",
+                    "context_id",
+                )
+                kind = _text(entry.get("kind") or "note", limit=64).lower()
+                content = _text(entry.get("content"))
+                timestamp = _text(entry.get("timestamp"), limit=128) or None
+                item_source = _text(entry.get("source") or source, limit=200) or None
+                metadata = entry.get("metadata", entry.get("metadata_json", {}))
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except json.JSONDecodeError:
+                        metadata = {"raw": _text(metadata, limit=20_000)}
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO chat_context_entries(
+                      workspace_id, context_id, conversation_id, kind, timestamp,
+                      content, source, metadata_json, created_at, updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (workspace_id, context_id, conversation_id, kind, timestamp, content, item_source, _json(metadata), now + index / 1_000_000, now),
+                )
+                if cursor.rowcount:
+                    inserted += 1
+                else:
+                    duplicates += 1
+            conn.execute(
+                "UPDATE chat_conversations SET updated_at=? WHERE workspace_id=? AND conversation_id=?",
+                (now, workspace_id, conversation_id),
+            )
+        return {
+            "workspace_id": workspace_id,
+            "conversation_id": conversation_id,
+            "inserted_count": inserted,
+            "duplicate_count": duplicates,
+        }
+
+    def list_conversations(
+        self,
+        workspace_id: str | None,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        query: str | None = None,
+    ) -> dict[str, Any]:
+        if workspace_id is not None:
+            workspace_id = _require_id(workspace_id, "workspace_id")
+        page, page_size = _page(page, page_size)
+        clauses: list[str] = []
+        args: list[Any] = []
+        if workspace_id is not None:
+            clauses.append("c.workspace_id=?")
+            args.append(workspace_id)
+        if query:
+            clauses.append("(c.conversation_id LIKE ? OR c.title LIKE ? OR c.source LIKE ?)")
+            pattern = f"%{_text(query, limit=200)}%"
+            args.extend((pattern, pattern, pattern))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self._connection() as conn:
+            total = int(conn.execute(f"SELECT COUNT(*) FROM chat_conversations c{where}", args).fetchone()[0])
+            rows = conn.execute(
+                f"""
+                SELECT c.workspace_id, c.conversation_id, c.title, c.source,
+                       c.created_at, c.updated_at,
+                       COUNT(DISTINCT m.message_id) AS message_count,
+                       COUNT(DISTINCT x.context_id) AS context_count,
+                       MAX(CASE WHEN m.role='user' THEN substr(m.content,1,240) END) AS preview
+                FROM chat_conversations c
+                LEFT JOIN chat_messages m ON m.workspace_id=c.workspace_id AND m.conversation_id=c.conversation_id
+                LEFT JOIN chat_context_entries x ON x.workspace_id=c.workspace_id AND x.conversation_id=c.conversation_id
+                {where}
+                GROUP BY c.workspace_id, c.conversation_id
+                ORDER BY c.updated_at DESC, c.workspace_id, c.conversation_id
+                LIMIT ? OFFSET ?
+                """,
+                (*args, page_size, (page - 1) * page_size),
+            ).fetchall()
+        items = [dict(row) for row in rows]
+        for item in items:
+            item["preview"] = _summary(item.get("preview") or "")
+        return {"items": items, "count": len(items), "total": total, "page": page, "page_size": page_size}
+
+    def conversation_detail(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        *,
+        message_page: int = 1,
+        message_page_size: int = 100,
+        context_page: int = 1,
+        context_page_size: int = 100,
+    ) -> dict[str, Any] | None:
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        conversation_id = _require_id(conversation_id, "conversation_id")
+        message_page, message_page_size = _page(message_page, message_page_size)
+        context_page, context_page_size = _page(context_page, context_page_size)
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM chat_conversations WHERE workspace_id=? AND conversation_id=?",
+                (workspace_id, conversation_id),
+            ).fetchone()
+            if row is None:
+                return None
+            messages_total = int(conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE workspace_id=? AND conversation_id=?",
+                (workspace_id, conversation_id),
+            ).fetchone()[0])
+            contexts_total = int(conn.execute(
+                "SELECT COUNT(*) FROM chat_context_entries WHERE workspace_id=? AND conversation_id=?",
+                (workspace_id, conversation_id),
+            ).fetchone()[0])
+            messages = conn.execute(
+                """
+                SELECT workspace_id, message_id, conversation_id, role, timestamp,
+                       content, source, metadata_json, created_at, updated_at
+                FROM chat_messages
+                WHERE workspace_id=? AND conversation_id=?
+                ORDER BY created_at, message_id LIMIT ? OFFSET ?
+                """,
+                (workspace_id, conversation_id, message_page_size, (message_page - 1) * message_page_size),
+            ).fetchall()
+            contexts = conn.execute(
+                """
+                SELECT workspace_id, context_id, conversation_id, kind, timestamp,
+                       content, source, metadata_json, created_at, updated_at
+                FROM chat_context_entries
+                WHERE workspace_id=? AND conversation_id=?
+                ORDER BY created_at, context_id LIMIT ? OFFSET ?
+                """,
+                (workspace_id, conversation_id, context_page_size, (context_page - 1) * context_page_size),
+            ).fetchall()
+        message_items = [_decode_metadata(dict(item)) for item in messages]
+        context_items = [_decode_metadata(dict(item)) for item in contexts]
+        return {
+            "conversation": dict(row),
+            "messages": message_items,
+            "messages_total": messages_total,
+            "message_page": message_page,
+            "message_page_size": message_page_size,
+            "contexts": context_items,
+            "contexts_total": contexts_total,
+            "context_page": context_page,
+            "context_page_size": context_page_size,
+        }
+
+    def delete_message(self, workspace_id: str, message_id: str) -> dict[str, Any]:
+        return self._delete_by_id("chat_messages", "message_id", workspace_id, message_id)
+
+    def delete_context(self, workspace_id: str, context_id: str) -> dict[str, Any]:
+        return self._delete_by_id("chat_context_entries", "context_id", workspace_id, context_id)
+
+    def delete_conversation(self, workspace_id: str, conversation_id: str) -> dict[str, Any]:
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        conversation_id = _require_id(conversation_id, "conversation_id")
+        with self._write_lock, self._connection(write=True) as conn:
+            message_count = int(conn.execute(
+                "SELECT COUNT(*) FROM chat_messages WHERE workspace_id=? AND conversation_id=?",
+                (workspace_id, conversation_id),
+            ).fetchone()[0])
+            context_count = int(conn.execute(
+                "SELECT COUNT(*) FROM chat_context_entries WHERE workspace_id=? AND conversation_id=?",
+                (workspace_id, conversation_id),
+            ).fetchone()[0])
+            cursor = conn.execute(
+                "DELETE FROM chat_conversations WHERE workspace_id=? AND conversation_id=?",
+                (workspace_id, conversation_id),
+            )
+        return {
+            "workspace_id": workspace_id,
+            "conversation_id": conversation_id,
+            "affected_count": int(cursor.rowcount),
+            "deleted_message_count": message_count if cursor.rowcount else 0,
+            "deleted_context_count": context_count if cursor.rowcount else 0,
+        }
+
+    def clear_workspace(self, workspace_id: str) -> dict[str, Any]:
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        with self._write_lock, self._connection(write=True) as conn:
+            conversations = int(conn.execute("SELECT COUNT(*) FROM chat_conversations WHERE workspace_id=?", (workspace_id,)).fetchone()[0])
+            messages = int(conn.execute("SELECT COUNT(*) FROM chat_messages WHERE workspace_id=?", (workspace_id,)).fetchone()[0])
+            contexts = int(conn.execute("SELECT COUNT(*) FROM chat_context_entries WHERE workspace_id=?", (workspace_id,)).fetchone()[0])
+            sessions = int(conn.execute("SELECT COUNT(*) FROM imported_sessions WHERE workspace_id=?", (workspace_id,)).fetchone()[0])
+            conn.execute("DELETE FROM chat_conversations WHERE workspace_id=?", (workspace_id,))
+            conn.execute("DELETE FROM imported_sessions WHERE workspace_id=?", (workspace_id,))
+        return {
+            "workspace_id": workspace_id,
+            "affected_count": conversations + messages + contexts + sessions,
+            "deleted_conversation_count": conversations,
+            "deleted_message_count": messages,
+            "deleted_context_count": contexts,
+            "deleted_session_count": sessions,
+        }
+
+    def upsert_imported_session(self, workspace_id: str, item: dict[str, Any]) -> None:
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        session_id = _require_id(item.get("session_id"), "session_id")
+        errors = item.get("parse_errors") or []
+        with self._write_lock, self._connection(write=True) as conn:
+            conn.execute(
+                """
+                INSERT INTO imported_sessions(
+                  workspace_id, session_id, conversation_id, relative_path, source_kind,
+                  title, summary, message_count, parse_error_count, parse_errors_json,
+                  file_size, file_mtime_ns, imported_at, updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(workspace_id, session_id) DO UPDATE SET
+                  conversation_id=excluded.conversation_id,
+                  relative_path=excluded.relative_path,
+                  source_kind=excluded.source_kind,
+                  title=excluded.title,
+                  summary=excluded.summary,
+                  message_count=excluded.message_count,
+                  parse_error_count=excluded.parse_error_count,
+                  parse_errors_json=excluded.parse_errors_json,
+                  file_size=excluded.file_size,
+                  file_mtime_ns=excluded.file_mtime_ns,
+                  imported_at=COALESCE(excluded.imported_at, imported_sessions.imported_at),
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    workspace_id,
+                    session_id,
+                    item.get("conversation_id"),
+                    _text(item.get("relative_path"), limit=2000),
+                    _text(item.get("source_kind") or "codex", limit=100),
+                    _text(item.get("title"), limit=500) or None,
+                    _text(item.get("summary"), limit=1000) or None,
+                    int(item.get("message_count") or 0),
+                    len(errors),
+                    _json(errors),
+                    int(item.get("file_size") or 0),
+                    int(item.get("file_mtime_ns") or 0),
+                    item.get("imported_at"),
+                    _now(),
+                ),
+            )
+
+    def list_imported_sessions(
+        self,
+        workspace_id: str | None,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        if workspace_id is not None:
+            workspace_id = _require_id(workspace_id, "workspace_id")
+        page, page_size = _page(page, page_size)
+        where = " WHERE workspace_id=?" if workspace_id else ""
+        args: tuple[Any, ...] = (workspace_id,) if workspace_id else ()
+        with self._connection() as conn:
+            total = int(conn.execute(f"SELECT COUNT(*) FROM imported_sessions{where}", args).fetchone()[0])
+            rows = conn.execute(
+                f"SELECT * FROM imported_sessions{where} ORDER BY updated_at DESC, workspace_id, session_id LIMIT ? OFFSET ?",
+                (*args, page_size, (page - 1) * page_size),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["parse_errors"] = json.loads(item.pop("parse_errors_json"))
+            items.append(item)
+        return {"items": items, "count": len(items), "total": total, "page": page, "page_size": page_size}
+
+    def delete_imported_session(self, workspace_id: str, session_id: str) -> dict[str, Any]:
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        session_id = _require_id(session_id, "session_id")
+        with self._write_lock, self._connection(write=True) as conn:
+            session = conn.execute(
+                "SELECT conversation_id FROM imported_sessions WHERE workspace_id=? AND session_id=?",
+                (workspace_id, session_id),
+            ).fetchone()
+            if session is None:
+                return {
+                    "workspace_id": workspace_id,
+                    "session_id": session_id,
+                    "affected_count": 0,
+                    "deleted_session_count": 0,
+                    "deleted_conversation_count": 0,
+                    "deleted_message_count": 0,
+                    "deleted_context_count": 0,
+                }
+            conversation_id = session["conversation_id"]
+            message_count = 0
+            context_count = 0
+            conversation_count = 0
+            if isinstance(conversation_id, str) and conversation_id:
+                message_count = int(conn.execute(
+                    "SELECT COUNT(*) FROM chat_messages WHERE workspace_id=? AND conversation_id=?",
+                    (workspace_id, conversation_id),
+                ).fetchone()[0])
+                context_count = int(conn.execute(
+                    "SELECT COUNT(*) FROM chat_context_entries WHERE workspace_id=? AND conversation_id=?",
+                    (workspace_id, conversation_id),
+                ).fetchone()[0])
+                conversation_count = int(conn.execute(
+                    "SELECT COUNT(*) FROM chat_conversations WHERE workspace_id=? AND conversation_id=?",
+                    (workspace_id, conversation_id),
+                ).fetchone()[0])
+                conn.execute(
+                    "DELETE FROM chat_conversations WHERE workspace_id=? AND conversation_id=?",
+                    (workspace_id, conversation_id),
+                )
+            cursor = conn.execute(
+                "DELETE FROM imported_sessions WHERE workspace_id=? AND session_id=?",
+                (workspace_id, session_id),
+            )
+        session_count = int(cursor.rowcount)
+        return {
+            "workspace_id": workspace_id,
+            "session_id": session_id,
+            "affected_count": session_count + conversation_count + message_count + context_count,
+            "deleted_session_count": session_count,
+            "deleted_conversation_count": conversation_count,
+            "deleted_message_count": message_count,
+            "deleted_context_count": context_count,
+        }
+
+    def _delete_by_id(self, table: str, field: str, workspace_id: str, identifier: str) -> dict[str, Any]:
+        if table not in {"chat_messages", "chat_context_entries", "imported_sessions"}:
+            raise TranscriptStoreError("Unsupported delete target.")
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        identifier = _require_id(identifier, field)
+        with self._write_lock, self._connection(write=True) as conn:
+            cursor = conn.execute(
+                f"DELETE FROM {table} WHERE workspace_id=? AND {field}=?",
+                (workspace_id, identifier),
+            )
+        return {"workspace_id": workspace_id, field: identifier, "affected_count": int(cursor.rowcount)}
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+class WorkspaceTranscriptService:
+    """Non-admin facade fixed to one immutable Workspace scope."""
+
+    def __init__(self, store: TranscriptStore, scope: WorkspaceScope) -> None:
+        self.store = store
+        self.scope = scope
+
+    def record_messages(self, conversation_id: str, messages: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+        return self.store.record_messages(self.scope.workspace_id, conversation_id, messages, **kwargs)
+
+    def record_context(self, conversation_id: str, entries: list[dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+        return self.store.record_context(self.scope.workspace_id, conversation_id, entries, **kwargs)
+
+    def list_conversations(self, **kwargs: Any) -> dict[str, Any]:
+        return self.store.list_conversations(self.scope.workspace_id, **kwargs)
+
+    def conversation_detail(self, conversation_id: str, **kwargs: Any) -> dict[str, Any] | None:
+        return self.store.conversation_detail(self.scope.workspace_id, conversation_id, **kwargs)
 
 
-def normalized_session_id(value: Any) -> str:
-    if isinstance(value, str) and value:
-        return sanitized_text(value)[:128]
-    return "server"
-
-
-def normalized_conversation_id(value: Any) -> str:
-    if isinstance(value, str) and value.strip():
-        return sanitized_text(value).strip()[:192]
-    return "default"
-
-
-def normalized_role(value: Any) -> str:
-    if isinstance(value, str) and value.strip():
-        return sanitized_text(value).strip()[:64]
-    return "message"
-
-
-def normalized_context_kind(value: Any) -> str:
-    if isinstance(value, str) and value.strip():
-        return sanitized_text(value).strip()[:64]
-    return "checkpoint"
-
-
-def normalized_optional_text(value: Any, *, limit: int) -> str | None:
-    if value is None:
-        return None
-    text = sanitized_text(value).strip()
-    return text[:limit] if text else None
-
-
-def sanitized_text(value: Any) -> str:
-    return SURROGATE_RE.sub("\ufffd", str(value))
-
-
-def safe_json_dumps(value: Any) -> str:
-    return sanitized_text(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
-
-
-def bool_to_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return 1 if value else 0
-    return None
-
-
-def safe_filename(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip(".-")
-    return (cleaned or "transcript")[:96]
-
-
-def load_payload(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, str):
-        return {}
+def _decode_metadata(item: dict[str, Any]) -> dict[str, Any]:
+    raw = item.pop("metadata_json", "{}")
     try:
-        value = json.loads(raw)
+        item["metadata"] = json.loads(raw)
     except json.JSONDecodeError:
-        return {"raw": raw}
-    return value if isinstance(value, dict) else {"value": value}
+        item["metadata"] = {"parse_error": True}
+    return item
 
 
-def render_session_summary(session: dict[str, Any]) -> list[str]:
-    return [
-        f"- Session `{session.get('session_id')}`",
-        f"  - First seen: {session.get('first_seen')}",
-        f"  - Last seen: {session.get('last_seen')}",
-        f"  - Requests: {session.get('request_count')}",
-        f"  - Workspace: `{session.get('workspace') or ''}`",
-        f"  - Default cwd: `{session.get('default_cwd_display') or session.get('default_cwd') or ''}`",
-        f"  - Remote: `{session.get('remote_addr') or ''}`",
-    ]
-
-
-def render_chat_conversation_summary(conversation: dict[str, Any]) -> list[str]:
-    lines = [
-        f"- 会话 `{conversation.get('conversation_id')}`",
-    ]
-    if conversation.get("title"):
-        lines.append(f"  - 标题：{conversation.get('title')}")
-    if conversation.get("unique_id"):
-        lines.append(f"  - UID：`{conversation.get('unique_id')}`")
-    if conversation.get("project_id"):
-        lines.append(f"  - 项目：`{conversation.get('project_id')}`")
-    if conversation.get("project_name"):
-        lines.append(f"  - 项目名称：{conversation.get('project_name')}")
-    if conversation.get("project_path"):
-        lines.append(f"  - 项目路径：`{conversation.get('project_path')}`")
-    lines.extend([
-        f"  - 开始时间：{conversation.get('first_seen')}",
-        f"  - 最近时间：{conversation.get('last_seen')}",
-        f"  - 聊天消息：{conversation.get('message_count')}",
-        f"  - 恢复上下文：{conversation.get('context_entry_count', 0)}",
-        f"  - 来源：`{conversation.get('source') or ''}`",
-    ])
-    return lines
-
-
-def localized_role(value: Any) -> str:
-    role = str(value or "message").strip()
-    return {
-        "user": "用户",
-        "assistant": "助手",
-        "system": "系统",
-        "tool": "工具",
-        "message": "消息",
-    }.get(role.lower(), role)
-
-
-def localized_context_kind(value: Any) -> str:
-    kind = str(value or "checkpoint").strip()
-    return {
-        "checkpoint": "检查点",
-        "summary": "摘要",
-        "note": "备注",
-        "context": "上下文",
-    }.get(kind.lower(), kind)
-
-
-def render_event(row: dict[str, Any], payload: dict[str, Any]) -> list[str]:
-    event_type = str(row.get("event_type") or payload.get("event") or "event")
-    timestamp = str(row.get("timestamp") or payload.get("timestamp") or "")
-    if event_type == "tool_call":
-        heading = f"### {timestamp} - Tool `{payload.get('tool') or row.get('tool')}`"
-    elif event_type == "mcp_http_request":
-        heading = f"### {timestamp} - HTTP `{payload.get('method')} {payload.get('path')}`"
-    else:
-        heading = f"### {timestamp} - {event_type}"
-    lines = ["", heading]
-    if payload.get("session_id"):
-        lines.append(f"- Session: `{payload.get('session_id')}`")
-    if payload.get("rpc_method"):
-        lines.append(f"- RPC: `{payload.get('rpc_method')}`")
-    if payload.get("status") is not None:
-        lines.append(f"- Status: `{payload.get('status')}`")
-    if payload.get("ok") is not None:
-        lines.append(f"- OK: `{payload.get('ok')}`")
-    if payload.get("duration_ms") is not None:
-        lines.append(f"- Duration: `{payload.get('duration_ms')} ms`")
-    if "args" in payload:
-        lines.append("- Arguments:")
-        lines.append(json_block(payload.get("args")))
-    if "result" in payload:
-        lines.append("- Result:")
-        lines.append(json_block(payload.get("result")))
-    elif event_type != "tool_call":
-        lines.append("- Payload:")
-        lines.append(json_block(payload))
-    return lines
-
-
-def render_chat_message(message: dict[str, Any]) -> list[str]:
-    timestamp = str(message.get("timestamp") or "")
-    role = localized_role(message.get("role"))
-    lines = ["", f"### {timestamp} - {role}"]
-    if message.get("message_id"):
-        lines.append(f"- 消息 ID：`{message.get('message_id')}`")
-    if message.get("source"):
-        lines.append(f"- 来源：`{message.get('source')}`")
-    metadata = load_payload(message.get("metadata_json"))
-    if metadata:
-        lines.append("- 元数据：")
-        lines.append(json_block(metadata))
-    content = str(message.get("content") or "")
-    lines.append("")
-    lines.append(content.rstrip() if content else "（空）")
-    lines.append("")
-    lines.append("---")
-    return lines
-
-
-def render_context_entry(entry: dict[str, Any]) -> list[str]:
-    timestamp = str(entry.get("timestamp") or "")
-    kind = localized_context_kind(entry.get("kind"))
-    lines = ["", f"### {timestamp} - {kind}"]
-    if entry.get("entry_id"):
-        lines.append(f"- 条目 ID：`{entry.get('entry_id')}`")
-    if entry.get("source"):
-        lines.append(f"- 来源：`{entry.get('source')}`")
-    metadata = load_payload(entry.get("metadata_json"))
-    if metadata:
-        lines.append("- 元数据：")
-        lines.append(json_block(metadata))
-    content = str(entry.get("content") or "")
-    lines.append("")
-    lines.append(content.rstrip() if content else "（空）")
-    lines.append("")
-    lines.append("---")
-    return lines
-
-
-def json_block(value: Any) -> str:
-    text = sanitized_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str))
-    text = text.replace("```", "` ` `")
-    return f"```json\n{text}\n```"
-
-
-def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    if column not in {str(row["name"]) for row in rows}:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
-
-
-def normalized_optional_project_id(value: Any) -> str | None:
-    return normalized_optional_text(value, limit=192)
-
-
-def normalized_project_path(value: Any) -> str | None:
-    text = normalized_optional_text(value, limit=512)
-    return text.replace("\\", "/") if text else None
-
-
-def normalized_project_fields(
-    *,
-    project_id: Any = None,
-    project_name: Any = None,
-    project_path: Any = None,
-    project_workspace: Any = None,
-) -> dict[str, str | None]:
-    path = normalized_project_path(project_path)
-    workspace = normalized_project_path(project_workspace)
-    name = normalized_optional_text(project_name, limit=192)
-    normalized_id = normalized_optional_project_id(project_id) or path or name or workspace
-    normalized_id = normalized_optional_project_id(normalized_id)
-    if not normalized_id:
-        return {"project_id": None, "project_name": None, "project_path": path, "project_workspace": workspace}
-    return {
-        "project_id": normalized_id,
-        "project_name": name or inferred_project_name(normalized_id, path),
-        "project_path": path,
-        "project_workspace": workspace,
-    }
-
-
-def inferred_project_name(project_id: str, path: str | None) -> str:
-    candidate = (path or project_id).replace("\\", "/").rstrip("/")
-    if candidate:
-        return candidate.rsplit("/", 1)[-1] or project_id
-    return project_id
+__all__ = [
+    "MAX_PAGE_SIZE",
+    "TranscriptStore",
+    "TranscriptStoreError",
+    "WorkspaceScope",
+    "WorkspaceTranscriptService",
+]

@@ -1,0 +1,70 @@
+{
+  "benchmark": "Aider Polyglot deterministic tool-chain evaluation",
+  "date": "2026-07-25",
+  "branch": "benchmark/aider-polyglot-mcp-20260725",
+  "base_commit": "9ad493525ee86c3913cd75c8a5d33739e151a619",
+  "base_commit_note": "evaluation sandbox checkout, not present in this repository; the run branch was cut from eebe9be",
+  "method": "reference implementation -> patch -> apply_patch -> read-back verification -> tests",
+  "totals": {
+    "tasks": 225,
+    "read_file_success": 225,
+    "apply_patch_success": 225,
+    "exact_verification_success": 224,
+    "tests_passed": 211,
+    "confirmed_evaluable_tests": 211,
+    "strict_all_checks_passed": 210
+  },
+  "languages": {
+    "cpp": {"tasks": 26, "patch_success": 26, "exact_verification": 26, "tests_passed": 24},
+    "go": {"tasks": 39, "patch_success": 39, "exact_verification": 39, "tests_passed": 39},
+    "java": {"tasks": 47, "patch_success": 47, "exact_verification": 46, "tests_passed": 41},
+    "javascript": {"tasks": 49, "patch_success": 49, "exact_verification": 49, "tests_passed": 49},
+    "python": {"tasks": 34, "patch_success": 34, "exact_verification": 34, "tests_passed": 34},
+    "rust": {"tasks": 30, "patch_success": 30, "exact_verification": 30, "tests_passed": 24}
+  },
+  "tool_findings": [
+    {
+      "tool": "apply_patch",
+      "severity": "P1",
+      "finding": "Trailing blank-line count is normalized; Java circular-buffer lost one extra EOF blank line."
+    },
+    {
+      "tool": "apply_patch",
+      "severity": "P2",
+      "finding": "Delete and add of the same path in one patch envelope is rejected; Update File works."
+    },
+    {
+      "tool": "exec_command/write_stdin/read_output",
+      "severity": "P0",
+      "finding": "Completed sessions may disappear before the next poll, losing the final result."
+    },
+    {
+      "tool": "exec_command",
+      "severity": "P1",
+      "finding": "Default environment and Landlock roots are insufficient for Rust and Java toolchains without explicit configuration."
+    },
+    {
+      "tool": "MCP control plane",
+      "severity": "P0",
+      "finding": "Concurrent compilation on a 2-vCPU sandbox caused sustained authenticated 502 responses."
+    },
+    {
+      "tool": "diagnostics",
+      "severity": "P2",
+      "finding": "Missing Rust crates can be misclassified as LANDLOCK_READ_ROOT_BLOCKED."
+    }
+  ],
+  "non_tool_failures": {
+    "cpp_missing_boost": ["gigasecond", "meetup"],
+    "rust_incomplete_reference_dependencies": ["alphametics", "decimal", "grep", "pig-latin", "poker", "robot-name"],
+    "java_missing_reference_helper_classes": ["bowling", "connect", "forth", "mazy-mice", "ocr-numbers", "poker"]
+  },
+  "external_references": [
+    "https://aider.chat/docs/leaderboards/",
+    "https://aider.chat/docs/leaderboards/edit.html",
+    "https://aider.chat/docs/more/edit-formats.html",
+    "https://git-scm.com/docs/git-apply",
+    "https://www.swebench.com/",
+    "https://arxiv.org/abs/2606.12344"
+  ]
+}

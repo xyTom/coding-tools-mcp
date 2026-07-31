@@ -11,7 +11,6 @@ ACTION="install"
 TUNNEL_PROVIDER="${CODING_TOOLS_MCP_TUNNEL_PROVIDER:-cloudflared}"
 WORKSPACE="${CODING_TOOLS_MCP_WORKSPACE:-$PWD}"
 PORT="${CODING_TOOLS_MCP_PORT:-8765}"
-PROFILE="${CODING_TOOLS_MCP_TOOL_PROFILE:-}"
 AUTH_MODE="${CODING_TOOLS_MCP_AUTH_MODE:-}"
 AUTH_TOKEN="${CODING_TOOLS_MCP_AUTH_TOKEN:-}"
 SERVER_BIN="${CODING_TOOLS_MCP_SERVER_BIN:-}"
@@ -43,7 +42,6 @@ Install options:
 Server options:
   --workspace PATH              Workspace to expose. Default: current dir.
   --port PORT                   Local HTTP port. Default: 8765.
-  --profile PROFILE             Tool profile. Defaults: full local, read-only tunnel.
   --auth-mode bearer|noauth|oauth
                                 Defaults: noauth local, bearer tunnel. OAuth
                                 public URL is inferred from tunnel requests
@@ -58,7 +56,7 @@ Tunnel options:
   --auto-install-tunnel         Install missing tunnel CLI without prompting.
 
 Environment:
-  CODING_TOOLS_MCP_VERSION=0.1.7
+  CODING_TOOLS_MCP_VERSION=0.2.0
   CODING_TOOLS_MCP_INSTALL_METHOD=auto|uv|pip
   CODING_TOOLS_MCP_WORKSPACE=/path/to/repo
   CODING_TOOLS_MCP_TUNNEL_PROVIDER=cloudflared|ngrok|devtunnel
@@ -317,11 +315,9 @@ resolve_runtime_defaults() {
   case "$ACTION" in
     install) ;;
     start)
-      PROFILE="${PROFILE:-full}"
       AUTH_MODE="${AUTH_MODE:-noauth}"
       ;;
     tunnel)
-      PROFILE="${PROFILE:-read-only}"
       AUTH_MODE="${AUTH_MODE:-bearer}"
       ;;
   esac
@@ -347,7 +343,6 @@ server_args() {
     --workspace "$WORKSPACE"
     --host 127.0.0.1
     --port "$PORT"
-    --tool-profile "$PROFILE"
   )
   case "$AUTH_MODE" in
     bearer) args+=(--auth-token "$AUTH_TOKEN") ;;
@@ -360,7 +355,6 @@ print_local_config() {
   cat <<EOF
 coding-tools-mcp will listen on http://127.0.0.1:$PORT/mcp
 Workspace: $WORKSPACE
-Tool profile: $PROFILE
 Auth mode: $AUTH_MODE
 EOF
   case "$AUTH_MODE" in
@@ -375,8 +369,7 @@ EOF
       cat <<EOF
 OAuth issuer: $base
 OAuth password: $CODING_TOOLS_MCP_OAUTH_PASSWORD
-Client ID: any non-empty client_id is accepted unless you preset CODING_TOOLS_MCP_OAUTH_CLIENT_ID
-Client secret: not required unless you preset CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
+Client registration: $base/oauth/register (RFC 7591)
 Authorization metadata: $base/.well-known/oauth-authorization-server
 Protected resource:     $base/.well-known/oauth-protected-resource
 EOF
@@ -390,7 +383,6 @@ print_tunnel_config() {
   cat <<EOF
 coding-tools-mcp is listening on http://127.0.0.1:$PORT/mcp
 Workspace: $WORKSPACE
-Tool profile: $PROFILE
 Auth mode: $AUTH_MODE
 
 $label will print an HTTPS URL.
@@ -415,8 +407,7 @@ its OAuth issuer from that request URL unless CODING_TOOLS_MCP_SERVER_URL
 is preset.
 
 OAuth password: $CODING_TOOLS_MCP_OAUTH_PASSWORD
-Client ID: any non-empty client_id is accepted unless you preset CODING_TOOLS_MCP_OAUTH_CLIENT_ID
-Client secret: not required unless you preset CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
+Client registration: $base/oauth/register (RFC 7591)
 
 Authorization metadata: $base/.well-known/oauth-authorization-server
 Protected resource:     $base/.well-known/oauth-protected-resource
@@ -429,8 +420,8 @@ EOF
 Remote MCP client URL:
 https://<$host_placeholder>/mcp
 
-No Authorization header is used. Keep this profile read-only unless you
-understand the risk of exposing this tunnel publicly.
+No Authorization header is used. The fixed tool set includes mutation and
+command execution; do not expose this tunnel publicly without authentication.
 EOF
       ;;
   esac
@@ -559,11 +550,6 @@ while [[ $# -gt 0 ]]; do
     --port)
       [[ $# -ge 2 ]] || die "--port requires a value"
       PORT="$2"
-      shift
-      ;;
-    --profile)
-      [[ $# -ge 2 ]] || die "--profile requires a value"
-      PROFILE="$2"
       shift
       ;;
     --auth-mode)

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import atexit
+import copy
 import json
 import os
 import queue
 import re
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -13,15 +15,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
+from http.client import RemoteDisconnected
 from pathlib import Path
 from typing import Any
 
 
-DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 DEFAULT_TIMEOUT_MS = 30_000
 MAX_RESPONSE_BYTES = 1_048_576
+MAX_TOOL_NAME_CHARS = 512
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 FORBIDDEN_STDIO_COMMANDS = {
     "cmd",
@@ -40,10 +44,28 @@ FORBIDDEN_STDIO_COMMANDS = {
     "fish.exe",
 }
 SHELL_FRAGMENT_RE = re.compile(r"(\|\||&&|[|<>;`]|\$\(|\$\{)")
+UPSTREAM_BASE_ENV_NAMES = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "COMSPEC",
+        "SYSTEMROOT",
+        "WINDIR",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+    }
+)
 
 
 class UpstreamConfigError(ValueError):
-    pass
+    """Gateway configuration cannot safely form a fixed tool snapshot."""
 
 
 class UpstreamError(Exception):
@@ -81,6 +103,18 @@ class UpstreamServerConfig:
 
 
 @dataclass(frozen=True)
+class UpstreamConfigSnapshot:
+    """Configuration, enable state, and allowlists fixed before Runtime creation."""
+
+    configs: tuple[UpstreamServerConfig, ...] = ()
+    source: str | None = None
+
+    @classmethod
+    def empty(cls) -> "UpstreamConfigSnapshot":
+        return cls()
+
+
+@dataclass(frozen=True)
 class UpstreamTool:
     public_name: str
     remote_name: str
@@ -108,14 +142,8 @@ class UpstreamStatus:
         if self.target is not None:
             result["target"] = self.target
         if self.error is not None:
-            result["error"] = self.error
+            result["error"] = copy.deepcopy(self.error)
         return result
-
-
-@dataclass(frozen=True)
-class LoadedUpstreamConfigs:
-    configs: list[UpstreamServerConfig]
-    invalid_statuses: list[UpstreamStatus] = field(default_factory=list)
 
 
 class BaseUpstreamClient:
@@ -151,7 +179,13 @@ class BaseUpstreamClient:
                 "Upstream tools/list response did not include a tools list.",
                 category="protocol",
             )
-        return [tool for tool in tools if isinstance(tool, dict)]
+        if not all(isinstance(tool, dict) for tool in tools):
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream tools/list contained a non-object tool definition.",
+                category="protocol",
+            )
+        return [copy.deepcopy(tool) for tool in tools]
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         response = self.request("tools/call", {"name": name, "arguments": arguments})
@@ -166,17 +200,68 @@ class BaseUpstreamClient:
     def close(self) -> None:
         return None
 
-    def health_payload(self) -> dict[str, Any]:
-        return {"transport": self.config.transport, "running": True}
-
-    def logs_payload(self, *, max_lines: int = 200) -> dict[str, Any]:
-        return {"lines": [], "truncated": False, "max_lines": max_lines}
-
     def _next_request_id(self) -> int:
         with self._id_lock:
             request_id = self._next_id
             self._next_id += 1
             return request_id
+
+
+def _rpc_result(response: Any, request_id: int, method: str) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream response was not a JSON object.",
+            category="protocol",
+            details={"method": method},
+        )
+    if response.get("jsonrpc") != "2.0":
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream response did not use JSON-RPC 2.0.",
+            category="protocol",
+            details={"method": method},
+        )
+    if response.get("id") != request_id:
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream response id did not match the request id.",
+            category="protocol",
+            details={"method": method},
+        )
+    has_result = "result" in response
+    has_error = "error" in response
+    if has_result == has_error:
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream response must contain exactly one of result or error.",
+            category="protocol",
+            details={"method": method},
+        )
+    if has_error:
+        error = response.get("error")
+        if not isinstance(error, dict) or not isinstance(error.get("message"), str):
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream JSON-RPC error envelope was invalid.",
+                category="protocol",
+                details={"method": method},
+            )
+        raise UpstreamError(
+            "UPSTREAM_RPC_ERROR",
+            error["message"],
+            category="upstream",
+            details={"method": method, "rpc_error": copy.deepcopy(error)},
+        )
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream response result was not an object.",
+            category="protocol",
+            details={"method": method},
+        )
+    return result
 
 
 class HttpUpstreamClient(BaseUpstreamClient):
@@ -188,32 +273,26 @@ class HttpUpstreamClient(BaseUpstreamClient):
     ) -> None:
         super().__init__(config, protocol_version, secret_resolver=secret_resolver)
         if not config.url:
-            raise UpstreamConfigError(f"Upstream {config.alias!r} requires url for streamable_http transport.")
+            raise UpstreamConfigError(
+                f"Upstream {config.alias!r} requires url for streamable_http transport."
+            )
         self.url = config.url
         self.session_id: str | None = None
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = {"jsonrpc": "2.0", "id": self._next_request_id(), "method": method}
+        request_id = self._next_request_id()
+        payload: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+        }
         if params is not None:
             payload["params"] = params
         response = self._send(payload, expect_response=True)
-        if not isinstance(response, dict):
-            raise UpstreamError("UPSTREAM_PROTOCOL_ERROR", "Upstream response was not a JSON object.", category="protocol")
-        if "error" in response:
-            error = response.get("error") if isinstance(response.get("error"), dict) else {}
-            raise UpstreamError(
-                "UPSTREAM_RPC_ERROR",
-                str(error.get("message") or f"Upstream RPC error from {method}."),
-                category="upstream",
-                details={"method": method, "error": error},
-            )
-        result = response.get("result")
-        if not isinstance(result, dict):
-            raise UpstreamError("UPSTREAM_PROTOCOL_ERROR", "Upstream response result was not an object.", category="protocol")
-        return result
+        return _rpc_result(response, request_id, method)
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        payload = {"jsonrpc": "2.0", "method": method}
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
         if params is not None:
             payload["params"] = params
         self._send(payload, expect_response=False)
@@ -239,24 +318,61 @@ class HttpUpstreamClient(BaseUpstreamClient):
                     self.session_id = session_id
                 if not expect_response or response.status in {202, 204}:
                     return None
-                raw = response.read(MAX_RESPONSE_BYTES + 1)
-                if len(raw) > MAX_RESPONSE_BYTES:
-                    raise UpstreamError(
-                        "UPSTREAM_RESPONSE_TOO_LARGE",
-                        "Upstream response exceeded the maximum supported size.",
-                        category="protocol",
+                raw = _read_bounded_response(response)
+                expected_id = payload.get("id")
+                return decode_http_rpc_response(
+                    raw,
+                    response.headers.get("Content-Type", ""),
+                    expected_id=expected_id if isinstance(expected_id, int) else None,
+                )
+        except urllib.error.HTTPError as exc:
+            raw = exc.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) <= MAX_RESPONSE_BYTES and raw:
+                try:
+                    return decode_http_rpc_response(
+                        raw,
+                        exc.headers.get("Content-Type", ""),
+                        expected_id=payload.get("id") if isinstance(payload.get("id"), int) else None,
                     )
-                return decode_http_rpc_response(raw, response.headers.get("Content-Type", ""))
-        except TimeoutError as exc:
-            raise UpstreamError("UPSTREAM_TIMEOUT", "Timed out waiting for upstream MCP server.", retryable=True) from exc
-        except urllib.error.URLError as exc:
+                except (UpstreamError, UnicodeDecodeError, json.JSONDecodeError):
+                    pass
             raise UpstreamError(
-                "UPSTREAM_CONNECTION_FAILED",
-                f"Could not connect to upstream MCP server: {exc.reason}",
+                "UPSTREAM_HTTP_ERROR",
+                f"Upstream MCP server returned HTTP {exc.code}.",
+                category="upstream",
+                retryable=500 <= exc.code < 600,
+                details={"status": exc.code},
+            ) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise UpstreamError(
+                "UPSTREAM_TIMEOUT",
+                "Timed out waiting for upstream MCP server.",
                 retryable=True,
             ) from exc
-        except json.JSONDecodeError as exc:
-            raise UpstreamError("UPSTREAM_PROTOCOL_ERROR", "Upstream returned invalid JSON.", category="protocol") from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise UpstreamError(
+                    "UPSTREAM_TIMEOUT",
+                    "Timed out waiting for upstream MCP server.",
+                    retryable=True,
+                ) from exc
+            raise UpstreamError(
+                "UPSTREAM_CONNECTION_FAILED",
+                "Could not connect to upstream MCP server.",
+                retryable=True,
+            ) from exc
+        except (RemoteDisconnected, ConnectionError, BrokenPipeError, ConnectionResetError) as exc:
+            raise UpstreamError(
+                "UPSTREAM_DISCONNECTED",
+                "Upstream MCP server disconnected.",
+                retryable=True,
+            ) from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream returned invalid JSON.",
+                category="protocol",
+            ) from exc
 
 
 class StdioUpstreamClient(BaseUpstreamClient):
@@ -268,13 +384,14 @@ class StdioUpstreamClient(BaseUpstreamClient):
     ) -> None:
         super().__init__(config, protocol_version, secret_resolver=secret_resolver)
         if not config.command:
-            raise UpstreamConfigError(f"Upstream {config.alias!r} requires command for stdio transport.")
+            raise UpstreamConfigError(
+                f"Upstream {config.alias!r} requires command for stdio transport."
+            )
         self._lock = threading.Lock()
-        self._responses: queue.Queue[dict[str, Any]] = queue.Queue()
-        self._stderr: queue.Queue[str] = queue.Queue()
+        self._responses: queue.Queue[dict[str, Any] | UpstreamError] = queue.Queue()
         self._stderr_lines: deque[str] = deque(maxlen=500)
         self._stderr_lock = threading.Lock()
-        env = os.environ.copy()
+        env = base_upstream_environment()
         env.update(resolve_env_config(config.env, secret_resolver=self.secret_resolver))
         creationflags = 0
         if os.name == "nt":
@@ -286,7 +403,7 @@ class StdioUpstreamClient(BaseUpstreamClient):
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
-            errors="replace",
+            errors="strict",
             bufsize=1,
             env=env,
             creationflags=creationflags,
@@ -299,7 +416,11 @@ class StdioUpstreamClient(BaseUpstreamClient):
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = self._next_request_id()
-        payload = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        payload: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+        }
         if params is not None:
             payload["params"] = params
         with self._lock:
@@ -308,32 +429,23 @@ class StdioUpstreamClient(BaseUpstreamClient):
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise UpstreamError("UPSTREAM_TIMEOUT", "Timed out waiting for upstream MCP server.", retryable=True)
+                    raise UpstreamError(
+                        "UPSTREAM_TIMEOUT",
+                        "Timed out waiting for upstream MCP server.",
+                        retryable=True,
+                    )
+                if self.process.poll() is not None and self._responses.empty():
+                    raise self._process_exited_error()
                 try:
-                    response = self._responses.get(timeout=remaining)
-                except queue.Empty as exc:
-                    raise UpstreamError("UPSTREAM_TIMEOUT", "Timed out waiting for upstream MCP server.", retryable=True) from exc
-                if response.get("id") != request_id:
+                    response = self._responses.get(timeout=min(remaining, 0.1))
+                except queue.Empty:
                     continue
-                if "error" in response:
-                    error = response.get("error") if isinstance(response.get("error"), dict) else {}
-                    raise UpstreamError(
-                        "UPSTREAM_RPC_ERROR",
-                        str(error.get("message") or f"Upstream RPC error from {method}."),
-                        category="upstream",
-                        details={"method": method, "error": error},
-                    )
-                result = response.get("result")
-                if not isinstance(result, dict):
-                    raise UpstreamError(
-                        "UPSTREAM_PROTOCOL_ERROR",
-                        "Upstream response result was not an object.",
-                        category="protocol",
-                    )
-                return result
+                if isinstance(response, UpstreamError):
+                    raise response
+                return _rpc_result(response, request_id, method)
 
     def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
-        payload = {"jsonrpc": "2.0", "method": method}
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
         if params is not None:
             payload["params"] = params
         with self._lock:
@@ -357,325 +469,297 @@ class StdioUpstreamClient(BaseUpstreamClient):
 
     def _write(self, payload: dict[str, Any]) -> None:
         if self.process.poll() is not None:
-            stderr = drain_queue(self._stderr)[-5:]
-            raise UpstreamError(
-                "UPSTREAM_PROCESS_EXITED",
-                "Upstream MCP stdio process exited.",
-                category="runtime",
-                retryable=True,
-                details={"returncode": self.process.returncode, "stderr_tail": stderr},
-            )
+            raise self._process_exited_error()
         if self.process.stdin is None:
-            raise UpstreamError("UPSTREAM_PROCESS_CLOSED", "Upstream MCP stdin is closed.", retryable=True)
-        self.process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
-        self.process.stdin.flush()
+            raise UpstreamError(
+                "UPSTREAM_DISCONNECTED",
+                "Upstream MCP stdin is closed.",
+                retryable=True,
+            )
+        try:
+            self.process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+            self.process.stdin.flush()
+        except OSError as exc:
+            raise UpstreamError(
+                "UPSTREAM_DISCONNECTED",
+                "Upstream MCP stdio process disconnected.",
+                retryable=True,
+            ) from exc
 
     def _read_stdout(self) -> None:
         if self.process.stdout is None:
             return
-        for line in self.process.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parsed = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
+        try:
+            for raw_line in self.process.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    self._responses.put(
+                        UpstreamError(
+                            "UPSTREAM_PROTOCOL_ERROR",
+                            "Upstream stdio returned invalid JSON.",
+                            category="protocol",
+                        )
+                    )
+                    continue
+                if not isinstance(parsed, dict):
+                    self._responses.put(
+                        UpstreamError(
+                            "UPSTREAM_PROTOCOL_ERROR",
+                            "Upstream stdio response was not a JSON object.",
+                            category="protocol",
+                        )
+                    )
+                    continue
+                if "id" not in parsed and isinstance(parsed.get("method"), str):
+                    continue
                 self._responses.put(parsed)
+        except UnicodeError:
+            self._responses.put(
+                UpstreamError(
+                    "UPSTREAM_PROTOCOL_ERROR",
+                    "Upstream stdio returned non-UTF-8 output.",
+                    category="protocol",
+                )
+            )
 
     def _read_stderr(self) -> None:
         if self.process.stderr is None:
             return
         for line in self.process.stderr:
-            item = line.rstrip("\n")[:500]
-            self._stderr.put(item)
+            item = line.rstrip("\r\n")[:500]
             with self._stderr_lock:
                 self._stderr_lines.append(item)
 
-    def health_payload(self) -> dict[str, Any]:
-        return {
-            "transport": self.config.transport,
-            "running": self.process.poll() is None,
-            "pid": self.process.pid,
-            "returncode": self.process.poll(),
-        }
-
-    def logs_payload(self, *, max_lines: int = 200) -> dict[str, Any]:
-        safe_max = max(1, min(max_lines, 500))
+    def _process_exited_error(self) -> UpstreamError:
         with self._stderr_lock:
-            lines = list(self._stderr_lines)[-safe_max:]
-            truncated = len(self._stderr_lines) > safe_max
-        return {"lines": lines, "truncated": truncated, "max_lines": safe_max}
+            stderr_tail = list(self._stderr_lines)[-5:]
+        return UpstreamError(
+            "UPSTREAM_PROCESS_EXITED",
+            "Upstream MCP stdio process exited.",
+            retryable=True,
+            details={"returncode": self.process.returncode, "stderr_tail": stderr_tail},
+        )
 
 
 class UpstreamManager:
+    """Per-Runtime upstream clients with an immutable discovered tool snapshot."""
+
     def __init__(
         self,
-        configs: list[UpstreamServerConfig],
+        configs: Iterable[UpstreamServerConfig],
         *,
         protocol_version: str = DEFAULT_PROTOCOL_VERSION,
         secret_resolver: Callable[[str], str] | None = None,
-        invalid_statuses: list[UpstreamStatus] | None = None,
+        reserved_names: Collection[str] = (),
     ) -> None:
         self.protocol_version = protocol_version
         self.secret_resolver = secret_resolver
-        self.configs = configs
+        self.configs = tuple(configs)
         self.clients: dict[str, BaseUpstreamClient] = {}
-        self.tools: dict[str, UpstreamTool] = {}
-        self.statuses: dict[str, UpstreamStatus] = {status.alias: status for status in invalid_statuses or []}
-        self._tool_lock = threading.Lock()
-        self._initialize_configs()
+        self.statuses: dict[str, UpstreamStatus] = {}
+        self._tools: dict[str, UpstreamTool] = {}
+        self._tool_order: tuple[str, ...] = ()
+        self._closed = False
+        try:
+            self._initialize_configs(frozenset(reserved_names))
+        except BaseException:
+            self.close()
+            raise
 
     @classmethod
     def empty(
         cls,
         protocol_version: str = DEFAULT_PROTOCOL_VERSION,
         *,
-        secret_resolver: Callable[[str], str] | None = None,
-        invalid_statuses: list[UpstreamStatus] | None = None,
+        reserved_names: Collection[str] = (),
     ) -> "UpstreamManager":
-        instance = cls.__new__(cls)
-        instance.protocol_version = protocol_version
-        instance.secret_resolver = secret_resolver
-        instance.configs = []
-        instance.clients = {}
-        instance.tools = {}
-        instance.statuses = {status.alias: status for status in invalid_statuses or []}
-        instance._tool_lock = threading.Lock()
-        return instance
+        return cls((), protocol_version=protocol_version, reserved_names=reserved_names)
 
     @classmethod
-    def from_config_file(
+    def from_snapshot(
         cls,
-        path: str | None,
+        snapshot: UpstreamConfigSnapshot,
         *,
         protocol_version: str = DEFAULT_PROTOCOL_VERSION,
         secret_resolver: Callable[[str], str] | None = None,
+        reserved_names: Collection[str] = (),
     ) -> "UpstreamManager":
-        if not path:
-            return cls.empty(protocol_version, secret_resolver=secret_resolver)
-        loaded = load_upstream_configs_tolerant(path)
         return cls(
-            loaded.configs,
+            snapshot.configs,
             protocol_version=protocol_version,
             secret_resolver=secret_resolver,
-            invalid_statuses=loaded.invalid_statuses,
+            reserved_names=reserved_names,
         )
 
-    def tool_definitions(self, *, tool_profile: str) -> list[dict[str, Any]]:
-        with self._tool_lock:
-            return [
-                profiled_definition(tool.definition, tool_profile)
-                for tool in self.tools.values()
-                if self._visible(tool, tool_profile)
-            ]
+    def tool_definitions(self) -> list[dict[str, Any]]:
+        return [copy.deepcopy(self._tools[name].definition) for name in self._tool_order]
 
-    def tool_names(self, *, tool_profile: str) -> list[str]:
-        with self._tool_lock:
-            return [name for name, tool in self.tools.items() if self._visible(tool, tool_profile)]
+    def tool_names(self) -> list[str]:
+        return list(self._tool_order)
 
-    def has_tool(self, name: str, *, tool_profile: str) -> bool:
-        with self._tool_lock:
-            tool = self.tools.get(name)
-            return tool is not None and self._visible(tool, tool_profile)
+    def has_tool(self, name: str) -> bool:
+        return name in self._tools
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        with self._tool_lock:
-            tool = self.tools.get(name)
+        tool = self._tools.get(name)
         if tool is None:
-            return upstream_error_result("UPSTREAM_TOOL_NOT_FOUND", f"Unknown upstream tool: {name}", category="validation")
+            return upstream_error_result(
+                "UPSTREAM_TOOL_NOT_FOUND",
+                f"Unknown upstream tool: {name}",
+                category="validation",
+            )
+        if self._closed:
+            return upstream_error_result(
+                "UPSTREAM_DISCONNECTED",
+                "Upstream Gateway is closed.",
+                retryable=True,
+                alias=name.partition("__")[0],
+                tool_name=name,
+            )
         alias, _separator, _remote = name.partition("__")
         client = self.clients.get(alias)
         if client is None:
-            return upstream_error_result("UPSTREAM_NOT_AVAILABLE", f"Upstream {alias!r} is not available.", retryable=True)
+            return upstream_error_result(
+                "UPSTREAM_NOT_AVAILABLE",
+                f"Upstream {alias!r} is not available.",
+                retryable=True,
+                alias=alias,
+                tool_name=name,
+            )
         try:
             return client.call_tool(tool.remote_name, arguments or {})
         except UpstreamError as exc:
-            return upstream_error_result(exc.code, exc.message, category=exc.category, retryable=exc.retryable, details=exc.details)
+            return upstream_error_result(
+                exc.code,
+                exc.message,
+                category=exc.category,
+                retryable=exc.retryable,
+                details=exc.details,
+                alias=alias,
+                tool_name=name,
+            )
+        except OSError:
+            return upstream_error_result(
+                "UPSTREAM_DISCONNECTED",
+                "Upstream MCP server disconnected.",
+                retryable=True,
+                alias=alias,
+                tool_name=name,
+            )
 
     def status_payload(self) -> dict[str, Any]:
-        statuses = [status.payload() for status in self.statuses.values()]
+        statuses = [self.statuses[alias].payload() for alias in sorted(self.statuses)]
         return {
-            "enabled": bool(self.statuses),
+            "enabled": any(status.enabled for status in self.statuses.values()),
             "server_count": len(self.statuses),
             "initialized_count": sum(1 for status in self.statuses.values() if status.initialized),
-            "tool_count": len(self.tools),
+            "tool_count": len(self._tool_order),
+            "snapshot_immutable": True,
+            "remote_capability_boundary": "upstream_server",
             "servers": statuses,
         }
 
-    def health_payload(self, alias: str | None = None) -> dict[str, Any]:
-        aliases = [alias] if alias else sorted(self.statuses)
-        servers: list[dict[str, Any]] = []
-        for item_alias in aliases:
-            status = self.statuses.get(item_alias)
-            if status is None:
-                servers.append({"alias": item_alias, "error": error_payload(UpstreamError("UPSTREAM_NOT_FOUND", "Unknown upstream MCP server."))})
-                continue
-            payload = status.payload()
-            client = self.clients.get(item_alias)
-            payload["health"] = client.health_payload() if client is not None else {"running": False}
-            servers.append(payload)
-        return {
-            "ok": True,
-            "server_count": len(servers),
-            "running_count": sum(1 for item in servers if item.get("health", {}).get("running") is True),
-            "servers": servers,
-        }
-
-    def logs_payload(self, alias: str | None = None, *, max_lines: int = 200) -> dict[str, Any]:
-        aliases = [alias] if alias else sorted(self.statuses)
-        servers: list[dict[str, Any]] = []
-        for item_alias in aliases:
-            status = self.statuses.get(item_alias)
-            if status is None:
-                servers.append({"alias": item_alias, "error": error_payload(UpstreamError("UPSTREAM_NOT_FOUND", "Unknown upstream MCP server."))})
-                continue
-            client = self.clients.get(item_alias)
-            logs = client.logs_payload(max_lines=max_lines) if client is not None else {"lines": [], "truncated": False, "max_lines": max_lines}
-            servers.append({"alias": item_alias, "transport": status.transport, "logs": logs})
-        return {"ok": True, "servers": servers}
-
-    def start_server(self, alias: str) -> dict[str, Any]:
-        config = self._config_by_alias(alias)
-        if config is None:
-            return upstream_error_result("UPSTREAM_NOT_FOUND", f"Unknown upstream MCP server: {alias}", category="validation")
-        if not config.enabled:
-            return upstream_error_result("UPSTREAM_DISABLED", f"Upstream MCP server {alias!r} is disabled.", category="configuration")
-        self.stop_server(alias)
-        seen_public_names = {name for name in self.tools if not name.startswith(f"{alias}__")}
-        self._initialize_config(config, seen_public_names)
-        return {"ok": True, "status": self.statuses[alias].payload()}
-
-    def stop_server(self, alias: str) -> dict[str, Any]:
-        status = self.statuses.get(alias)
-        if status is None:
-            return upstream_error_result("UPSTREAM_NOT_FOUND", f"Unknown upstream MCP server: {alias}", category="validation")
-        client = self.clients.pop(alias, None)
-        if client is not None:
-            client.close()
-        with self._tool_lock:
-            for name in [name for name in self.tools if name.startswith(f"{alias}__")]:
-                self.tools.pop(name, None)
-        status.initialized = False
-        status.tool_count = 0
-        status.error = {"code": "UPSTREAM_STOPPED", "message": "Upstream MCP server is stopped.", "category": "runtime", "retryable": True}
-        return {"ok": True, "status": status.payload()}
-
     def close(self) -> None:
-        for alias in list(self.clients):
-            self.stop_server(alias)
-
-    def _initialize_configs(self) -> None:
-        seen_public_names: set[str] = set()
-        for config in self.configs:
-            self._initialize_config(config, seen_public_names)
-
-    def _initialize_config(self, config: UpstreamServerConfig, seen_public_names: set[str]) -> None:
-        status = UpstreamStatus(
-            alias=config.alias,
-            transport=config.transport,
-            enabled=config.enabled,
-            target=safe_target(config),
-        )
-        self.statuses[config.alias] = status
-        if not config.enabled:
+        if self._closed:
             return
-        client: BaseUpstreamClient | None = None
-        try:
-            client = build_client(config, self.protocol_version, secret_resolver=self.secret_resolver)
-            client.initialize()
-            raw_tools = filter_tools(client.list_tools(), config)
-            registered: list[UpstreamTool] = []
-            for raw_tool in raw_tools:
-                remote_name = raw_tool.get("name")
-                if not isinstance(remote_name, str) or not remote_name:
-                    continue
-                public_name = f"{config.alias}__{remote_name}"
-                if public_name in seen_public_names:
-                    raise UpstreamError(
-                        "UPSTREAM_TOOL_COLLISION",
-                        f"Duplicate upstream tool name after namespacing: {public_name}",
-                        category="configuration",
-                    )
-                seen_public_names.add(public_name)
-                registered.append(
-                    UpstreamTool(
-                        public_name=public_name,
-                        remote_name=remote_name,
-                        definition=namespaced_tool_definition(config.alias, public_name, raw_tool),
-                    )
-                )
-            self.clients[config.alias] = client
-            with self._tool_lock:
-                for tool in registered:
-                    self.tools[tool.public_name] = tool
-            status.initialized = True
-            status.tool_count = len(registered)
-        except (OSError, UpstreamError, UpstreamConfigError) as exc:
-            if client is not None:
-                client.close()
-            status.error = error_payload(exc)
+        self._closed = True
+        for client in list(self.clients.values()):
+            client.close()
+        self.clients.clear()
 
-    def _config_by_alias(self, alias: str) -> UpstreamServerConfig | None:
+    def _initialize_configs(self, reserved_names: frozenset[str]) -> None:
+        seen_public_names = set(reserved_names)
+        ordered_names: list[str] = []
         for config in self.configs:
-            if config.alias == alias:
-                return config
-        return None
-
-    def _visible(self, tool: UpstreamTool, tool_profile: str) -> bool:
-        if tool_profile == "read-only":
-            annotations = tool.definition.get("annotations")
-            return isinstance(annotations, dict) and annotations.get("readOnlyHint") is True
-        return True
-
-
-def load_upstream_configs(path: str) -> list[UpstreamServerConfig]:
-    servers = _read_upstream_servers(path)
-    return [parse_server_config(alias, value) for alias, value in servers.items()]
-
-
-def load_upstream_configs_tolerant(path: str) -> LoadedUpstreamConfigs:
-    try:
-        servers = _read_upstream_servers(path)
-    except UpstreamConfigError as exc:
-        return LoadedUpstreamConfigs(
-            configs=[],
-            invalid_statuses=[
-                UpstreamStatus(
-                    alias="__config__",
-                    transport="configuration",
-                    enabled=False,
-                    error=error_payload(exc),
-                    target=str(Path(path).expanduser()),
+            status = UpstreamStatus(
+                alias=config.alias,
+                transport=config.transport,
+                enabled=config.enabled,
+                target=safe_target(config),
+            )
+            self.statuses[config.alias] = status
+            if not config.enabled:
+                continue
+            client: BaseUpstreamClient | None = None
+            try:
+                client = build_client(
+                    config,
+                    self.protocol_version,
+                    secret_resolver=self.secret_resolver,
                 )
-            ],
-        )
-    configs: list[UpstreamServerConfig] = []
-    invalid_statuses: list[UpstreamStatus] = []
-    for index, (alias, value) in enumerate(servers.items(), start=1):
-        try:
-            configs.append(parse_server_config(alias, value))
-        except UpstreamConfigError as exc:
-            status_alias = alias if isinstance(alias, str) and alias else f"__invalid_{index}"
-            invalid_statuses.append(invalid_config_status(status_alias, value, exc))
-    return LoadedUpstreamConfigs(configs=configs, invalid_statuses=invalid_statuses)
+                client.initialize()
+                raw_tools = filter_tools(client.list_tools(), config)
+                registered: list[UpstreamTool] = []
+                for raw_tool in raw_tools:
+                    remote_name = raw_tool.get("name")
+                    if not isinstance(remote_name, str) or not remote_name:
+                        raise UpstreamError(
+                            "UPSTREAM_PROTOCOL_ERROR",
+                            "Upstream tool definition had no valid name.",
+                            category="protocol",
+                        )
+                    public_name = namespaced_tool_name(config.alias, remote_name)
+                    if public_name in seen_public_names:
+                        raise UpstreamConfigError(
+                            f"Upstream tool namespace collision: {public_name!r}."
+                        )
+                    seen_public_names.add(public_name)
+                    registered.append(
+                        UpstreamTool(
+                            public_name=public_name,
+                            remote_name=remote_name,
+                            definition=namespaced_tool_definition(public_name, raw_tool),
+                        )
+                    )
+                self.clients[config.alias] = client
+                for tool in registered:
+                    self._tools[tool.public_name] = tool
+                    ordered_names.append(tool.public_name)
+                status.initialized = True
+                status.tool_count = len(registered)
+            except UpstreamConfigError:
+                if client is not None:
+                    client.close()
+                raise
+            except (OSError, UpstreamError) as exc:
+                if client is not None:
+                    client.close()
+                status.error = error_payload(exc)
+        self._tool_order = tuple(ordered_names)
 
 
-def _read_upstream_servers(path: str) -> dict[str, Any]:
+def load_upstream_config_snapshot(path: str | Path) -> UpstreamConfigSnapshot:
     config_path = Path(path).expanduser()
     try:
-        raw = json.loads(config_path.read_text(encoding="utf-8"))
+        text = config_path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise UpstreamConfigError(f"Could not read upstream config {path!r}: {exc}") from exc
+        raise UpstreamConfigError(f"Could not read upstream config {str(config_path)!r}: {exc}") from exc
+    try:
+        raw = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
     except json.JSONDecodeError as exc:
-        raise UpstreamConfigError(f"Upstream config {path!r} is not valid JSON: {exc}") from exc
+        raise UpstreamConfigError(
+            f"Upstream config {str(config_path)!r} is not valid JSON: {exc}"
+        ) from exc
     if not isinstance(raw, dict):
         raise UpstreamConfigError("Upstream config must be a JSON object.")
     servers = raw.get("servers", raw)
     if not isinstance(servers, dict):
         raise UpstreamConfigError("Upstream config must contain a servers object.")
-    return servers
+    configs = tuple(parse_server_config(alias, value) for alias, value in servers.items())
+    return UpstreamConfigSnapshot(configs=configs, source=str(config_path.resolve(strict=False)))
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise UpstreamConfigError(f"Duplicate JSON key in upstream config: {key!r}.")
+        result[key] = value
+    return result
 
 
 def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
@@ -689,7 +773,12 @@ def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
     if transport == "http":
         transport = "streamable_http"
     if transport not in {"streamable_http", "stdio"}:
-        raise UpstreamConfigError(f"Upstream {alias!r} transport must be streamable_http or stdio.")
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} transport must be streamable_http or stdio."
+        )
+    enabled = value.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise UpstreamConfigError(f"Upstream {alias!r} enabled must be a boolean.")
     try:
         timeout_ms = int(value.get("timeout_ms") or DEFAULT_TIMEOUT_MS)
     except (TypeError, ValueError) as exc:
@@ -701,19 +790,32 @@ def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
     if transport == "stdio":
         validate_stdio_launch(alias, command, args)
     elif not _optional_str(value.get("url")):
-        raise UpstreamConfigError(f"Upstream {alias!r} requires url for streamable_http transport.")
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} requires url for streamable_http transport."
+        )
+    include_tools = _string_tuple(
+        value.get("include_tools"), field_name="include_tools", alias=alias
+    )
+    exclude_tools = _string_tuple(
+        value.get("exclude_tools"), field_name="exclude_tools", alias=alias
+    )
+    overlap = sorted(set(include_tools) & set(exclude_tools))
+    if overlap:
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} cannot include and exclude the same tools: {', '.join(overlap)}."
+        )
     return UpstreamServerConfig(
         alias=alias,
         transport=transport,
-        enabled=bool(value.get("enabled", True)),
+        enabled=enabled,
         url=_optional_str(value.get("url")),
         command=command,
         args=args,
         env=_env_dict(value.get("env"), field_name="env", alias=alias),
         headers=_string_dict(value.get("headers"), field_name="headers", alias=alias),
         authorization_env=_optional_str(value.get("authorization_env")),
-        include_tools=_string_tuple(value.get("include_tools"), field_name="include_tools", alias=alias),
-        exclude_tools=_string_tuple(value.get("exclude_tools"), field_name="exclude_tools", alias=alias),
+        include_tools=include_tools,
+        exclude_tools=exclude_tools,
         timeout_ms=timeout_ms,
     )
 
@@ -728,14 +830,20 @@ def build_client(
     return HttpUpstreamClient(config, protocol_version, secret_resolver=secret_resolver)
 
 
-def filter_tools(tools: list[dict[str, Any]], config: UpstreamServerConfig) -> list[dict[str, Any]]:
+def filter_tools(
+    tools: list[dict[str, Any]], config: UpstreamServerConfig
+) -> list[dict[str, Any]]:
     included = set(config.include_tools)
     excluded = set(config.exclude_tools)
     result: list[dict[str, Any]] = []
     for tool in tools:
         name = tool.get("name")
         if not isinstance(name, str):
-            continue
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream tool definition had a non-string name.",
+                category="protocol",
+            )
         if included and name not in included:
             continue
         if name in excluded:
@@ -744,45 +852,78 @@ def filter_tools(tools: list[dict[str, Any]], config: UpstreamServerConfig) -> l
     return result
 
 
-def namespaced_tool_definition(alias: str, public_name: str, tool: dict[str, Any]) -> dict[str, Any]:
-    definition = dict(tool)
-    remote_name = str(tool.get("name"))
+def namespaced_tool_name(alias: str, remote_name: str) -> str:
+    if not remote_name or any(ord(char) < 32 for char in remote_name):
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream tool name was empty or contained control characters.",
+            category="protocol",
+        )
+    public_name = f"{alias}__{remote_name}"
+    if len(public_name) > MAX_TOOL_NAME_CHARS:
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Namespaced upstream tool name exceeded the supported length.",
+            category="protocol",
+        )
+    return public_name
+
+
+def namespaced_tool_definition(
+    public_name: str, tool: dict[str, Any]
+) -> dict[str, Any]:
+    input_schema = tool.get("inputSchema")
+    if not isinstance(input_schema, dict):
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream tool definition did not contain an object inputSchema.",
+            category="protocol",
+        )
+    annotations = tool.get("annotations")
+    if annotations is not None and not isinstance(annotations, dict):
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream tool annotations were not an object.",
+            category="protocol",
+        )
+    output_schema = tool.get("outputSchema")
+    if output_schema is not None and not isinstance(output_schema, dict):
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream tool outputSchema was not an object.",
+            category="protocol",
+        )
+    definition = copy.deepcopy(tool)
     definition["name"] = public_name
-    title = tool.get("title")
-    definition["title"] = str(title) if isinstance(title, str) and title else f"{alias}: {remote_name}"
-    description = tool.get("description")
-    prefix = f"Proxied upstream MCP tool {remote_name!r} from {alias!r}."
-    definition["description"] = f"{prefix} {description}" if isinstance(description, str) and description else prefix
-    if not isinstance(definition.get("inputSchema"), dict):
-        definition["inputSchema"] = loose_object_schema()
-    annotations = definition.get("annotations")
-    definition["annotations"] = dict(annotations) if isinstance(annotations, dict) else {}
     return definition
-
-
-def profiled_definition(definition: dict[str, Any], tool_profile: str) -> dict[str, Any]:
-    result = json.loads(json.dumps(definition))
-    if tool_profile == "compat-readonly-all":
-        annotations = result.get("annotations")
-        if not isinstance(annotations, dict):
-            annotations = {}
-            result["annotations"] = annotations
-        annotations.update({"readOnlyHint": True, "destructiveHint": False})
-    return result
 
 
 def normalize_tool_result(result: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict):
-        return upstream_error_result("UPSTREAM_PROTOCOL_ERROR", "Upstream tools/call result was not an object.", category="protocol")
-    normalized = dict(result)
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream tools/call result was not an object.",
+            category="protocol",
+        )
+    normalized = copy.deepcopy(result)
     content = normalized.get("content")
-    if not isinstance(content, list):
-        structured = normalized.get("structuredContent")
-        normalized["content"] = [
-            {"type": "text", "text": json.dumps(structured if structured is not None else normalized, ensure_ascii=False)}
-        ]
-    if "isError" not in normalized:
+    if content is None:
+        normalized["content"] = []
+    elif not isinstance(content, list) or not all(isinstance(item, dict) for item in content):
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream tools/call content was not an array of content objects.",
+            category="protocol",
+        )
+    is_error = normalized.get("isError")
+    if is_error is None:
         normalized["isError"] = False
+    elif not isinstance(is_error, bool):
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream tools/call isError was not a boolean.",
+            category="protocol",
+        )
     return normalized
 
 
@@ -793,16 +934,21 @@ def upstream_error_result(
     category: str = "runtime",
     retryable: bool = False,
     details: dict[str, Any] | None = None,
+    alias: str | None = None,
+    tool_name: str | None = None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "ok": False,
+    error: dict[str, Any] = {
         "code": code,
         "message": message,
         "category": category,
         "retryable": retryable,
+        "details": copy.deepcopy(details or {}),
     }
-    if details:
-        payload["details"] = details
+    payload: dict[str, Any] = {"ok": False, "error": error}
+    if alias is not None:
+        payload["upstream_alias"] = alias
+    if tool_name is not None:
+        payload["tool_name"] = tool_name
     return {
         "content": [{"type": "text", "text": message}],
         "structuredContent": payload,
@@ -810,27 +956,66 @@ def upstream_error_result(
     }
 
 
-def decode_http_rpc_response(raw: bytes, content_type: str) -> dict[str, Any]:
+def _read_bounded_response(response: Any) -> bytes:
+    raw = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise UpstreamError(
+            "UPSTREAM_RESPONSE_TOO_LARGE",
+            "Upstream response exceeded the maximum supported size.",
+            category="protocol",
+        )
+    return raw
+
+
+def decode_http_rpc_response(
+    raw: bytes,
+    content_type: str,
+    *,
+    expected_id: int | None = None,
+) -> dict[str, Any]:
     text = raw.decode("utf-8")
-    if "text/event-stream" not in content_type:
+    if "text/event-stream" not in content_type.lower():
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             return parsed
-        raise UpstreamError("UPSTREAM_PROTOCOL_ERROR", "Upstream HTTP response JSON was not an object.", category="protocol")
-    data_lines: list[str] = []
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream HTTP response JSON was not an object.",
+            category="protocol",
+        )
+    events: list[str] = []
+    current: list[str] = []
     for line in text.splitlines():
+        if not line:
+            if current:
+                events.append("\n".join(current))
+                current = []
+            continue
         if line.startswith("data:"):
-            data_lines.append(line.removeprefix("data:").strip())
-    if not data_lines:
-        raise UpstreamError("UPSTREAM_PROTOCOL_ERROR", "Upstream SSE response did not include data lines.", category="protocol")
-    parsed = json.loads("\n".join(data_lines))
-    if not isinstance(parsed, dict):
-        raise UpstreamError("UPSTREAM_PROTOCOL_ERROR", "Upstream SSE data was not a JSON object.", category="protocol")
-    return parsed
-
-
-def loose_object_schema() -> dict[str, Any]:
-    return {"type": "object", "additionalProperties": True}
+            current.append(line.removeprefix("data:").lstrip())
+    if current:
+        events.append("\n".join(current))
+    if not events:
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream SSE response did not include data events.",
+            category="protocol",
+        )
+    candidates: list[dict[str, Any]] = []
+    for event in events:
+        parsed = json.loads(event)
+        if not isinstance(parsed, dict):
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream SSE data was not a JSON object.",
+                category="protocol",
+            )
+        candidates.append(parsed)
+    if expected_id is not None:
+        for candidate in candidates:
+            if candidate.get("id") == expected_id:
+                return candidate
+    return candidates[0]
 
 
 def safe_target(config: UpstreamServerConfig) -> str | None:
@@ -846,75 +1031,53 @@ def safe_target(config: UpstreamServerConfig) -> str | None:
     return urllib.parse.urlunsplit(redacted)
 
 
-def invalid_config_status(alias: str, value: Any, exc: BaseException) -> UpstreamStatus:
-    return UpstreamStatus(
-        alias=alias,
-        transport=best_effort_transport(value),
-        enabled=best_effort_enabled(value),
-        error=error_payload(exc),
-        target=best_effort_target(value),
-    )
-
-
-def best_effort_transport(value: Any) -> str:
-    if isinstance(value, dict):
-        transport = value.get("transport")
-        if isinstance(transport, str) and transport:
-            return "streamable_http" if transport == "http" else transport
-    return "configuration"
-
-
-def best_effort_enabled(value: Any) -> bool:
-    if isinstance(value, dict):
-        return bool(value.get("enabled", True))
-    return False
-
-
-def best_effort_target(value: Any) -> str | None:
-    if not isinstance(value, dict):
-        return None
-    transport = best_effort_transport(value)
-    if transport == "stdio":
-        command = value.get("command")
-        if not isinstance(command, str):
-            return None
-        args = value.get("args")
-        preview_args = [item for item in args[:3] if isinstance(item, str)] if isinstance(args, list) else []
-        suffix = " ..." if isinstance(args, list) and len(args) > 3 else ""
-        return f"{command} {' '.join(preview_args)}{suffix}".strip()
-    url = value.get("url")
-    if not isinstance(url, str) or not url:
-        return None
-    parsed = urllib.parse.urlsplit(url)
-    redacted = parsed._replace(query="", fragment="")
-    return urllib.parse.urlunsplit(redacted)
-
-
 def validate_stdio_launch(alias: str, command: str | None, args: tuple[str, ...]) -> None:
     if not command or not command.strip():
         raise UpstreamConfigError(f"Upstream {alias!r} requires command for stdio transport.")
     command_text = command.strip()
     if "\n" in command_text or "\r" in command_text:
-        raise UpstreamConfigError(f"Upstream {alias!r} command must be a single executable path or name.")
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} command must be a single executable path or name."
+        )
     first_word = command_text.split()[0].strip('"\'').lower()
     leaf = command_text.strip('"\'').replace("\\", "/").rsplit("/", 1)[-1].lower()
     if first_word in FORBIDDEN_STDIO_COMMANDS or leaf in FORBIDDEN_STDIO_COMMANDS:
-        raise UpstreamConfigError(f"Upstream {alias!r} command cannot be a shell interpreter.")
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} command cannot be a shell interpreter."
+        )
     if SHELL_FRAGMENT_RE.search(command_text):
-        raise UpstreamConfigError(f"Upstream {alias!r} command cannot contain shell control syntax.")
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} command cannot contain shell control syntax."
+        )
     for index, arg in enumerate(args):
         if "\n" in arg or "\r" in arg or SHELL_FRAGMENT_RE.search(arg):
-            raise UpstreamConfigError(f"Upstream {alias!r} args[{index}] cannot contain shell control syntax.")
+            raise UpstreamConfigError(
+                f"Upstream {alias!r} args[{index}] cannot contain shell control syntax."
+            )
 
 
-def resolve_env_config(env_config: dict[str, Any], *, secret_resolver: Callable[[str], str] | None = None) -> dict[str, str]:
+def base_upstream_environment() -> dict[str, str]:
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in UPSTREAM_BASE_ENV_NAMES
+    }
+
+
+def resolve_env_config(
+    env_config: dict[str, Any],
+    *,
+    secret_resolver: Callable[[str], str] | None = None,
+) -> dict[str, str]:
     resolved: dict[str, str] = {}
     for name, value in env_config.items():
         if isinstance(value, str):
             resolved[name] = value
             continue
         if not isinstance(value, dict):
-            raise UpstreamConfigError(f"Environment value for {name!r} must be a string or reference object.")
+            raise UpstreamConfigError(
+                f"Environment value for {name!r} must be a string or reference object."
+            )
         env_ref = value.get("env_ref")
         secret_ref = value.get("secret_ref")
         if isinstance(env_ref, str) and env_ref:
@@ -922,10 +1085,12 @@ def resolve_env_config(env_config: dict[str, Any], *, secret_resolver: Callable[
             continue
         if isinstance(secret_ref, str) and secret_ref:
             if secret_resolver is None:
-                raise UpstreamConfigError("secret_ref requires a configured secret vault.")
+                raise UpstreamConfigError("secret_ref requires a configured secret resolver.")
             resolved[name] = secret_resolver(secret_ref)
             continue
-        raise UpstreamConfigError(f"Environment reference for {name!r} must contain env_ref or secret_ref.")
+        raise UpstreamConfigError(
+            f"Environment reference for {name!r} must contain env_ref or secret_ref."
+        )
     return resolved
 
 
@@ -938,20 +1103,21 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
             "retryable": exc.retryable,
         }
         if exc.details:
-            payload["details"] = exc.details
+            payload["details"] = copy.deepcopy(exc.details)
         return payload
     if isinstance(exc, UpstreamConfigError):
-        return {"code": "UPSTREAM_CONFIG_INVALID", "message": str(exc), "category": "configuration", "retryable": False}
-    return {"code": "UPSTREAM_INITIALIZATION_FAILED", "message": str(exc), "category": "runtime", "retryable": True}
-
-
-def drain_queue(items: queue.Queue[str]) -> list[str]:
-    drained: list[str] = []
-    while True:
-        try:
-            drained.append(items.get_nowait())
-        except queue.Empty:
-            return drained
+        return {
+            "code": "UPSTREAM_CONFIG_INVALID",
+            "message": str(exc),
+            "category": "configuration",
+            "retryable": False,
+        }
+    return {
+        "code": "UPSTREAM_INITIALIZATION_FAILED",
+        "message": str(exc),
+        "category": "runtime",
+        "retryable": True,
+    }
 
 
 def _optional_str(value: Any) -> str | None:
@@ -966,15 +1132,25 @@ def _string_tuple(value: Any, *, field_name: str, alias: str) -> tuple[str, ...]
     if value is None:
         return ()
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise UpstreamConfigError(f"Upstream {alias!r} field {field_name} must be a list of strings.")
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} field {field_name} must be a list of strings."
+        )
+    if len(set(value)) != len(value):
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} field {field_name} must not contain duplicates."
+        )
     return tuple(value)
 
 
 def _string_dict(value: Any, *, field_name: str, alias: str) -> dict[str, str]:
     if value is None:
         return {}
-    if not isinstance(value, dict) or not all(isinstance(key, str) and isinstance(item, str) for key, item in value.items()):
-        raise UpstreamConfigError(f"Upstream {alias!r} field {field_name} must be an object with string keys and values.")
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    ):
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} field {field_name} must be an object with string keys and values."
+        )
     return dict(value)
 
 
@@ -982,11 +1158,15 @@ def _env_dict(value: Any, *, field_name: str, alias: str) -> dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise UpstreamConfigError(f"Upstream {alias!r} field {field_name} must be an object.")
+        raise UpstreamConfigError(
+            f"Upstream {alias!r} field {field_name} must be an object."
+        )
     result: dict[str, Any] = {}
     for key, item in value.items():
         if not isinstance(key, str):
-            raise UpstreamConfigError(f"Upstream {alias!r} field {field_name} must use string keys.")
+            raise UpstreamConfigError(
+                f"Upstream {alias!r} field {field_name} must use string keys."
+            )
         if isinstance(item, str):
             result[key] = item
             continue

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from tests.compliance.mcp_client import MCPError
 from tests.compliance.test_support import ComplianceTestCase
 
@@ -125,8 +127,15 @@ class DeterministicE2ETests(ComplianceTestCase):
             if "view_image" not in names:
                 self.skipTest("view_image is P1 and not exposed by this server")
             image = client.call_tool("view_image", {"path": "assets/screenshot.png"})
-            self.assert_tool_success(image)
+            payload = self.assert_tool_success(image)
             blob = self.tool_text(image)
-            self.assertRegex(blob, r"(data:image/png;base64|image/png)")
+            self.assertIn("image/png", blob)
+            image_blocks = [item for item in image.get("content", []) if item.get("type") == "image"]
+            self.assertEqual(len(image_blocks), 1)
+            encoded = image_blocks[0].get("data")
+            self.assertIsInstance(encoded, str)
+            self.assertEqual(json.dumps(image).count(str(encoded)), 1)
+            self.assertNotIn("base64", payload)
+            self.assertNotIn("data_url", payload)
             bad = client.call_tool("view_image", {"path": "assets/not-image.txt"})
             self.assertTrue(bad.get("isError"), f"non-image input must fail: {bad!r}")

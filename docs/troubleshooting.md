@@ -2,7 +2,9 @@
 
 ## Protocol Version Errors
 
-HTTP clients should send `MCP-Protocol-Version: 2025-06-18` after initialization. Unsupported versions return a JSON-RPC error.
+HTTP clients should send the version negotiated at initialization, normally
+`MCP-Protocol-Version: 2025-11-25`. Compatibility clients may negotiate
+`2025-06-18`; unsupported versions return a JSON-RPC error.
 
 ## SANDBOX_UNAVAILABLE
 

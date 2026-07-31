@@ -1,0 +1,258 @@
+name: release
+
+# One action releases: push a v<version> tag and everything below runs from
+# that single commit — evidence workflows, package builds, registry publishes,
+# and the GitHub Release. Evidence and publishes are jobs of this one run, so
+# the "same release commit" audit property holds by construction; no run ids,
+# no inputs, no branch/tag dispatch choices.
+#
+# PyPI and npm trusted publishing must be configured with this workflow's
+# filename (release.yml) and the pypi / npm environments.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      npm_version: ${{ steps.npm.outputs.version }}
+      npm_dist_tag: ${{ steps.npm.outputs.dist_tag }}
+      npm_already_published: ${{ steps.npm.outputs.already_published }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Validate release metadata
+        run: python scripts/check_release_versions.py --tag "$GITHUB_REF_NAME"
+
+      - name: Check whether the npm launcher version is already published
+        id: npm
+        run: |
+          version="$(python -c 'import json; print(json.load(open("npm/coding-tools-mcp/package.json"))["version"])')"
+          if npm view "coding-tools-mcp@${version}" version >/dev/null 2>&1; then
+            already=true
+          else
+            already=false
+          fi
+          case "$version" in
+            *-*) dist_tag=next ;;
+            *) dist_tag=latest ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
+          echo "already_published=$already" >> "$GITHUB_OUTPUT"
+
+  compliance:
+    name: Evidence
+    uses: ./.github/workflows/compliance.yml
+
+  real-workloads:
+    name: Evidence
+    uses: ./.github/workflows/real-workloads.yml
+
+  swebench-lite:
+    name: Evidence
+    uses: ./.github/workflows/swebench-lite.yml
+
+  build:
+    name: Build distribution
+    needs: [validate, compliance, real-workloads, swebench-lite]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+
+      - name: Build source and wheel distributions
+        run: python -m build
+
+      - name: Check distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Verify wheel contents and installation
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel = glob.glob("dist/*.whl")
+          if len(wheel) != 1:
+              raise SystemExit(f"expected one wheel, found {wheel}")
+          required = {
+              "coding_tools_mcp/__init__.py",
+              "mcp_desktop_client/app.py",
+              "mcp_desktop_client/locales/app_zh_CN.qm",
+              "mcp_desktop_client/locales/app_zh_CN.ts",
+          }
+          with zipfile.ZipFile(wheel[0]) as archive:
+              names = set(archive.namelist())
+              missing = sorted(required - names)
+              if missing:
+                  raise SystemExit(f"wheel is missing: {missing}")
+              entry_points = archive.read(
+                  next(name for name in names if name.endswith("entry_points.txt"))
+              ).decode()
+              for command in ("coding-tools-mcp", "coding-tools-mcp-desktop"):
+                  if command not in entry_points:
+                      raise SystemExit(f"wheel entry point is missing: {command}")
+          PY
+          python -m venv .package-verify
+          .package-verify/bin/python -m pip install dist/*.whl
+          .package-verify/bin/coding-tools-mcp --help >/dev/null
+          .package-verify/bin/python - <<'PY'
+          import coding_tools_mcp
+          import tomllib
+
+          with open("pyproject.toml", "rb") as handle:
+              expected = tomllib.load(handle)["project"]["version"]
+          assert coding_tools_mcp.__version__ == expected
+          PY
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/coding-tools-mcp/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  pack-npm:
+    name: Pack npm launcher
+    needs: [validate, compliance, real-workloads, swebench-lite]
+    if: needs.validate.outputs.npm_already_published == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Test launcher
+        run: make check-npm-launcher
+
+      - name: Pack launcher
+        working-directory: npm/coding-tools-mcp
+        run: npm pack
+
+      - name: Upload npm package artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: npm-package-distribution
+          path: npm/coding-tools-mcp/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-npm:
+    name: Publish npm launcher
+    needs: [pack-npm, validate]
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/coding-tools-mcp
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download npm package artifact
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: npm-package-distribution
+          path: dist
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Install OIDC-capable npm CLI
+        run: npm install --global npm@11.18.0
+
+      - name: Publish launcher with provenance
+        # The ./ prefix is load-bearing: without it npm parses the argument as
+        # a GitHub owner/repo shorthand instead of a local tarball path.
+        run: >-
+          npm publish ./dist/*.tgz --access public --provenance
+          --tag "${{ needs.validate.outputs.npm_dist_tag }}"
+
+  github-release:
+    name: Publish GitHub Release
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Create release with changelog notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '/^## /{flag = ($0 ~ "^## " ver " ")} flag' CHANGELOG.md > release-notes.md
+          if ! test -s release-notes.md; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
+          prerelease=()
+          case "$version" in
+            *.dev*) prerelease=(--prerelease) ;;
+          esac
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; leaving it unchanged"
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md "${prerelease[@]}"
+          fi

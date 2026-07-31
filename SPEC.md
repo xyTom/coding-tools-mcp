@@ -1,112 +1,71 @@
 # Coding Tools MCP Spec
 
-This repository implements the `coding-tools-mcp-v0.1` profile defined in [docs/profile-v0.1.md](docs/profile-v0.1.md).
+This repository implements the `coding-tools-mcp-v0.2` runtime contract defined
+in [docs/runtime-contract-v0.2.md](docs/runtime-contract-v0.2.md).
 
-## Scope
+## Product boundary
 
-The server exposes coding runtime primitives over MCP. It is intentionally lower-level than a product agent wrapper. Clients can inspect, edit, test, and review a workspace, but cannot ask this server to route prompts to an external coding agent, manage accounts, search the web, spawn subagents, or operate cloud tasks.
+The server exposes low-level coding primitives over MCP: inspect a workspace,
+apply structured patches, run and interact with commands, and inspect Git. It is
+not an agent wrapper and does not expose accounts, memory, cloud tasks, web
+search, model routing, plugins, image generation, or subagent orchestration.
+
+## Fixed tool model
+
+There is one stable catalog. The runtime has no tool profiles, no `edit_file`,
+no dynamic `tools/list_changed`, and no required `open_workspace` call.
+`apply_patch` is the only direct file-write tool. `safe`, `trusted`, and
+`dangerous` are command permission policies and never alter `tools/list`.
+
+The default catalog contains 20 tools:
+
+- runtime/context: `server_info`, `check_exec_environment`, `get_default_cwd`,
+  `set_default_cwd`
+- workspace inspection: `read_file`, `list_dir`, `list_files`, `search_text`
+- mutation: `apply_patch`
+- processes: `exec_command`, `write_stdin`, `read_output`, `kill_session`
+- Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`
+- policy/image: `request_permissions`, `view_image`
+
+`view_image` can be disabled as an installation capability. All other tools are
+fixed.
 
 ## Protocol
 
-- MCP profile target: `2025-06-18`
-- Latest upstream MCP specification checked during contract review: `2025-11-25`
-- P0 transport: Streamable HTTP at `/mcp`
-- stdio transport: newline-delimited JSON-RPC via `--stdio`
-- Initialize response advertises tools and logging only.
-- `tools/list` returns a stable default P0 tool set.
-- `tools/call` returns MCP `content`, `structuredContent`, and `isError`.
+- MCP `2025-11-25` is current; `2025-06-18` is explicitly supported.
+- Streamable HTTP uses `/mcp`; stdio uses newline-delimited JSON-RPC.
+- Every HTTP `Mcp-Session-Id` owns an independent `Runtime`.
+- JSON-RPC batches are rejected, cancellation follows `requestId`, and
+  unimplemented logging is not advertised.
+- `content` is agent-readable text normally sized by each tool's per-call
+  limits, with a documented emergency safety ceiling for pathological entries.
+  `structuredContent` is the complete stable machine result. `_meta` is
+  optional UI space only.
+- Root project instructions enter the initialization context automatically.
 
-The implementation is a hand-rolled JSON-RPC MCP server rather than a Python MCP SDK
-server. Its wire shape should remain compatible with the Python SDK `Tool` and
-`CallToolResult` models: tools expose `name`, `title`, `description`,
-`inputSchema`, `outputSchema`, and `annotations`; tool results expose `content`,
-optional `structuredContent`, and optional `isError`.
+## Correctness guarantees
 
-## Workspace Model
+Patch operations are staged before writing, use same-directory fsynced temporary
+files and atomic replacement, preserve mode/BOM/newlines, detect stale
+baselines, and roll back multi-file failures. Filesystem rollback failure is
+reported explicitly rather than hidden.
 
-Startup selects one workspace root:
+Command sessions use a 10-second default yield, real POSIX PTYs, bounded active
+and retained-session stores, per-session and runtime output budgets, TTL cleanup,
+and explicit `next_action` objects for polling or truncated output.
 
-```bash
-coding-tools-mcp --workspace /path/to/repo
-```
+## Security boundary
 
-All path inputs are workspace-relative. The server rejects absolute paths by default, rejects `..`, canonicalizes existing paths, canonicalizes the nearest existing parent for writes, and rejects symlink escapes.
+Direct tools reject absolute paths, traversal, NULs, and symlink escapes.
+`exec_command` also applies permission policy and Linux Landlock when available,
+but remains a coding runtime rather than a complete container sandbox. Remote
+deployment must use bearer or OAuth authentication. OAuth supports protected
+resource metadata, PKCE S256, exact redirect binding, and RFC 7591 dynamic client
+registration.
 
-## Tool Set
+## Compatibility
 
-Default P0 tools:
-
-- `read_file`: read UTF-8 text slices with line and byte limits.
-- `list_dir`: list directory entries with default exclusions.
-- `list_files`: list files by glob with result caps.
-- `search_text`: literal or regex text search with context and truncation.
-- `apply_patch`: patch envelope for add, update, delete, and move.
-- `exec_command`: run bounded workspace commands and return final output or session id.
-- `write_stdin`: write to server-managed running sessions.
-- `kill_session`: terminate server-managed sessions.
-- `git_status`: structured git working tree status.
-- `git_diff`: bounded unified diff with path filters.
-- `request_permissions`: structured non-granting permission path when elicitation is unavailable.
-
-P1:
-
-- `view_image`: image data output. The current implementation enables it by default and can disable it with `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0`.
-
-## Forbidden Capabilities
-
-The implementation must not expose:
-
-- External agent login, account, token, or keyring management.
-- External agent memory or personalization.
-- External agent cloud tasks or remote queues.
-- Web search or arbitrary network fetch as a direct tool.
-- Image generation.
-- Subagent orchestration.
-- Model routing or paid account selection.
-- Plugin marketplace or connector installation.
-- High-level prompt wrapper tools.
-
-## Error Model
-
-Tool execution failures return `isError: true` and structured content:
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "PATH_OUTSIDE_WORKSPACE",
-    "message": "Path escapes the configured workspace.",
-    "category": "security",
-    "retryable": false,
-    "details": {}
-  }
-}
-```
-
-Unknown JSON-RPC methods and malformed protocol-level requests use JSON-RPC errors.
-
-## Contract Status
-
-Contract verification on 2026-05-16 covers the current implementation with
-compliance tests for:
-
-- `initialize`, repeated/fresh-client `tools/list`, and all required tools.
-- Tool `inputSchema`, permissive `outputSchema`, annotations, structured
-  success/error results, unknown-tool errors, and text mirrors of
-  `structuredContent`.
-- Streamable HTTP and stdio happy paths, including clean stdout for stdio and
-  rejection of unsupported `MCP-Protocol-Version` headers on HTTP.
-- Central argument validation against each advertised `inputSchema`.
-- `view_image` returning both structured image metadata/data URL and MCP image
-  content when `output: "mcp_image"`.
-
-Known protocol limitation: `request_permissions` uses a structured
-`ELICITATION_UNSUPPORTED` fallback because MCP elicitation support varies across
-clients and is not implemented in this server yet. It never silently grants
-dangerous permissions.
-
-## Implementation Notes
-
-- Runtime implementation: [coding_tools_mcp/server.py](coding_tools_mcp/server.py)
-- Test profile: [tests/compliance](tests/compliance)
-- Current profile document: [docs/profile-v0.1.md](docs/profile-v0.1.md)
+Version 0.2 changes model-facing result text from a JSON mirror to summaries.
+Clients that parsed `content[0].text` as JSON must read `structuredContent`.
+Image base64 now appears once, in the MCP image block. Tool profiles and the
+`view_image.output` selector are removed.

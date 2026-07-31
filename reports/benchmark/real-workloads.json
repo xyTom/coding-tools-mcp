@@ -8,7 +8,7 @@
       "category": "python",
       "checks": [
         {
-          "count": 133,
+          "count": 148,
           "name": "list_files",
           "ok": true
         },
@@ -38,14 +38,14 @@
           "--depth",
           "1",
           "https://github.com/pallets/click.git",
-          "/tmp/codex-real-workloads-jfos6ieh/python-click"
+          "/tmp/codex-real-workloads-sluu9_7_/python-click"
         ],
-        "elapsed_seconds": 0.589,
+        "elapsed_seconds": 0.796,
         "returncode": 0,
-        "stderr": "Cloning into '/tmp/codex-real-workloads-jfos6ieh/python-click'...\n",
+        "stderr": "Cloning into '/tmp/codex-real-workloads-sluu9_7_/python-click'...\n",
         "stdout": ""
       },
-      "commit": "c9e94136b39b1fad4a47ac0d4478fa372bd07ff8",
+      "commit": "00e592cea702e0b2caa0dee42489fdb1c22cd845",
       "name": "python-click",
       "repo": "https://github.com/pallets/click.git",
       "status": "PASS"
@@ -84,11 +84,11 @@
           "--depth",
           "1",
           "https://github.com/jshttp/mime-types.git",
-          "/tmp/codex-real-workloads-jfos6ieh/node-mime-types"
+          "/tmp/codex-real-workloads-sluu9_7_/node-mime-types"
         ],
-        "elapsed_seconds": 0.457,
+        "elapsed_seconds": 0.45,
         "returncode": 0,
-        "stderr": "Cloning into '/tmp/codex-real-workloads-jfos6ieh/node-mime-types'...\n",
+        "stderr": "Cloning into '/tmp/codex-real-workloads-sluu9_7_/node-mime-types'...\n",
         "stdout": ""
       },
       "commit": "3a1187ee21388efe46b916d4991589d595bcb26c",
@@ -130,14 +130,14 @@
           "--depth",
           "1",
           "https://github.com/dtolnay/itoa.git",
-          "/tmp/codex-real-workloads-jfos6ieh/rust-itoa"
+          "/tmp/codex-real-workloads-sluu9_7_/rust-itoa"
         ],
-        "elapsed_seconds": 0.471,
+        "elapsed_seconds": 0.682,
         "returncode": 0,
-        "stderr": "Cloning into '/tmp/codex-real-workloads-jfos6ieh/rust-itoa'...\n",
+        "stderr": "Cloning into '/tmp/codex-real-workloads-sluu9_7_/rust-itoa'...\n",
         "stdout": ""
       },
-      "commit": "af77385d0daf4d0e949e81f2588be2e44f69f086",
+      "commit": "1577ed901354d0d7448ac162328f9dbf5183124c",
       "name": "rust-itoa",
       "repo": "https://github.com/dtolnay/itoa.git",
       "status": "PASS"
@@ -176,11 +176,11 @@
           "--depth",
           "1",
           "https://github.com/google/uuid.git",
-          "/tmp/codex-real-workloads-jfos6ieh/go-uuid"
+          "/tmp/codex-real-workloads-sluu9_7_/go-uuid"
         ],
-        "elapsed_seconds": 0.47,
+        "elapsed_seconds": 0.761,
         "returncode": 0,
-        "stderr": "Cloning into '/tmp/codex-real-workloads-jfos6ieh/go-uuid'...\n",
+        "stderr": "Cloning into '/tmp/codex-real-workloads-sluu9_7_/go-uuid'...\n",
         "stdout": ""
       },
       "commit": "2d3c2a9cc518326daf99a383f07c4d3c44317e4d",
@@ -192,7 +192,7 @@
       "category": "monorepo",
       "checks": [
         {
-          "count": 221,
+          "count": 268,
           "name": "list_files",
           "ok": true
         },
@@ -215,7 +215,7 @@
           "stdout": "monorepo-workload-ok\n"
         },
         {
-          "bytes": 1048576,
+          "bytes": 147999,
           "name": "large_file",
           "ok": true,
           "path": "mcp-large-workload.txt"
@@ -240,14 +240,14 @@
           "--depth",
           "1",
           "https://github.com/changesets/changesets.git",
-          "/tmp/codex-real-workloads-jfos6ieh/monorepo-changesets"
+          "/tmp/codex-real-workloads-sluu9_7_/monorepo-changesets"
         ],
-        "elapsed_seconds": 0.595,
+        "elapsed_seconds": 0.784,
         "returncode": 0,
-        "stderr": "Cloning into '/tmp/codex-real-workloads-jfos6ieh/monorepo-changesets'...\n",
+        "stderr": "Cloning into '/tmp/codex-real-workloads-sluu9_7_/monorepo-changesets'...\n",
         "stdout": ""
       },
-      "commit": "372523f4c2ee4ffeb8330d444d47ffb6d0af5126",
+      "commit": "7fd0d9193a7b8bbbb01955adefc68b38d3070616",
       "name": "monorepo-changesets",
       "repo": "https://github.com/changesets/changesets.git",
       "status": "PASS"

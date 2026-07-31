@@ -4,8 +4,8 @@
     "rev-parse",
     "HEAD"
   ],
-  "elapsed_seconds": 0.002,
+  "elapsed_seconds": 0.007,
   "returncode": 0,
   "stderr": "",
-  "stdout": "c9e94136b39b1fad4a47ac0d4478fa372bd07ff8\n"
+  "stdout": "00e592cea702e0b2caa0dee42489fdb1c22cd845\n"
 }

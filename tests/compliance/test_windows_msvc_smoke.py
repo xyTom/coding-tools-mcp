@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,63 @@ def has_msvc_environment() -> bool:
         and bool(os.environ.get("INCLUDE"))
         and bool(os.environ.get("LIB"))
     )
+
+
+class WindowsProcessSmokeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("requires Windows")
+
+    def test_windows_tty_request_is_explicitly_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with StdioMCPClient(workspace) as client:
+                result = client.call_tool(
+                    "exec_command",
+                    {
+                        "cmd": "echo tty-check",
+                        "tty": True,
+                        "timeout_ms": 5000,
+                        "yield_time_ms": 0,
+                    },
+                )
+                self.assertIs(result.get("isError"), True, result)
+                payload = structured_payload(result)
+                self.assertEqual(payload.get("error", {}).get("code"), "TTY_UNSUPPORTED")
+
+    def test_windows_force_kill_cleans_background_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            command = subprocess.list2cmdline(
+                [sys.executable, "-c", "import time; time.sleep(30)"]
+            )
+            with StdioMCPClient(
+                workspace,
+                extra_args=["--permission-mode", "trusted"],
+            ) as client:
+                started = assert_tool_success(
+                    self,
+                    client.call_tool(
+                        "exec_command",
+                        {
+                            "cmd": command,
+                            "timeout_ms": 60_000,
+                            "yield_time_ms": 0,
+                        },
+                    ),
+                )
+                self.assertEqual(started.get("status"), "running", started)
+                session_id = started.get("session_id")
+                self.assertIsInstance(session_id, str, started)
+
+                killed = assert_tool_success(
+                    self,
+                    client.call_tool(
+                        "kill_session",
+                        {"session_id": session_id, "signal": "KILL", "wait_ms": 5000},
+                    ),
+                )
+                self.assertIn(killed.get("status"), {"killed", "exited"}, killed)
 
 
 class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
@@ -83,7 +141,6 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
                 run_payload = assert_tool_success(self, run_result)
                 self.assertEqual(run_payload.get("exit_code"), 0, run_payload)
                 self.assertIn("ok", str(run_payload.get("stdout") or ""))
-
 
 def write_hello_c(workspace: Path) -> None:
     (workspace / "hello.c").write_text(

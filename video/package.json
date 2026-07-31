@@ -1,0 +1,19 @@
+{
+  "name": "coding-tools-mcp-promo-video",
+  "private": true,
+  "description": "Remotion source for the promo video. Render: npm install && npm run render",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts Promo out/coding-tools-mcp-promo.mp4"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.499",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "remotion": "^4.0.499"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "typescript": "^5.8.3"
+  }
+}

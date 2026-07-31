@@ -2,6 +2,37 @@
 
 These recipes intentionally use explicit `exec_command` commands. The MCP server does not infer project type, install dependencies automatically, or choose package-manager cache policy.
 
+## Foreground and background results
+
+The server always exposes the same four process tools: `exec_command`,
+`write_stdin`, `read_output`, and `kill_session`. It does not dynamically add a
+tool after a command starts.
+
+`exec_command` waits up to 10 seconds by default. If the command exits in that
+window, the result is complete and no polling call is needed. If it is still
+running, the result contains a `session_id` and an exact `next_action`, for
+example:
+
+```json
+{
+  "status": "running",
+  "session_id": "sess_123",
+  "next_action": {
+    "tool": "write_stdin",
+    "arguments": {
+      "session_id": "sess_123",
+      "chars": "",
+      "yield_time_ms": 10000
+    }
+  }
+}
+```
+
+Calling `write_stdin` with empty `chars` means “wait/poll”; non-empty `chars`
+interacts with the process. `read_output` is for paging retained stdout/stderr
+when a result explicitly says output was truncated (or when compact verbosity
+was requested). It is not an extra step for every command.
+
 Use the external runtime `HOME`, `TMPDIR`, or `cache_dir` reported by `server_info` when you want dependency caches without adding files to the Git worktree. These shell examples assume trusted mode because they use environment expansion:
 
 ```bash

@@ -2,6 +2,9 @@ services:
   coding-tools-mcp:
     build: .
     image: coding-tools-mcp-sandbox:local
+    # PID 1 zombie reaping for exec_command child processes; the server itself
+    # handles SIGTERM so `docker compose stop` exits promptly either way.
+    init: true
     ports:
       - "127.0.0.1:${CODING_TOOLS_MCP_PORT:-8765}:${CODING_TOOLS_MCP_PORT:-8765}"
     environment:

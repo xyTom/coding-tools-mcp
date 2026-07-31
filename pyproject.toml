@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coding-tools-mcp"
-version = "0.1.7"
+version = "0.3.0.dev0"
 description = "Workspace-confined coding tools exposed as an MCP server."
 requires-python = ">=3.11"
 dependencies = [
@@ -26,8 +26,13 @@ Issues = "https://github.com/xyTom/coding-tools-mcp/issues"
 [project.optional-dependencies]
 dev = [
   "mypy>=2.1,<2.2",
+  "PyYAML>=6.0",
   "ruff>=0.15,<0.16",
   "typing_extensions>=4.12",
+]
+desktop = [
+  "PySide6>=6.8,<6.9",
+  "psutil>=7.0,<8",
 ]
 image = [
   "Pillow>=10.0",
@@ -35,9 +40,12 @@ image = [
 
 [project.scripts]
 coding-tools-mcp = "coding_tools_mcp.server:main"
+coding-tools-mcp-desktop = "mcp_desktop_client.app:main"
 
 [tool.setuptools.packages.find]
-include = ["coding_tools_mcp*"]
+where = [".", "apps/desktop-client"]
+include = ["coding_tools_mcp*", "mcp_desktop_client*"]
 
 [tool.setuptools.package-data]
 coding_tools_mcp = ["webui_dist/*"]
+mcp_desktop_client = ["locales/*.qm", "locales/*.ts"]

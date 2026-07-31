@@ -29,6 +29,28 @@ on:
         required: false
         type: boolean
         default: true
+  workflow_call:
+    inputs:
+      instance_ids:
+        required: false
+        type: string
+        default: "sympy__sympy-12419"
+      max_workers:
+        required: false
+        type: string
+        default: "1"
+      require_evaluation_pass:
+        required: false
+        type: boolean
+        default: true
+      prediction_source:
+        required: false
+        type: string
+        default: reference_patch
+      install_swebench:
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   swebench-lite:

@@ -25,3 +25,32 @@ printf ok > "$HOME/coding-tools-write-test"
 printf ok > "$TMPDIR/coding-tools-write-test"
 cat /etc/resolv.conf && getent hosts repo.maven.apache.org
 ```
+
+## Wrong Toolchain Version (nvm, pyenv, rbenv, asdf)
+
+Symptom: `node --version` in your terminal prints v24, but the same command
+through `exec_command` prints the system Node (for example v18).
+
+Cause: version managers only prepend their shim/bin directories to `PATH` in
+*interactive shell rc files* (`~/.zshrc`, `~/.bashrc`). When the MCP host that
+spawned the server was launched from a GUI (desktop app, IDE), it inherited the
+minimal system `PATH`, and `exec_command` — which inherits `PATH` from the
+server process under the default `core` policy — resolves `node` to the system
+copy.
+
+Fixes, in preference order:
+
+1. **Resolve the login-shell `PATH` in your launcher.** If you control the
+   process that spawns the server, ask the user's login shell for its `PATH`
+   once at startup (the same trick VS Code and kimi-code use) and spawn the
+   server with it, so nvm-selected toolchains work no matter how the host app
+   was launched.
+2. **Pass the PATH explicitly** in your MCP host config `env` block, or start
+   the server with an absolute command path (for example the nvm-versioned
+   `.../versions/node/v24.x/bin/node`).
+3. **Broaden inheritance** with `--shell-env-inherit all` /
+   `CODING_TOOLS_MCP_SHELL_ENV_INHERIT=all` when commands also need variables
+   beyond the core set (`NVM_DIR`, `GOPATH`, `JAVA_HOME`, …). Sensitive-looking
+   variables are still filtered outside dangerous mode. This mirrors Codex's
+   `shell_environment_policy.inherit = "all"` default while keeping this
+   server's stricter `core` default.

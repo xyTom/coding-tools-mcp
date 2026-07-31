@@ -154,15 +154,13 @@ resolve_auth_credentials() {
 start_coding_tools_mcp() {
   local workspace="$1"
   local port="$2"
-  local profile="$3"
-  local auth_mode="$4"
-  local token="$5"
-  local server_bin="$6"
+  local auth_mode="$3"
+  local token="$4"
+  local server_bin="$5"
   local args=(
     --workspace "$workspace"
     --host 127.0.0.1
     --port "$port"
-    --tool-profile "$profile"
   )
   case "$auth_mode" in
     bearer) args+=(--auth-token "$token") ;;
@@ -178,13 +176,11 @@ print_tunnel_config() {
   local label="$1"
   local host_placeholder="$2"
   local port="$3"
-  local profile="$4"
-  local auth_mode="$5"
-  local token="$6"
+  local auth_mode="$4"
+  local token="$5"
 
   cat <<EOF
 coding-tools-mcp is listening on http://127.0.0.1:$port/mcp
-Tool profile: $profile
 Auth mode: $auth_mode
 
 $label will print an HTTPS URL.
@@ -198,9 +194,9 @@ Generic MCP clients that support custom headers should use:
 URL: https://<$host_placeholder>/mcp
 Header: Authorization: Bearer $token
 
-Remote MCP clients that cannot send custom bearer headers should use
-CODING_TOOLS_MCP_AUTH_MODE=noauth only with read-only local/testing tunnels,
-or rely on an external auth proxy for authenticated production deployments.
+Remote MCP clients that cannot send custom bearer headers should use OAuth or
+an external authentication proxy. Do not expose the fixed mutation-capable
+tool set through an unauthenticated public tunnel.
 EOF
       ;;
     oauth)
@@ -214,8 +210,7 @@ its OAuth issuer from that request URL unless CODING_TOOLS_MCP_SERVER_URL
 is preset.
 
 OAuth password: $CODING_TOOLS_MCP_OAUTH_PASSWORD
-Client ID: any non-empty client_id is accepted unless you preset CODING_TOOLS_MCP_OAUTH_CLIENT_ID
-Client secret: not required unless you preset CODING_TOOLS_MCP_OAUTH_CLIENT_SECRET
+Client registration: $base/oauth/register (RFC 7591)
 
 Authorization metadata: $base/.well-known/oauth-authorization-server
 Protected resource:     $base/.well-known/oauth-protected-resource
@@ -228,9 +223,26 @@ EOF
 Remote MCP client URL:
 https://<$host_placeholder>/mcp
 
-No Authorization header is used. Keep this profile read-only unless you
-understand the risk of exposing this tunnel publicly.
+No Authorization header is used. The fixed tool set includes mutation and
+command execution; do not expose this tunnel publicly without authentication.
 EOF
       ;;
   esac
+}
+
+# Shared preamble for the provider scripts: resolves the standard env
+# defaults, starts the MCP server, and prints the connection config. The
+# caller then runs its provider-specific tunnel command using $PORT.
+tunnel_setup() {
+  local tool="$1" label="$2" host_placeholder="$3" workspace_arg="${4:-}"
+  WORKSPACE="${workspace_arg:-${CODING_TOOLS_MCP_WORKSPACE:-$PWD}}"
+  PORT="${CODING_TOOLS_MCP_PORT:-8765}"
+  SERVER_BIN="${CODING_TOOLS_MCP_SERVER_BIN:-coding-tools-mcp}"
+  AUTH_MODE="${CODING_TOOLS_MCP_AUTH_MODE:-bearer}"
+
+  resolve_auth_credentials
+
+  ensure_tunnel_command "$tool"
+  start_coding_tools_mcp "$WORKSPACE" "$PORT" "$AUTH_MODE" "$TOKEN" "$SERVER_BIN"
+  print_tunnel_config "$label" "$host_placeholder" "$PORT" "$AUTH_MODE" "$TOKEN"
 }

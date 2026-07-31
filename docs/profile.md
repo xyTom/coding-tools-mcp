@@ -1,15 +1,8 @@
-# Coding Tools MCP Profile
+# Coding Tools MCP Contract
 
-The active profile is [profile-v0.1.md](profile-v0.1.md).
+The active contract is [runtime-contract-v0.2.md](runtime-contract-v0.2.md).
 
-Profile id:
+Contract id: `coding-tools-mcp-v0.2`.
 
-```text
-coding-tools-mcp-v0.1
-```
-
-Protocol target:
-
-```text
-MCP 2025-06-18
-```
+The word “contract” describes the wire/runtime version. The product exposes one
+fixed tool set; it has no tool-selection profiles.

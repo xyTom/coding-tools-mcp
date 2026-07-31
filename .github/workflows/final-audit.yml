@@ -15,7 +15,6 @@ on:
       release_tag:
         description: "Release tag that points at this commit"
         required: true
-        default: "v0.1.3-recovered-final"
 
 jobs:
   final-audit:
@@ -27,6 +26,30 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Validate release tag and metadata
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          tag_sha="$(git rev-list -n 1 "$RELEASE_TAG")"
+          expected_ref="refs/tags/$RELEASE_TAG"
+          if [ "$GITHUB_REF" != "$expected_ref" ]; then
+            echo "workflow ref $GITHUB_REF does not match release ref $expected_ref" >&2
+            exit 1
+          fi
+          if [ "$tag_sha" != "$EXPECTED_SHA" ]; then
+            echo "release tag $RELEASE_TAG points to $tag_sha, expected $EXPECTED_SHA" >&2
+            exit 1
+          fi
+          python scripts/check_release_versions.py --tag "$RELEASE_TAG"
 
       - name: Validate referenced runs
         env:

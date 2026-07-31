@@ -8,7 +8,7 @@
 
 - `python-click` (python): **PASS**
   - repo: `https://github.com/pallets/click.git`
-  - commit: `c9e94136b39b1fad4a47ac0d4478fa372bd07ff8`
+  - commit: `00e592cea702e0b2caa0dee42489fdb1c22cd845`
   - list_files: `PASS`
   - read_file: `PASS`
   - search_text: `PASS`
@@ -22,7 +22,7 @@
   - exec_command: `PASS`
 - `rust-itoa` (rust): **PASS**
   - repo: `https://github.com/dtolnay/itoa.git`
-  - commit: `af77385d0daf4d0e949e81f2588be2e44f69f086`
+  - commit: `1577ed901354d0d7448ac162328f9dbf5183124c`
   - list_files: `PASS`
   - read_file: `PASS`
   - search_text: `PASS`
@@ -36,7 +36,7 @@
   - exec_command: `PASS`
 - `monorepo-changesets` (monorepo): **PASS**
   - repo: `https://github.com/changesets/changesets.git`
-  - commit: `372523f4c2ee4ffeb8330d444d47ffb6d0af5126`
+  - commit: `7fd0d9193a7b8bbbb01955adefc68b38d3070616`
   - list_files: `PASS`
   - read_file: `PASS`
   - search_text: `PASS`

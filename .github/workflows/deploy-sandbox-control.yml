@@ -1,0 +1,112 @@
+name: deploy-sandbox-control
+
+# The sandbox-control Worker and start-sandbox.yml are one contract: the Worker
+# builds the workflow_dispatch body that the workflow must declare. Nothing used
+# to deploy the Worker, so a change that touched both files only ever took effect
+# on the workflow side and the pair silently drifted apart. Deploying from CI on
+# every change to either file keeps them in lockstep.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - cloudflare/sandbox-control/**
+      - .github/workflows/start-sandbox.yml
+      - .github/workflows/deploy-sandbox-control.yml
+      - scripts/check_dispatch_inputs.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-sandbox-control
+  cancel-in-progress: false
+
+jobs:
+  deploy-sandbox-control:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install check dependencies
+        run: python -m pip install --disable-pip-version-check --quiet pyyaml
+
+      - name: Check Worker inputs against start-sandbox.yml
+        run: python scripts/check_dispatch_inputs.py
+
+      - name: Require Cloudflare credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            missing+=("CLOUDFLARE_API_TOKEN")
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID}" ]; then
+            missing+=("CLOUDFLARE_ACCOUNT_ID")
+          fi
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing repository secrets: ${missing[*]}" >&2
+            echo "Add them in Settings > Secrets and variables > Actions, then re-run." >&2
+            exit 1
+          fi
+
+      # wrangler deploy sends the full [vars] table, overwriting whatever the live
+      # Worker had. A committed placeholder would silently repoint the control
+      # plane at a hostname that does not exist, so refuse to deploy until the
+      # effective value is real.
+      - name: Resolve deployment variables
+        id: deploy_vars
+        env:
+          TUNNEL_HOSTNAME_OVERRIDE: ${{ vars.SANDBOX_TUNNEL_HOSTNAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          committed="$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("cloudflare/sandbox-control/wrangler.toml").read_text()).get("vars", {}).get("TUNNEL_HOSTNAME", ""))')"
+          effective="${TUNNEL_HOSTNAME_OVERRIDE:-$committed}"
+          case "$effective" in
+            ""|mcp.example.com)
+              echo "TUNNEL_HOSTNAME resolves to the placeholder '${effective}'." >&2
+              echo "Deploying would overwrite the live Worker's hostname with a value that does not resolve." >&2
+              echo "Set the repository variable SANDBOX_TUNNEL_HOSTNAME, or commit the real hostname" >&2
+              echo "in cloudflare/sandbox-control/wrangler.toml, then re-run." >&2
+              exit 1
+              ;;
+          esac
+          echo "tunnel_hostname=$effective" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            deploy --config cloudflare/sandbox-control/wrangler.toml
+            --var TUNNEL_HOSTNAME:${{ steps.deploy_vars.outputs.tunnel_hostname }}
+
+      - name: Summarize
+        env:
+          TUNNEL_HOSTNAME: ${{ steps.deploy_vars.outputs.tunnel_hostname }}
+        shell: bash
+        run: |
+          {
+            echo "## sandbox-control Worker deployed"
+            echo ""
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Config: \`cloudflare/sandbox-control/wrangler.toml\`"
+            echo "- TUNNEL_HOSTNAME: \`${TUNNEL_HOSTNAME}\`"
+            echo ""
+            echo "\`wrangler.toml\` is now the source of truth for the Worker's plain-text"
+            echo "variables: this deploy replaced any values edited in the Cloudflare"
+            echo "dashboard. Worker secrets (CONTROL_TOKEN, GITHUB_TOKEN) are not touched."
+          } >> "$GITHUB_STEP_SUMMARY"

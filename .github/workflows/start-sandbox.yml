@@ -18,11 +18,6 @@ on:
         required: false
         type: string
         default: trusted
-      tool_profile:
-        description: coding-tools-mcp tool profile.
-        required: false
-        type: string
-        default: full
       checkout_repository:
         description: Check out the caller repository into /workspace before starting the sandbox.
         required: false
@@ -38,6 +33,28 @@ on:
         required: false
         type: string
         default: ""
+      hide_auth_token:
+        description: Hide the MCP bearer token from workflow logs and summaries. Use when the token is managed as a secret.
+        required: false
+        type: boolean
+        default: false
+      tunnel_type:
+        description: Public tunnel mode. Use named for a reusable Cloudflare Tunnel hostname.
+        required: false
+        type: string
+        default: quick
+      tunnel_hostname:
+        description: Public hostname for a named Cloudflare Tunnel, without scheme.
+        required: false
+        type: string
+        default: ""
+    secrets:
+      CLOUDFLARE_TUNNEL_TOKEN:
+        description: Cloudflare named tunnel token. Required when tunnel_type is named.
+        required: false
+      CODING_TOOLS_MCP_AUTH_TOKEN:
+        description: Optional stable MCP bearer token. Used when auth_token is blank.
+        required: false
   workflow_dispatch:
     inputs:
       image:
@@ -59,15 +76,6 @@ on:
           - trusted
           - dangerous
         default: trusted
-      tool_profile:
-        description: coding-tools-mcp tool profile.
-        required: true
-        type: choice
-        options:
-          - full
-          - read-only
-          - compat-readonly-all
-        default: full
       checkout_repository:
         description: Check out this repository into /workspace before starting the sandbox.
         required: true
@@ -80,6 +88,24 @@ on:
         default: "120"
       auth_token:
         description: Optional MCP bearer token. Leave blank to generate one.
+        required: false
+        type: string
+        default: ""
+      hide_auth_token:
+        description: Hide the MCP bearer token from workflow logs and summaries. Use when the token is managed as a secret.
+        required: true
+        type: boolean
+        default: false
+      tunnel_type:
+        description: Public tunnel mode.
+        required: true
+        type: choice
+        options:
+          - quick
+          - named
+        default: quick
+      tunnel_hostname:
+        description: Public hostname for a named Cloudflare Tunnel, without scheme.
         required: false
         type: string
         default: ""
@@ -109,11 +135,21 @@ jobs:
 
       - name: Resolve sandbox settings
         id: settings
+        env:
+          AUTH_TOKEN_INPUT: ${{ inputs.auth_token }}
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          DURATION_MINUTES_INPUT: ${{ inputs.duration_minutes }}
+          HIDE_AUTH_TOKEN_INPUT: ${{ inputs.hide_auth_token }}
+          MCP_AUTH_TOKEN_SECRET: ${{ secrets.CODING_TOOLS_MCP_AUTH_TOKEN }}
+          MCP_PORT_INPUT: ${{ inputs.port }}
+          PERMISSION_MODE_INPUT: ${{ inputs.permission_mode }}
+          TUNNEL_HOSTNAME_INPUT: ${{ inputs.tunnel_hostname }}
+          TUNNEL_TYPE_INPUT: ${{ inputs.tunnel_type }}
         shell: bash
         run: |
           set -euo pipefail
 
-          duration="${{ inputs.duration_minutes }}"
+          duration="$DURATION_MINUTES_INPUT"
           if ! [[ "$duration" =~ ^[0-9]+$ ]]; then
             echo "duration_minutes must be an integer" >&2
             exit 1
@@ -123,7 +159,7 @@ jobs:
             exit 1
           fi
 
-          port="${{ inputs.port }}"
+          port="$MCP_PORT_INPUT"
           if ! [[ "$port" =~ ^[0-9]+$ ]]; then
             echo "port must be an integer" >&2
             exit 1
@@ -133,12 +169,76 @@ jobs:
             exit 1
           fi
 
-          token="${{ inputs.auth_token }}"
+          permission_mode="$PERMISSION_MODE_INPUT"
+          case "$permission_mode" in
+            safe|trusted|dangerous) ;;
+            *)
+              echo "permission_mode must be safe, trusted, or dangerous" >&2
+              exit 1
+              ;;
+          esac
+
+          tunnel_type="$TUNNEL_TYPE_INPUT"
+          case "$tunnel_type" in
+            quick|named) ;;
+            *)
+              echo "tunnel_type must be quick or named" >&2
+              exit 1
+              ;;
+          esac
+
+          tunnel_hostname="$TUNNEL_HOSTNAME_INPUT"
+          public_server_url=""
+          if [[ "$tunnel_type" == "named" ]]; then
+            if [[ -z "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
+              echo "CLOUDFLARE_TUNNEL_TOKEN secret is required when tunnel_type=named" >&2
+              exit 1
+            fi
+
+            tunnel_hostname="${tunnel_hostname#https://}"
+            tunnel_hostname="${tunnel_hostname#http://}"
+            tunnel_hostname="${tunnel_hostname%%/*}"
+            if ! [[ "$tunnel_hostname" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]]; then
+              echo "tunnel_hostname must be a valid hostname, for example mcp.example.com" >&2
+              exit 1
+            fi
+            public_server_url="https://${tunnel_hostname}"
+          else
+            tunnel_hostname=""
+          fi
+
+          hide_auth_token="$HIDE_AUTH_TOKEN_INPUT"
+          case "$hide_auth_token" in
+            true|false) ;;
+            *)
+              echo "hide_auth_token must be true or false" >&2
+              exit 1
+              ;;
+          esac
+
+          token="$AUTH_TOKEN_INPUT"
+          token_source=input
+          if [[ -z "$token" && -n "${MCP_AUTH_TOKEN_SECRET:-}" ]]; then
+            token="$MCP_AUTH_TOKEN_SECRET"
+            token_source=secret
+            hide_auth_token=true
+          fi
           if [[ -z "$token" ]]; then
             token="$(openssl rand -hex 32)"
+            token_source=generated
           elif ! [[ "$token" =~ ^[A-Za-z0-9._@+-]{16,256}$ ]]; then
             echo "auth_token must be 16-256 chars and only use A-Z, a-z, 0-9, dot, underscore, at, plus, or dash" >&2
             exit 1
+          fi
+          if [[ "$hide_auth_token" == "true" && "$token_source" == "generated" ]]; then
+            echo "hide_auth_token=true requires auth_token input or CODING_TOOLS_MCP_AUTH_TOKEN secret" >&2
+            exit 1
+          fi
+          if [[ "$hide_auth_token" == "true" ]]; then
+            echo "::add-mask::$token"
+          fi
+          if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
+            echo "::add-mask::$CLOUDFLARE_TUNNEL_TOKEN"
           fi
           token_file="$RUNNER_TEMP/coding-tools-mcp-token"
           printf '%s' "$token" > "$token_file"
@@ -152,7 +252,13 @@ jobs:
           {
             echo "duration=$duration"
             echo "port=$port"
+            echo "permission_mode=$permission_mode"
             echo "token_file=$token_file"
+            echo "token_source=$token_source"
+            echo "hide_auth_token=$hide_auth_token"
+            echo "tunnel_type=$tunnel_type"
+            echo "tunnel_hostname=$tunnel_hostname"
+            echo "public_server_url=$public_server_url"
             echo "git_config=$git_config"
           } >> "$GITHUB_OUTPUT"
 
@@ -161,8 +267,8 @@ jobs:
           IMAGE: ${{ inputs.image }}
           MCP_PORT: ${{ steps.settings.outputs.port }}
           MCP_TOKEN_FILE: ${{ steps.settings.outputs.token_file }}
-          PERMISSION_MODE: ${{ inputs.permission_mode }}
-          TOOL_PROFILE: ${{ inputs.tool_profile }}
+          PERMISSION_MODE: ${{ steps.settings.outputs.permission_mode }}
+          PUBLIC_SERVER_URL: ${{ steps.settings.outputs.public_server_url }}
           GIT_CONFIG: ${{ steps.settings.outputs.git_config }}
         shell: bash
         run: |
@@ -173,26 +279,31 @@ jobs:
           MCP_TOKEN="$(cat "$MCP_TOKEN_FILE")"
 
           shell_env_set='{"CARGO_HOME":"/usr/local/cargo","RUSTUP_HOME":"/usr/local/rustup","GIT_CONFIG_GLOBAL":"/etc/coding-tools-mcp/gitconfig"}'
-          docker run -d --rm \
-            --name coding-tools-mcp-sandbox \
-            --cpus "2" \
-            --memory "4g" \
-            --pids-limit "512" \
-            -p "127.0.0.1:${MCP_PORT}:${MCP_PORT}" \
-            -e CODING_TOOLS_MCP_PORT="$MCP_PORT" \
-            -e CODING_TOOLS_MCP_AUTH_TOKEN="$MCP_TOKEN" \
-            -e CODING_TOOLS_MCP_PERMISSION_MODE="$PERMISSION_MODE" \
-            -e CODING_TOOLS_MCP_TOOL_PROFILE="$TOOL_PROFILE" \
-            -e CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS=/etc/java-17-openjdk:/etc/maven:/etc/coding-tools-mcp \
-            -e CODING_TOOLS_MCP_SHELL_ENV_SET="$shell_env_set" \
-            -v "$GITHUB_WORKSPACE:/workspace" \
-            -v "$GIT_CONFIG:/etc/coding-tools-mcp/gitconfig:ro" \
-            "$IMAGE"
+          docker_args=(
+            -d --rm
+            --name coding-tools-mcp-sandbox
+            --cpus "2"
+            --memory "4g"
+            --pids-limit "512"
+            -p "127.0.0.1:${MCP_PORT}:${MCP_PORT}"
+            -e "CODING_TOOLS_MCP_PORT=$MCP_PORT"
+            -e "CODING_TOOLS_MCP_AUTH_TOKEN=$MCP_TOKEN"
+            -e "CODING_TOOLS_MCP_PERMISSION_MODE=$PERMISSION_MODE"
+            -e CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS=/etc/java-17-openjdk:/etc/maven:/etc/coding-tools-mcp
+            -e "CODING_TOOLS_MCP_SHELL_ENV_SET=$shell_env_set"
+            -v "$GITHUB_WORKSPACE:/workspace"
+            -v "$GIT_CONFIG:/etc/coding-tools-mcp/gitconfig:ro"
+          )
+          if [[ -n "$PUBLIC_SERVER_URL" ]]; then
+            docker_args+=(-e "CODING_TOOLS_MCP_SERVER_URL=$PUBLIC_SERVER_URL")
+          fi
+
+          docker run "${docker_args[@]}" "$IMAGE"
 
           for _ in {1..60}; do
             if curl -fsS \
               -H "Authorization: Bearer $MCP_TOKEN" \
-              "http://127.0.0.1:$MCP_PORT/mcp" >/tmp/coding-tools-mcp-card.json; then
+              "http://127.0.0.1:$MCP_PORT/.well-known/mcp.json" >/tmp/coding-tools-mcp-card.json; then
               python3 -m json.tool /tmp/coding-tools-mcp-card.json
               exit 0
             fi
@@ -202,20 +313,67 @@ jobs:
           docker logs coding-tools-mcp-sandbox
           exit 1
 
-      - name: Start Cloudflare quick tunnel
+      - name: Start Cloudflare tunnel
         id: tunnel
         env:
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          HIDE_AUTH_TOKEN: ${{ steps.settings.outputs.hide_auth_token }}
           MCP_PORT: ${{ steps.settings.outputs.port }}
           MCP_TOKEN_FILE: ${{ steps.settings.outputs.token_file }}
+          PUBLIC_SERVER_URL: ${{ steps.settings.outputs.public_server_url }}
           SESSION_DURATION: ${{ steps.settings.outputs.duration }}
-          PERMISSION_MODE: ${{ inputs.permission_mode }}
-          TOOL_PROFILE: ${{ inputs.tool_profile }}
+          PERMISSION_MODE: ${{ steps.settings.outputs.permission_mode }}
+          TUNNEL_TYPE: ${{ steps.settings.outputs.tunnel_type }}
         shell: bash
         run: |
           set -euo pipefail
           MCP_TOKEN="$(cat "$MCP_TOKEN_FILE")"
 
+          write_summary() {
+            local mcp_url="$1"
+            {
+              echo "## coding-tools-mcp sandbox"
+              echo ""
+              echo "- MCP URL: $mcp_url"
+              if [[ "$HIDE_AUTH_TOKEN" == "true" ]]; then
+                echo "- Authorization header: Bearer <configured token>"
+              else
+                echo "- Authorization header: \`Bearer $MCP_TOKEN\`"
+              fi
+              echo "- Tunnel type: $TUNNEL_TYPE"
+              echo "- Permission mode: $PERMISSION_MODE"
+              echo "- Expires after: $SESSION_DURATION minutes"
+              echo ""
+              echo "Keep this workflow run open while the sandbox is active."
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
           docker rm -f coding-tools-mcp-cloudflared >/dev/null 2>&1 || true
+
+          if [[ "$TUNNEL_TYPE" == "named" ]]; then
+            docker run -d \
+              --name coding-tools-mcp-cloudflared \
+              --network host \
+              cloudflare/cloudflared:latest \
+              tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN"
+
+            mcp_url="${PUBLIC_SERVER_URL}/mcp"
+            for _ in {1..60}; do
+              docker logs coding-tools-mcp-cloudflared > cloudflared.log 2>&1 || true
+              if curl -fsS \
+                -H "Authorization: Bearer $MCP_TOKEN" \
+                "${PUBLIC_SERVER_URL}/.well-known/mcp.json" >/tmp/coding-tools-mcp-card-remote.json; then
+                echo "url=$mcp_url" >> "$GITHUB_OUTPUT"
+                write_summary "$mcp_url"
+                exit 0
+              fi
+              sleep 2
+            done
+
+            cat cloudflared.log
+            exit 1
+          fi
+
           docker run -d \
             --name coding-tools-mcp-cloudflared \
             --network host \
@@ -229,17 +387,7 @@ jobs:
             if [[ -n "$tunnel_url" ]]; then
               mcp_url="${tunnel_url}/mcp"
               echo "url=$mcp_url" >> "$GITHUB_OUTPUT"
-              {
-                echo "## coding-tools-mcp sandbox"
-                echo ""
-                echo "- MCP URL: $mcp_url"
-                echo "- Authorization header: \`Bearer $MCP_TOKEN\`"
-                echo "- Permission mode: $PERMISSION_MODE"
-                echo "- Tool profile: $TOOL_PROFILE"
-                echo "- Expires after: $SESSION_DURATION minutes"
-                echo ""
-                echo "Keep this workflow run open while the sandbox is active."
-              } >> "$GITHUB_STEP_SUMMARY"
+              write_summary "$mcp_url"
               exit 0
             fi
 
@@ -251,22 +399,25 @@ jobs:
 
       - name: Print sandbox connection details
         env:
+          HIDE_AUTH_TOKEN: ${{ steps.settings.outputs.hide_auth_token }}
           MCP_URL: ${{ steps.tunnel.outputs.url }}
           MCP_TOKEN_FILE: ${{ steps.settings.outputs.token_file }}
           SESSION_DURATION: ${{ steps.settings.outputs.duration }}
-          PERMISSION_MODE: ${{ inputs.permission_mode }}
-          TOOL_PROFILE: ${{ inputs.tool_profile }}
+          PERMISSION_MODE: ${{ steps.settings.outputs.permission_mode }}
         shell: bash
         run: |
           set -euo pipefail
           MCP_TOKEN="$(cat "$MCP_TOKEN_FILE")"
 
           echo "MCP URL: $MCP_URL"
-          echo "Authorization header: Bearer $MCP_TOKEN"
+          if [[ "$HIDE_AUTH_TOKEN" == "true" ]]; then
+            echo "Authorization header: Bearer <configured token>"
+          else
+            echo "Authorization header: Bearer $MCP_TOKEN"
+          fi
           echo "Permission mode: $PERMISSION_MODE"
-          echo "Tool profile: $TOOL_PROFILE"
           echo "Sandbox expires after: $SESSION_DURATION minutes"
-          echo "::notice title=coding-tools-mcp sandbox::URL: $MCP_URL | Header: Authorization: Bearer $MCP_TOKEN | Expires after: $SESSION_DURATION minutes"
+          echo "::notice title=coding-tools-mcp sandbox::URL: $MCP_URL | Expires after: $SESSION_DURATION minutes"
 
       - name: Keep sandbox alive
         shell: bash

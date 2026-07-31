@@ -1,3 +1,5 @@
+"""Small encrypted secret store used by server-side persistence modules."""
+
 from __future__ import annotations
 
 import base64
@@ -5,8 +7,15 @@ import hashlib
 import hmac
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
+
+
+VAULT_VERSION = 1
+RECORD_VERSION = 1
+KDF_NAME = "pbkdf2-sha256"
+CIPHER_NAME = "hmac-sha256-stream+hmac-sha256"
 
 
 class SecretVaultError(ValueError):
@@ -22,12 +31,16 @@ class SecretVault:
         return self.path is not None and self.master_key is not None
 
     def status_payload(self) -> dict[str, Any]:
-        return {"enabled": self.enabled(), "path": str(self.path) if self.path else None, "secret_count": len(self.list_names())}
+        return {
+            "enabled": self.enabled(),
+            "path": str(self.path) if self.path else None,
+            "secret_count": len(self.list_names()),
+        }
 
     def list_names(self) -> list[str]:
         raw = self._read_raw(require_key=False)
-        secrets = raw.get("secrets", {})
-        return sorted(secrets) if isinstance(secrets, dict) else []
+        secrets = raw["secrets"]
+        return sorted(secrets)
 
     def set_secret(self, name: str, value: str) -> None:
         self._require_enabled()
@@ -36,8 +49,7 @@ class SecretVault:
             raise SecretVaultError("Secret value must be a string.")
         assert self.master_key is not None
         raw = self._read_raw(require_key=True)
-        raw.setdefault("version", 1)
-        raw.setdefault("secrets", {})[name] = encrypt_value(value, self.master_key)
+        raw["secrets"][name] = encrypt_value(value, self.master_key)
         self._write_raw(raw)
 
     def get_secret(self, name: str) -> str:
@@ -45,7 +57,7 @@ class SecretVault:
         validate_secret_name(name)
         assert self.master_key is not None
         raw = self._read_raw(require_key=True)
-        record = raw.get("secrets", {}).get(name) if isinstance(raw.get("secrets"), dict) else None
+        record = raw["secrets"].get(name)
         if not isinstance(record, dict):
             raise SecretVaultError(f"Secret {name!r} is not set.")
         return decrypt_value(record, self.master_key)
@@ -54,25 +66,25 @@ class SecretVault:
         self._require_enabled()
         validate_secret_name(name)
         raw = self._read_raw(require_key=True)
-        secrets = raw.setdefault("secrets", {})
-        if not isinstance(secrets, dict):
-            raise SecretVaultError("Secret vault is corrupt.")
-        existed = name in secrets
-        secrets.pop(name, None)
-        self._write_raw(raw)
+        existed = name in raw["secrets"]
+        if existed:
+            raw["secrets"].pop(name)
+            self._write_raw(raw)
         return existed
 
     def _require_enabled(self) -> None:
         if self.path is None:
             raise SecretVaultError("Secret vault path is not configured.")
         if self.master_key is None:
-            raise SecretVaultError("CODING_TOOLS_MCP_SECRETS_KEY is required to write or read real token values.")
+            raise SecretVaultError(
+                "CODING_TOOLS_MCP_SECRETS_KEY is required to read or write secret values."
+            )
 
     def _read_raw(self, *, require_key: bool) -> dict[str, Any]:
         if require_key:
             self._require_enabled()
         if self.path is None or not self.path.exists():
-            return {"version": 1, "secrets": {}}
+            return {"version": VAULT_VERSION, "secrets": {}}
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except OSError as exc:
@@ -81,22 +93,45 @@ class SecretVault:
             raise SecretVaultError(f"Secret vault is not valid JSON: {exc}") from exc
         if not isinstance(raw, dict):
             raise SecretVaultError("Secret vault must be a JSON object.")
-        raw.setdefault("version", 1)
-        raw.setdefault("secrets", {})
-        return raw
+        if raw.get("version") != VAULT_VERSION:
+            raise SecretVaultError("Secret vault was written by an unsupported version.")
+        secrets = raw.get("secrets")
+        if not isinstance(secrets, dict):
+            raise SecretVaultError("Secret vault secrets field must be an object.")
+        for name, record in secrets.items():
+            validate_secret_name(name)
+            if not isinstance(record, dict):
+                raise SecretVaultError("Secret vault contains an invalid record.")
+        return {"version": VAULT_VERSION, "secrets": dict(secrets)}
 
     def _write_raw(self, raw: dict[str, Any]) -> None:
         if self.path is None:
             raise SecretVaultError("Secret vault path is not configured.")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        tmp_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.",
+            suffix=".tmp",
+            dir=self.path.parent,
+        )
+        tmp_path = Path(tmp_name)
+        payload = {"version": VAULT_VERSION, "secrets": raw.get("secrets", {})}
         try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             if os.name != "nt":
                 tmp_path.chmod(0o600)
-        except OSError:
-            pass
-        os.replace(tmp_path, self.path)
+            os.replace(tmp_path, self.path)
+            _fsync_directory(self.path.parent)
+        except OSError as exc:
+            raise SecretVaultError(f"Could not atomically save secret vault: {exc}") from exc
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def validate_secret_name(name: str) -> None:
@@ -115,8 +150,9 @@ def encrypt_value(value: str, master_key: str) -> dict[str, str | int]:
     ciphertext = xor_bytes(plaintext, key_stream(enc_key, nonce, len(plaintext)))
     tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
     return {
-        "version": 1,
-        "kdf": "pbkdf2-sha256",
+        "version": RECORD_VERSION,
+        "kdf": KDF_NAME,
+        "cipher": CIPHER_NAME,
         "salt": b64e(salt),
         "nonce": b64e(nonce),
         "ciphertext": b64e(ciphertext),
@@ -125,6 +161,12 @@ def encrypt_value(value: str, master_key: str) -> dict[str, str | int]:
 
 
 def decrypt_value(record: dict[str, Any], master_key: str) -> str:
+    if (
+        record.get("version") != RECORD_VERSION
+        or record.get("kdf") != KDF_NAME
+        or record.get("cipher") != CIPHER_NAME
+    ):
+        raise SecretVaultError("Secret record uses an unsupported format.")
     try:
         salt = b64d(str(record["salt"]))
         nonce = b64d(str(record["nonce"]))
@@ -132,16 +174,27 @@ def decrypt_value(record: dict[str, Any], master_key: str) -> str:
         tag = b64d(str(record["tag"]))
     except (KeyError, ValueError) as exc:
         raise SecretVaultError("Secret record is corrupt.") from exc
+    if len(salt) != 16 or len(nonce) != 16 or len(tag) != hashlib.sha256().digest_size:
+        raise SecretVaultError("Secret record is corrupt.")
     enc_key, mac_key = derive_keys(master_key, salt)
     expected = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
     if not hmac.compare_digest(tag, expected):
         raise SecretVaultError("Secret vault key is incorrect or the record was modified.")
     plaintext = xor_bytes(ciphertext, key_stream(enc_key, nonce, len(ciphertext)))
-    return plaintext.decode("utf-8")
+    try:
+        return plaintext.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SecretVaultError("Secret record plaintext is not valid UTF-8.") from exc
 
 
 def derive_keys(master_key: str, salt: bytes) -> tuple[bytes, bytes]:
-    key_material = hashlib.pbkdf2_hmac("sha256", master_key.encode("utf-8"), salt, 200_000, dklen=64)
+    key_material = hashlib.pbkdf2_hmac(
+        "sha256",
+        master_key.encode("utf-8"),
+        salt,
+        200_000,
+        dklen=64,
+    )
     return key_material[:32], key_material[32:]
 
 
@@ -149,7 +202,9 @@ def key_stream(key: bytes, nonce: bytes, length: int) -> bytes:
     output = bytearray()
     counter = 0
     while len(output) < length:
-        output.extend(hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest())
+        output.extend(
+            hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
+        )
         counter += 1
     return bytes(output[:length])
 
@@ -163,4 +218,20 @@ def b64e(value: bytes) -> str:
 
 
 def b64d(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value.encode("ascii"))
+    try:
+        return base64.b64decode(value.encode("ascii"), altchars=b"-_", validate=True)
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise ValueError("invalid base64") from exc
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

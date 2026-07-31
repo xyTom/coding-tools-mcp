@@ -6,6 +6,7 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
 
 jobs:
   compliance:
@@ -19,6 +20,18 @@ jobs:
         uses: actions/setup-python@v6.2.0
         with:
           python-version: "3.11"
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Allow setup-node toolchain under Landlock
+        shell: bash
+        run: |
+          node_executable="$(readlink -f "$(command -v node)")"
+          node_root="$(dirname "$(dirname "$node_executable")")"
+          echo "CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS=$node_root" >> "$GITHUB_ENV"
 
       - name: Install runtime and CI tools
         run: |
@@ -46,8 +59,14 @@ jobs:
       - name: Run schema drift gate
         run: make test-schema-drift
 
+      - name: Run dispatch inputs gate
+        run: make check-dispatch-inputs
+
+      - name: Run npm launcher gate
+        run: make check-npm-launcher
+
       - name: Run dogfood smoke
-        run: make dogfood-smoke DOGFOOD_PORT=18772
+        run: make dogfood-smoke
 
       - name: Run latency benchmark
         run: make benchmark-latency

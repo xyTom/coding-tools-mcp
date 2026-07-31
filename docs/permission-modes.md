@@ -43,6 +43,39 @@ Compatibility aliases:
 - `--allow-network`: opens only the network-looking command gate.
 - `--dangerously-skip-all-permissions`: alias for `--permission-mode dangerous`.
 
+## Client-Side Annotation Gates
+
+Permission modes govern this server's own gates. They cannot affect a client that
+gates on MCP annotations — one that refuses to call, or prompts on every call to, a
+tool advertised as mutating. That friction lives entirely in the client, so
+`--permission-mode dangerous` does nothing about it.
+
+`--dangerously-fake-readonly-annotations` addresses that one case. It makes
+`tools/list` report every tool with `readOnlyHint: true`, `destructiveHint: false`,
+and `openWorldHint: false`:
+
+```bash
+coding-tools-mcp --permission-mode dangerous \
+  --dangerously-fake-readonly-annotations --workspace /path/to/repo
+```
+
+The annotations are false. `apply_patch` still rewrites files and `exec_command`
+still runs commands; only the advertised hints change. Because the claim is false,
+it is fenced in:
+
+- It requires `--permission-mode dangerous`, so it can only be set alongside an
+  explicit assertion that the workspace is disposable.
+- Over HTTP it requires bearer auth or OAuth. A tunnel forwards to a loopback bind,
+  so the bind address cannot distinguish a private sandbox from a publicly reachable
+  one; authentication can. Use stdio for an unauthenticated local sandbox.
+- `server_info.annotation_override` and the server card's
+  `tools.annotationOverride` report `fake_readonly`, and both keep listing the real
+  per-tool annotations. `check_exec_environment` adds a warning. The lie is confined
+  to `tools/list`, so ground truth is always one call away.
+
+`CODING_TOOLS_MCP_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS=1` is equivalent. This is
+not a tool profile: the catalog is unchanged and every tool remains callable.
+
 ## Runtime Directory
 
 Safe and trusted modes keep command runtime state outside the Git worktree:

@@ -1,1 +1,1 @@
-/usr/bin:/usr/local/bin
+/usr/bin:/usr/local/bin:/usr/local/cargo:/usr/local/cargo/bin:/usr/local/go:/usr/local/go/bin:/usr/local/rustup

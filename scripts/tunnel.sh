@@ -30,7 +30,6 @@ Environment:
   CODING_TOOLS_MCP_AUTO_INSTALL_TUNNEL=1  install missing tunnel CLI without prompting
   CODING_TOOLS_MCP_AUTH_MODE=bearer       bearer, noauth, or oauth
   CODING_TOOLS_MCP_PORT=8765
-  CODING_TOOLS_MCP_TOOL_PROFILE=read-only
   CODING_TOOLS_MCP_AUTH_TOKEN=<existing-token>
   CODING_TOOLS_MCP_SERVER_BIN=coding-tools-mcp
 

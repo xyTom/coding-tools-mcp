@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from typing import Any
 
 from tests.compliance.mcp_client import MCPError
@@ -100,7 +101,9 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 +Added by apply_patch golden test.
 *** End Patch
 """
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": add}))
+        add_payload = self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": add}))
+        self.assertEqual(add_payload.get("additions"), 3)
+        self.assertEqual(add_payload.get("removals"), 0)
         self.assertIn("Added by apply_patch", self.tool_text(self.client.call_tool("read_file", {"path": "docs/NOTES.md"})))
         self.assert_tool_error("apply_patch", {"patch": add})
 
@@ -114,7 +117,11 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
             self.assert_tool_error("read_file", {"path": "dry-run/new/NOPE.md"})
             self.assert_tool_error("list_dir", {"path": "dry-run"})
 
-        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH}))
+        update_result = self.client.call_tool("apply_patch", {"patch": ADD_FIX_PATCH})
+        update_payload = self.assert_tool_success(update_result)
+        self.assertEqual(update_payload.get("additions"), 1)
+        self.assertEqual(update_payload.get("removals"), 1)
+        self.assertIn("(+1 -1)", self.tool_text(update_result))
         self.assertIn("return a + b", self.tool_text(self.client.call_tool("read_file", {"path": "src/math.js"})))
 
         delete = """*** Begin Patch
@@ -143,49 +150,6 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 """
         self.assert_tool_error("apply_patch", {"patch": mismatch})
 
-    def test_file_versions_expected_hash_checkpoint_and_restore(self) -> None:
-        identity = self.assert_tool_success(self.client.call_tool("workspace_identity", {}))
-        self.assertIn("workspace_id", identity)
-
-        stat_payload = self.assert_tool_success(self.client.call_tool("file_stat", {"path": "src/math.js"}))
-        expected_hash = stat_payload.get("sha256")
-        self.assertIsInstance(expected_hash, str)
-
-        patch = """*** Begin Patch
-*** Update File: src/math.js
-@@
--  return a - b;
-+  return a * b;
-*** End Patch
-"""
-        applied = self.assert_tool_success(
-            self.client.call_tool(
-                "apply_patch",
-                {"patch": patch, "operation_id": "golden-versioned-edit", "expected_hashes": {"src/math.js": expected_hash}},
-            )
-        )
-        checkpoint_id = applied.get("checkpoint_id")
-        self.assertIsInstance(checkpoint_id, str)
-        self.assertIn("pre_versions", applied)
-        self.assertIn("post_versions", applied)
-
-        stale_patch = """*** Begin Patch
-*** Update File: src/math.js
-@@
--  return a * b;
-+  return a / b;
-*** End Patch
-"""
-        conflict = self.assert_tool_error(
-            "apply_patch", {"patch": stale_patch, "expected_hashes": {"src/math.js": expected_hash}}
-        )
-        self.assertIn("PATCH_CONFLICT", json_dump(conflict))
-
-        restored = self.assert_tool_success(self.client.call_tool("restore_patch_checkpoint", {"checkpoint_id": checkpoint_id}))
-        self.assertEqual(restored.get("operation_id"), "golden-versioned-edit")
-        restored_content = self.tool_text(self.client.call_tool("read_file", {"path": "src/math.js"}))
-        self.assertIn("return a - b", restored_content)
-
     def test_apply_patch_preserves_bom_crlf_and_rejects_ambiguous_context(self) -> None:
         crlf_file = self.workspace.root / "src" / "crlf.txt"
         crlf_file.write_bytes("\ufeffalpha\r\nold\r\nomega\r\n".encode("utf-8"))
@@ -212,7 +176,25 @@ class ApplyPatchGoldenTests(ComplianceTestCase):
 *** End Patch
 """
         payload = self.assert_tool_error("apply_patch", {"patch": ambiguous})
+        self.assertEqual(payload.get("error", {}).get("code"), "PATCH_CONTEXT_AMBIGUOUS")
+        self.assertEqual(payload.get("error", {}).get("details", {}).get("match_count"), 2)
+        self.assertIn("retry_hint", payload.get("error", {}).get("details", {}))
         self.assertIn("matched", json_dump(payload).lower())
+
+    def test_apply_patch_move_preserves_executable_mode(self) -> None:
+        source = self.workspace.root / "scripts" / "run.sh"
+        source.parent.mkdir(parents=True)
+        source.write_text("#!/bin/sh\nprintf 'ok\\n'\n", encoding="utf-8")
+        source.chmod(0o755)
+        move = """*** Begin Patch
+*** Update File: scripts/run.sh
+*** Move to: bin/run.sh
+*** End Patch
+"""
+        self.assert_tool_success(self.client.call_tool("apply_patch", {"patch": move}))
+        destination = self.workspace.root / "bin" / "run.sh"
+        self.assertFalse(source.exists())
+        self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o755)
 
     def test_apply_patch_rejects_absolute_traversal_and_symlink_escape(self) -> None:
         absolute = f"""*** Begin Patch
@@ -333,11 +315,6 @@ class ExecAndGitGoldenTests(ComplianceTestCase):
             session_id = payload.get("session_id")
             self.assertIsInstance(session_id, str, f"long-running command must return session_id: {payload!r}")
             self.assertIn("ready", self.tool_text(started))
-            status_payload = self.assert_tool_success(
-                client.call_tool("command_status", {"session_id": session_id, "from_start": True, "max_output_bytes": 4096})
-            )
-            self.assertEqual(status_payload.get("status"), "running")
-            self.assertIn("ready", json_dump(status_payload))
             hello = client.call_tool("write_stdin", {"session_id": session_id, "chars": "hello\n"})
             self.assertIn("echo:hello", self.tool_text(hello))
             client.call_tool("write_stdin", {"session_id": session_id, "chars": "exit\n"})

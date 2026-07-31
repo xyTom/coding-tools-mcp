@@ -13,7 +13,7 @@ The JDK major version is defined once as a build argument (`ARG JAVA_VERSION=17`
 Run against the current repository:
 
 ```bash
-docker run --rm -it \
+docker run --rm --init -it \
   -p 8765:8765 \
   -v "$PWD:/workspace" \
   coding-tools-mcp-sandbox:local
@@ -66,6 +66,24 @@ The server prints:
 ```text
 WARNING: permission_mode=dangerous disables MCP safety gates. Use only inside an isolated container or VM.
 ```
+
+## Lifecycle and shutdown
+
+The server runs as PID 1 inside the container, so exit behavior matters:
+
+- **`docker stop` / `docker compose stop`** send SIGTERM. The server installs a
+  SIGTERM handler and exits promptly with code 143 (128+15); without it, PID 1
+  would ignore the signal and every stop would hang for the grace period before
+  being SIGKILLed.
+- **`--rm`** (or `docker compose down`) removes the container after exit so
+  repeated runs do not accumulate stopped containers.
+- **`--init`** (compose: `init: true`) runs a minimal init as PID 1 to reap
+  zombies left by `exec_command` child processes. Recommended for long-lived
+  sandboxes; short smoke runs work without it.
+- **stdio mode in a container** (`docker run --rm -i coding-tools-mcp-sandbox:local --stdio`)
+  exits on stdin EOF: when the MCP host that spawned `docker run` quits, the
+  closed pipe shuts the server down and `--rm` cleans the container up. Keep
+  `-i` (and no `-t`) so stdin is a pipe the host controls.
 
 Smoke commands should be explicit `exec_command` calls (CI runs them via `scripts/mcp_smoke.py`), for example:
 

@@ -1,589 +1,891 @@
+"""Authenticated, restart-aware management services for server configuration."""
+
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
-import time
-from dataclasses import dataclass
+import tempfile
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from .codex_sessions import CodexSessionError, CodexSessionScanner, ScanPolicy
+from .oauth_store import OAuthAuthorizationStore
 from .secret_vault import SecretVault, SecretVaultError
-from .upstream import UpstreamConfigError, UpstreamManager, UpstreamServerConfig, parse_server_config
-
-
-ADMIN_TOOL_NAMES = (
-    "mcp_catalog_list",
-    "mcp_template_list",
-    "mcp_template_render",
-    "mcp_server_plan",
-    "mcp_server_install",
-    "mcp_server_update",
-    "mcp_server_enable",
-    "mcp_server_disable",
-    "mcp_server_remove",
-    "mcp_server_reload",
-    "mcp_server_health",
-    "mcp_server_start",
-    "mcp_server_stop",
-    "mcp_server_logs",
-    "mcp_secret_set",
-    "mcp_secret_list",
-    "mcp_secret_delete",
-    "mcp_transcript_sessions",
-    "mcp_transcript_export",
-    "mcp_codex_sessions_preview",
-    "mcp_codex_sessions_import",
-    "mcp_codex_sessions_sync",
-    "mcp_chat_projects",
-    "mcp_chat_conversations",
-    "mcp_chat_messages",
-    "mcp_chat_context",
-    "mcp_chat_record_context",
-    "mcp_chat_update_context",
-    "mcp_chat_delete_context",
-    "mcp_chat_recall",
-    "mcp_chat_project_recall",
-    "mcp_chat_export",
-    "mcp_chat_context_export",
-    "mcp_chat_update_message",
-    "mcp_chat_delete_message",
-    "mcp_chat_delete_conversation",
-    "mcp_chat_clear",
-    "mcp_chat_merge",
+from .settings_definition import (
+    SECRET_REFERENCE_FIELDS,
+    SettingsValidationError,
+    normalize_startup_settings_with_warnings,
+    pending_restart_fields,
+    schema_payload,
 )
-SERVER_CONFIG_KEYS = {
-    "alias",
-    "transport",
-    "enabled",
-    "url",
-    "command",
-    "args",
-    "env",
-    "headers",
-    "authorization_env",
-    "include_tools",
-    "exclude_tools",
-    "timeout_ms",
-}
-SENSITIVE_KEY_RE = re.compile(r"(token|secret|credential|api[_-]?key|password|passwd|authorization)", re.I)
-SECRETS_KEY_ENV = "CODING_TOOLS_MCP_SECRETS_KEY"
+from .settings_store import ServerSettingsStore, SettingsStoreError, sanitize_settings
+from .telemetry import telemetry_mode
+from .transcript import TranscriptStore, TranscriptStoreError, WorkspaceScope
+from .upstream import UpstreamConfigError, parse_server_config
+from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 
-MCP_SERVER_TEMPLATES: dict[str, dict[str, Any]] = {
-    "filesystem": {
-        "id": "filesystem",
-        "title": "Filesystem",
-        "category": "local",
-        "description": "Expose a local directory through a filesystem MCP server.",
-        "risk": "Reads and writes files in the configured directory.",
-        "variables": {
-            "alias": {"label": "Alias", "default": "filesystem"},
-            "workspace": {"label": "Directory", "default": "."},
-        },
-        "config": {
-            "alias": "{alias}",
-            "transport": "stdio",
-            "command": "uvx",
-            "args": ["mcp-server-filesystem", "{workspace}"],
-            "enabled": False,
-        },
-    },
-    "github": {
-        "id": "github",
-        "title": "GitHub",
-        "category": "code-hosting",
-        "description": "Connect a GitHub MCP server using a secret vault token reference.",
-        "risk": "Can read or mutate GitHub resources depending on token scope and exposed tools.",
-        "variables": {
-            "alias": {"label": "Alias", "default": "github"},
-            "secret": {"label": "Secret name", "default": "github_token"},
-        },
-        "config": {
-            "alias": "{alias}",
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-github"],
-            "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": {"secret_ref": "{secret}"}},
-            "enabled": False,
-        },
-    },
-    "browser": {
-        "id": "browser",
-        "title": "Browser",
-        "category": "browser",
-        "description": "Start a browser automation MCP server through npx.",
-        "risk": "Can automate a browser and interact with pages available to that browser profile.",
-        "variables": {"alias": {"label": "Alias", "default": "browser"}},
-        "config": {
-            "alias": "{alias}",
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "@browsermcp/mcp@latest"],
-            "enabled": False,
-        },
-    },
-    "playwright": {
-        "id": "playwright",
-        "title": "Playwright",
-        "category": "browser",
-        "description": "Start a Playwright MCP server for browser testing workflows.",
-        "risk": "Can launch browsers and interact with local or remote web pages.",
-        "variables": {"alias": {"label": "Alias", "default": "playwright"}},
-        "config": {
-            "alias": "{alias}",
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "@playwright/mcp@latest"],
-            "enabled": False,
-        },
-    },
-    "fetch": {
-        "id": "fetch",
-        "title": "Fetch",
-        "category": "web",
-        "description": "Start a simple web-fetching MCP server.",
-        "risk": "Can make outbound web requests from the host running the MCP server.",
-        "variables": {"alias": {"label": "Alias", "default": "fetch"}},
-        "config": {
-            "alias": "{alias}",
-            "transport": "stdio",
-            "command": "uvx",
-            "args": ["mcp-server-fetch"],
-            "enabled": False,
-        },
-    },
-    "local": {
-        "id": "local",
-        "title": "Custom local command",
-        "category": "custom",
-        "description": "Register a local stdio MCP command.",
-        "risk": "Runs the configured executable as a child process of this server.",
-        "variables": {
-            "alias": {"label": "Alias", "default": "local-command"},
-            "package": {"label": "Package or executable", "default": "your-mcp-package"},
-        },
-        "config": {
-            "alias": "{alias}",
-            "transport": "stdio",
-            "command": "uvx",
-            "args": ["{package}"],
-            "enabled": False,
-        },
-    },
-    "http": {
-        "id": "http",
-        "title": "Remote HTTP",
-        "category": "remote",
-        "description": "Proxy an existing Streamable HTTP MCP endpoint.",
-        "risk": "Forwards tool calls to the configured remote MCP server.",
-        "variables": {
-            "alias": {"label": "Alias", "default": "remote-http"},
-            "url": {"label": "MCP URL", "default": "http://127.0.0.1:3000/mcp"},
-        },
-        "config": {
-            "alias": "{alias}",
-            "transport": "http",
-            "url": "{url}",
-            "enabled": False,
-        },
-    },
-}
+ADMIN_API_PREFIX = "/admin/api"
+SERVER_SECRET_VAULT_FILENAME = "server-secrets.json"
+SENSITIVE_KEY_RE = re.compile(
+    r"(?:^|[_-])(token|secret|credential|api[_-]?key|password|passwd|authorization)(?:$|[_-])",
+    re.I,
+)
 
 
-class McpManagementError(ValueError):
-    pass
+class AdminServiceError(ValueError):
+    status = 400
+    code = "admin_error"
 
 
-@dataclass(frozen=True)
-class NormalizedServerConfig:
-    alias: str
-    raw_config: dict[str, Any]
-    parsed: UpstreamServerConfig
+class AdminConflictError(AdminServiceError):
+    status = 409
+    code = "stale_revision"
 
 
-class McpConfigStore:
-    def __init__(self, path: str | Path | None) -> None:
-        self.path = Path(path).expanduser() if path else None
-
-    def available(self) -> bool:
-        return self.path is not None
-
-    def read(self) -> dict[str, Any]:
-        if self.path is None:
-            return {"servers": {}}
-        if not self.path.exists():
-            return {"servers": {}}
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except OSError as exc:
-            raise McpManagementError(f"Could not read MCP config: {exc}") from exc
-        except json.JSONDecodeError as exc:
-            raise McpManagementError(f"MCP config is not valid JSON: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise McpManagementError("MCP config must be a JSON object.")
-        servers = raw.get("servers")
-        if servers is None:
-            raw = {"servers": raw}
-        elif not isinstance(servers, dict):
-            raise McpManagementError("MCP config servers must be an object.")
-        raw.setdefault("servers", {})
-        return raw
-
-    def write(self, document: dict[str, Any]) -> None:
-        if self.path is None:
-            raise McpManagementError("No MCP config path is configured.")
-        servers = document.get("servers")
-        if not isinstance(servers, dict):
-            raise McpManagementError("MCP config servers must be an object.")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
-        data = json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        tmp_path.write_text(data, encoding="utf-8", newline="\n")
-        try:
-            if os.name != "nt":
-                tmp_path.chmod(0o600)
-        except OSError:
-            pass
-        os.replace(tmp_path, self.path)
-
-    def server_configs(self) -> dict[str, Any]:
-        servers = self.read().get("servers", {})
-        if not isinstance(servers, dict):
-            raise McpManagementError("MCP config servers must be an object.")
-        return servers
+class AdminUnavailableError(AdminServiceError):
+    status = 503
+    code = "admin_unavailable"
 
 
-class McpAdminManager:
-    def __init__(self, config_path: str | Path | None, *, protocol_version: str) -> None:
-        self.store = McpConfigStore(config_path)
-        self.protocol_version = protocol_version
-        if self.store.path is None:
-            self.audit_path: Path | None = None
-            secret_path: Path | None = None
-        else:
-            self.audit_path = self.store.path.with_suffix(self.store.path.suffix + ".audit.jsonl")
-            secret_path = self.store.path.with_suffix(self.store.path.suffix + ".secrets.json")
-        self.secret_vault = SecretVault(secret_path, os.environ.get(SECRETS_KEY_ENV))
-
-    def status_payload(self) -> dict[str, Any]:
-        return {
-            "enabled": self.store.available(),
-            "config_path": str(self.store.path) if self.store.path else None,
-            "tools": list(ADMIN_TOOL_NAMES),
-            "secrets": self.secret_vault.status_payload(),
-        }
-
-    def catalog_list(self, upstream_status: dict[str, Any] | None = None) -> dict[str, Any]:
-        servers = self.store.server_configs()
-        status_by_alias: dict[str, Any] = {}
-        if isinstance(upstream_status, dict):
-            raw_statuses = upstream_status.get("servers")
-            if isinstance(raw_statuses, list):
-                status_by_alias = {str(item.get("alias")): item for item in raw_statuses if isinstance(item, dict)}
-        items = []
-        for alias, config in sorted(servers.items()):
-            if isinstance(config, dict):
-                items.append(
-                    {
-                        "alias": alias,
-                        "config": redact_config(config),
-                        "config_raw": json_safe_copy({**config, "alias": alias}),
-                        "status": status_by_alias.get(alias),
-                    }
-                )
-        return {"ok": True, "servers": items, "server_count": len(items)}
-
-    def template_list(self) -> dict[str, Any]:
-        templates = []
-        for template_id in sorted(MCP_SERVER_TEMPLATES):
-            template = MCP_SERVER_TEMPLATES[template_id]
-            config = render_template_config(template_id)
-            templates.append(
-                {
-                    "id": template_id,
-                    "title": template["title"],
-                    "category": template["category"],
-                    "description": template["description"],
-                    "risk": template["risk"],
-                    "variables": json_safe_copy(template.get("variables", {})),
-                    "config": config,
-                    "config_redacted": redact_config(config),
-                }
-            )
-        return {"ok": True, "templates": templates, "template_count": len(templates)}
-
-    def render_template(
-        self,
-        template_id: str,
-        *,
-        variables: dict[str, Any] | None = None,
-        overrides: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        config = render_template_config(template_id, variables=variables, overrides=overrides)
-        plan = self.plan_server(config)
-        template = MCP_SERVER_TEMPLATES[template_id]
-        return {
-            "ok": True,
-            "template": {
-                "id": template_id,
-                "title": template["title"],
-                "category": template["category"],
-                "description": template["description"],
-                "risk": template["risk"],
-            },
-            "config": config,
-            "config_redacted": redact_config(config),
-            "plan": plan,
-        }
-
-    def plan_server(self, config: dict[str, Any], *, existing_required: bool | None = None) -> dict[str, Any]:
-        normalized = normalize_server_config(config)
-        servers = self.store.server_configs()
-        current = servers.get(normalized.alias)
-        if existing_required is True and current is None:
-            raise McpManagementError(f"MCP server {normalized.alias!r} is not installed.")
-        if existing_required is False and current is not None:
-            raise McpManagementError(f"MCP server {normalized.alias!r} already exists.")
-        action = "install" if current is None else "update"
-        current_config = current if isinstance(current, dict) else None
-        return {
-            "ok": True,
-            "action": action,
-            "alias": normalized.alias,
-            "dry_run": True,
-            "apply_required": True,
-            "server": redact_config(normalized.raw_config),
-            "changes": diff_configs(current_config, normalized.raw_config),
-        }
-
-    def install_server(self, config: dict[str, Any], *, apply_changes: bool = False) -> dict[str, Any]:
-        normalized = normalize_server_config(config)
-        plan = self.plan_server(config, existing_required=False)
-        if not apply_changes:
-            return plan
-        document = self.store.read()
-        document.setdefault("servers", {})[normalized.alias] = normalized.raw_config
-        self.store.write(document)
-        self._audit("install", normalized.alias, normalized.raw_config)
-        return {**plan, "dry_run": False, "applied": True}
-
-    def update_server(self, alias: str, patch: dict[str, Any], *, apply_changes: bool = False) -> dict[str, Any]:
-        servers = self.store.server_configs()
-        current = servers.get(alias)
-        if not isinstance(current, dict):
-            raise McpManagementError(f"MCP server {alias!r} is not installed.")
-        if "alias" in patch and patch["alias"] != alias:
-            raise McpManagementError("Updating a server alias is not supported; remove and install instead.")
-        merged = {**current, **{key: value for key, value in patch.items() if key != "alias"}, "alias": alias}
-        normalized = normalize_server_config(merged)
-        plan = self.plan_server({**normalized.raw_config, "alias": alias}, existing_required=True)
-        if not apply_changes:
-            return plan
-        document = self.store.read()
-        document.setdefault("servers", {})[alias] = normalized.raw_config
-        self.store.write(document)
-        self._audit("update", alias, normalized.raw_config)
-        return {**plan, "dry_run": False, "applied": True}
-
-    def set_server_enabled(self, alias: str, enabled: bool, *, apply_changes: bool = False) -> dict[str, Any]:
-        servers = self.store.server_configs()
-        current = servers.get(alias)
-        if not isinstance(current, dict):
-            raise McpManagementError(f"MCP server {alias!r} is not installed.")
-        next_config = {**current, "enabled": enabled, "alias": alias}
-        normalized = normalize_server_config(next_config)
-        plan = {
-            "ok": True,
-            "action": "enable" if enabled else "disable",
-            "alias": alias,
-            "dry_run": True,
-            "apply_required": True,
-            "server": redact_config(normalized.raw_config),
-            "changes": diff_configs(current, normalized.raw_config),
-        }
-        if not apply_changes:
-            return plan
-        document = self.store.read()
-        document.setdefault("servers", {})[alias] = normalized.raw_config
-        self.store.write(document)
-        self._audit("enable" if enabled else "disable", alias, normalized.raw_config)
-        return {**plan, "dry_run": False, "applied": True}
-
-    def remove_server(self, alias: str, *, apply_changes: bool = False) -> dict[str, Any]:
-        servers = self.store.server_configs()
-        current = servers.get(alias)
-        if not isinstance(current, dict):
-            raise McpManagementError(f"MCP server {alias!r} is not installed.")
-        plan = {
-            "ok": True,
-            "action": "remove",
-            "alias": alias,
-            "dry_run": True,
-            "apply_required": True,
-            "server": redact_config(current),
-        }
-        if not apply_changes:
-            return plan
-        document = self.store.read()
-        document.setdefault("servers", {}).pop(alias, None)
-        self.store.write(document)
-        self._audit("remove", alias, current)
-        return {**plan, "dry_run": False, "applied": True}
-
-    def reload_upstreams(self) -> UpstreamManager:
-        if self.store.path is None:
-            return UpstreamManager.empty(self.protocol_version)
-        if not self.store.path.exists():
-            return UpstreamManager.empty(self.protocol_version)
-        resolver = self.secret_vault.get_secret if self.secret_vault.enabled() else None
-        return UpstreamManager.from_config_file(
-            str(self.store.path),
-            protocol_version=self.protocol_version,
-            secret_resolver=resolver,
-        )
-
-    def secret_set(self, name: str, value: str) -> dict[str, Any]:
-        try:
-            self.secret_vault.set_secret(name, value)
-        except SecretVaultError as exc:
-            raise McpManagementError(str(exc)) from exc
-        self._audit("secret_set", name, {"value": "<redacted>"})
-        return {"ok": True, "name": name}
-
-    def secret_list(self) -> dict[str, Any]:
-        return {
-            "ok": True,
-            "vault_enabled": self.secret_vault.enabled(),
-            "secrets": self.secret_vault.list_names(),
-        }
-
-    def secret_delete(self, name: str) -> dict[str, Any]:
-        try:
-            existed = self.secret_vault.delete_secret(name)
-        except SecretVaultError as exc:
-            raise McpManagementError(str(exc)) from exc
-        self._audit("secret_delete", name, {})
-        return {"ok": True, "name": name, "deleted": existed}
-
-    def _audit(self, action: str, alias: str, config: dict[str, Any]) -> None:
-        if self.audit_path is None:
-            return
-        self.audit_path.parent.mkdir(parents=True, exist_ok=True)
-        event = {
-            "ts": int(time.time()),
-            "action": action,
-            "alias": alias,
-            "config": redact_config(config),
-        }
-        with self.audit_path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+class AdminNotFoundError(AdminServiceError):
+    status = 404
+    code = "not_found"
 
 
-def normalize_server_config(config: dict[str, Any]) -> NormalizedServerConfig:
-    if not isinstance(config, dict):
-        raise McpManagementError("MCP server config must be an object.")
-    unknown = set(config) - SERVER_CONFIG_KEYS
-    if unknown:
-        raise McpManagementError(f"Unknown MCP server config fields: {sorted(unknown)}")
-    alias = config.get("alias")
-    if not isinstance(alias, str) or not alias:
-        raise McpManagementError("MCP server config requires alias.")
-    raw_config = json_safe_copy({key: value for key, value in config.items() if key != "alias"})
-    try:
-        parsed = parse_server_config(alias, raw_config)
-    except UpstreamConfigError as exc:
-        raise McpManagementError(str(exc)) from exc
-    return NormalizedServerConfig(alias=alias, raw_config=raw_config, parsed=parsed)
+def document_revision(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def render_template_config(
-    template_id: str,
-    *,
-    variables: dict[str, Any] | None = None,
-    overrides: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    template = MCP_SERVER_TEMPLATES.get(template_id)
-    if template is None:
-        raise McpManagementError(f"Unknown MCP server template: {template_id}")
-    rendered_variables = default_template_variables(template)
-    for key, value in (variables or {}).items():
-        if not isinstance(key, str):
-            raise McpManagementError("Template variable names must be strings.")
-        rendered_variables[key] = str(value)
-    config = replace_template_values(json_safe_copy(template["config"]), rendered_variables)
-    if overrides:
-        if not isinstance(overrides, dict):
-            raise McpManagementError("Template overrides must be an object.")
-        config.update(json_safe_copy(overrides))
-    normalize_server_config(config)
-    return config
-
-
-def default_template_variables(template: dict[str, Any]) -> dict[str, str]:
-    variables: dict[str, str] = {}
-    raw_variables = template.get("variables", {})
-    if not isinstance(raw_variables, dict):
-        return variables
-    for key, definition in raw_variables.items():
-        if not isinstance(key, str):
-            continue
-        if isinstance(definition, dict):
-            variables[key] = str(definition.get("default", ""))
-        else:
-            variables[key] = ""
-    return variables
-
-
-def replace_template_values(value: Any, variables: dict[str, str]) -> Any:
-    if isinstance(value, str):
-        result = value
-        for key, replacement in variables.items():
-            result = result.replace("{" + key + "}", replacement)
-        return result
-    if isinstance(value, list):
-        return [replace_template_values(item, variables) for item in value]
-    if isinstance(value, dict):
-        return {str(key): replace_template_values(item, variables) for key, item in value.items()}
-    return value
-
-
-def diff_configs(current: dict[str, Any] | None, new: dict[str, Any]) -> dict[str, Any]:
-    if current is None:
-        return {"added": sorted(new)}
-    current_keys = set(current)
-    new_keys = set(new)
-    changed = sorted(key for key in current_keys & new_keys if current.get(key) != new.get(key))
-    return {
-        "added": sorted(new_keys - current_keys),
-        "removed": sorted(current_keys - new_keys),
-        "changed": changed,
-    }
-
-
-def redact_config(config: dict[str, Any]) -> dict[str, Any]:
-    redacted: dict[str, Any] = {}
-    for key, value in config.items():
-        if isinstance(value, dict):
-            redacted[key] = {child_key: redact_value(child_key, child_value) for child_key, child_value in value.items()}
-        elif isinstance(value, list):
-            redacted[key] = list(value)
-        else:
-            redacted[key] = redact_value(key, value)
-    return redacted
-
-
-def redact_value(key: str, value: Any) -> Any:
-    if isinstance(value, dict):
-        if "secret_ref" in value or "env_ref" in value:
-            return dict(value)
-        return {child_key: redact_value(child_key, child_value) for child_key, child_value in value.items()}
-    if isinstance(value, str) and SENSITIVE_KEY_RE.search(key):
-        return "<redacted>"
-    return value
-
-
-def json_safe_copy(value: dict[str, Any]) -> dict[str, Any]:
+def _json_copy(value: Any) -> Any:
     try:
         return json.loads(json.dumps(value, ensure_ascii=False))
     except TypeError as exc:
-        raise McpManagementError(f"MCP server config must be JSON serializable: {exc}") from exc
+        raise AdminServiceError(f"Value must be JSON serializable: {exc}") from exc
+
+
+def _redact(value: Any, *, key: str = "") -> Any:
+    if key.endswith("_secret_ref"):
+        return {"configured": bool(value)}
+    if isinstance(value, dict):
+        if "secret_ref" in value:
+            return {"source": "secret_ref", "configured": bool(value.get("secret_ref"))}
+        if "env_ref" in value:
+            return {"source": "env_ref", "configured": bool(value.get("env_ref"))}
+        return {str(child): _redact(item, key=str(child)) for child, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item, key=key) for item in value]
+    if SENSITIVE_KEY_RE.search(key):
+        return "<redacted>" if value not in (None, "") else value
+    return value
+
+
+def _redact_oauth_item(item: dict[str, Any]) -> dict[str, Any]:
+    result = _json_copy(item)
+    for key in (
+        "client_secret_digest",
+        "secret_ref",
+        "token_hash",
+        "refresh_token",
+        "access_token",
+        "signing_secret",
+    ):
+        result.pop(key, None)
+    return _redact(result)
+
+
+def _atomic_write_json(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(document, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            tmp_path.chmod(0o600)
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        raise AdminUnavailableError(f"Could not atomically save configuration: {exc}") from exc
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _read_gateway_document(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"servers": {}}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise AdminUnavailableError(f"Could not read Gateway configuration: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise AdminServiceError(f"Gateway configuration is not valid JSON: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise AdminServiceError("Gateway configuration must be a JSON object.")
+    servers = raw.get("servers", raw)
+    if not isinstance(servers, dict):
+        raise AdminServiceError("Gateway configuration must contain a servers object.")
+    return {"servers": _json_copy(servers)}
+
+
+
+
+def gateway_file_revision(path: str | Path) -> str:
+    return document_revision(_read_gateway_document(Path(path).expanduser()))
+
+def _secret_refs(value: Any) -> list[str]:
+    refs: list[str] = []
+    if isinstance(value, dict):
+        ref = value.get("secret_ref")
+        if isinstance(ref, str) and ref:
+            refs.append(ref)
+        for child in value.values():
+            refs.extend(_secret_refs(child))
+    elif isinstance(value, list):
+        for child in value:
+            refs.extend(_secret_refs(child))
+    return refs
+
+
+def _validate_gateway_document(document: dict[str, Any], vault: SecretVault) -> dict[str, Any]:
+    servers = document.get("servers")
+    if not isinstance(servers, dict):
+        raise AdminServiceError("Gateway configuration must contain a servers object.")
+    normalized: dict[str, Any] = {}
+    for alias, value in servers.items():
+        if not isinstance(alias, str) or not isinstance(value, dict):
+            raise AdminServiceError("Gateway server entries must use string aliases and object values.")
+        try:
+            parse_server_config(alias, value)
+        except UpstreamConfigError as exc:
+            raise AdminServiceError(str(exc)) from exc
+        refs = _secret_refs(value)
+        if refs and not vault.enabled():
+            raise AdminUnavailableError(
+                "Gateway secret_ref requires an enabled server Secret Vault."
+            )
+        for ref in refs:
+            try:
+                vault.get_secret(ref)
+            except SecretVaultError as exc:
+                raise AdminUnavailableError(
+                    f"Gateway secret_ref {ref!r} cannot be resolved."
+                ) from exc
+        env = value.get("env")
+        if isinstance(env, dict):
+            for env_name, env_value in env.items():
+                if (
+                    isinstance(env_name, str)
+                    and SENSITIVE_KEY_RE.search(env_name)
+                    and isinstance(env_value, str)
+                ):
+                    raise AdminServiceError(
+                        f"Sensitive Gateway environment value {env_name!r} must use env_ref or secret_ref."
+                    )
+        headers = value.get("headers")
+        if isinstance(headers, dict):
+            for header_name, header_value in headers.items():
+                if (
+                    isinstance(header_name, str)
+                    and (
+                        header_name.lower() in {"authorization", "proxy-authorization"}
+                        or SENSITIVE_KEY_RE.search(header_name)
+                    )
+                    and isinstance(header_value, str)
+                    and header_value
+                ):
+                    raise AdminServiceError(
+                        "Sensitive Gateway headers cannot be persisted as plaintext."
+                    )
+        normalized[alias] = _json_copy(value)
+    return {"servers": normalized}
+
+
+class AdminService:
+    """Pure service layer used by the HTTP handler; it contains no handler state."""
+
+    def __init__(
+        self,
+        *,
+        settings_store: ServerSettingsStore,
+        active_settings: dict[str, Any],
+        fallback_workspace: str | Path,
+        gateway_path: str | Path,
+        active_gateway_revision: str,
+        secret_vault: SecretVault,
+        oauth_store: OAuthAuthorizationStore | None = None,
+        active_gateway_status: Callable[[], dict[str, Any]] | None = None,
+        transcript_store: TranscriptStore | None = None,
+        session_scanner: CodexSessionScanner | None = None,
+    ) -> None:
+        self.settings_store = settings_store
+        self.active_settings = _json_copy(active_settings)
+        self.fallback_workspace = Path(fallback_workspace).expanduser().resolve(strict=True)
+        self.gateway_path = Path(gateway_path).expanduser()
+        self.active_gateway_revision = active_gateway_revision
+        self.secret_vault = secret_vault
+        self.oauth_store = oauth_store
+        self.active_gateway_status = active_gateway_status
+        self.transcript_store = transcript_store
+        self.session_scanner = session_scanner or CodexSessionScanner()
+        self._settings_lock = threading.Lock()
+        self._gateway_lock = threading.Lock()
+
+    def status_payload(self) -> dict[str, Any]:
+        mode = telemetry_mode()
+        return {
+            "ok": True,
+            "admin_api": 1,
+            "settings": {"available": True},
+            "oauth": {"available": self.oauth_store is not None},
+            "gateway": {"available": True, "dynamic_reload": False},
+            "chat": {"available": self.transcript_store is not None},
+            "vault": {"enabled": self.secret_vault.enabled()},
+            "telemetry": {
+                "mode": mode,
+                "docs": "docs/telemetry.md",
+            },
+        }
+
+    def settings_payload(self) -> dict[str, Any]:
+        result = self.settings_store.read_result()
+        persisted = result.settings
+        pending = set(pending_restart_fields(self.active_settings, persisted))
+        pending.update(
+            field
+            for field in SECRET_REFERENCE_FIELDS
+            if self.active_settings.get(field) != persisted.get(field)
+        )
+        schema = schema_payload()
+        schema["restart_fields"] = sorted(
+            set(schema.get("restart_fields", ())) | set(SECRET_REFERENCE_FIELDS)
+        )
+        return {
+            "ok": True,
+            "active": sanitize_settings(self.active_settings),
+            "persisted": sanitize_settings(persisted),
+            "persisted_revision": document_revision(persisted),
+            "pending_restart": sorted(pending),
+            "restart_required": bool(pending),
+            "migration_warnings": list(result.warnings),
+            "schema": schema,
+        }
+
+    def validate_settings(self, body: dict[str, Any]) -> dict[str, Any]:
+        current = self.settings_store.read()
+        updates = body.get("updates", body)
+        if not isinstance(updates, dict):
+            raise AdminServiceError("settings updates must be an object.")
+        try:
+            normalized, warnings = normalize_startup_settings_with_warnings(
+                current, updates, self.fallback_workspace
+            )
+        except SettingsValidationError as exc:
+            raise AdminServiceError(str(exc)) from exc
+        pending = set(pending_restart_fields(self.active_settings, normalized))
+        pending.update(
+            field
+            for field in SECRET_REFERENCE_FIELDS
+            if self.active_settings.get(field) != normalized.get(field)
+        )
+        return {
+            "ok": True,
+            "valid": True,
+            "normalized": sanitize_settings(normalized),
+            "pending_restart": sorted(pending),
+            "restart_required": bool(pending),
+            "warnings": list(warnings),
+        }
+
+    def save_settings(self, body: dict[str, Any]) -> dict[str, Any]:
+        expected = body.get("expected_revision")
+        updates = body.get("updates")
+        if not isinstance(expected, str) or not expected:
+            raise AdminServiceError("expected_revision is required.")
+        if not isinstance(updates, dict):
+            raise AdminServiceError("updates must be an object.")
+        with self._settings_lock:
+            current = self.settings_store.read()
+            current_revision = document_revision(current)
+            if not _constant_equal(expected, current_revision):
+                raise AdminConflictError(
+                    "Settings changed after this page was loaded; reload before saving."
+                )
+            try:
+                normalized, warnings = normalize_startup_settings_with_warnings(
+                    current, updates, self.fallback_workspace
+                )
+                write_warnings = self.settings_store.write(normalized)
+            except (SettingsStoreError, SettingsValidationError) as exc:
+                raise AdminServiceError(str(exc)) from exc
+        payload = self.settings_payload()
+        payload["warnings"] = list(dict.fromkeys((*warnings, *write_warnings)))
+        return payload
+
+    def gateway_payload(self) -> dict[str, Any]:
+        document = _read_gateway_document(self.gateway_path)
+        revision = document_revision(document)
+        status = self.active_gateway_status() if self.active_gateway_status else None
+        return {
+            "ok": True,
+            "persisted": _redact(document),
+            "persisted_revision": revision,
+            "active_revision": self.active_gateway_revision,
+            "pending_restart": revision != self.active_gateway_revision,
+            "restart_required": revision != self.active_gateway_revision,
+            "active_status": _redact(status) if isinstance(status, dict) else None,
+            "dynamic_reload": False,
+        }
+
+    def save_gateway(self, body: dict[str, Any]) -> dict[str, Any]:
+        expected = body.get("expected_revision")
+        document = body.get("document")
+        if not isinstance(expected, str) or not expected:
+            raise AdminServiceError("expected_revision is required.")
+        if not isinstance(document, dict):
+            raise AdminServiceError("document must be an object.")
+        with self._gateway_lock:
+            current = _read_gateway_document(self.gateway_path)
+            if not _constant_equal(expected, document_revision(current)):
+                raise AdminConflictError(
+                    "Gateway configuration changed after this page was loaded; reload before saving."
+                )
+            normalized = _validate_gateway_document(document, self.secret_vault)
+            _atomic_write_json(self.gateway_path, normalized)
+        return self.gateway_payload()
+
+    def secrets_payload(self) -> dict[str, Any]:
+        if not self.secret_vault.enabled():
+            raise AdminUnavailableError("Server Secret Vault is not enabled.")
+        try:
+            names = self.secret_vault.list_names()
+        except SecretVaultError as exc:
+            raise AdminUnavailableError(str(exc)) from exc
+        return {
+            "ok": True,
+            "vault_enabled": self.secret_vault.enabled(),
+            "secrets": [{"name": name, "configured": True} for name in names],
+        }
+
+    def set_secret(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
+        value = body.get("value")
+        if not isinstance(value, str) or not value:
+            raise AdminServiceError("Secret value must be a non-empty string.")
+        try:
+            existed = name in self.secret_vault.list_names()
+            self.secret_vault.set_secret(name, value)
+        except SecretVaultError as exc:
+            raise AdminUnavailableError(str(exc)) from exc
+        return {
+            "ok": True,
+            "name": name,
+            "configured": True,
+            "created": not existed,
+            "affected_count": 1,
+        }
+
+    def delete_secret(self, name: str) -> dict[str, Any]:
+        try:
+            deleted = self.secret_vault.delete_secret(name)
+        except SecretVaultError as exc:
+            raise AdminUnavailableError(str(exc)) from exc
+        return {"ok": True, "name": name, "affected_count": 1 if deleted else 0}
+
+    def oauth_payload(self, collection: str, query: dict[str, str]) -> dict[str, Any]:
+        store = self._require_oauth_store()
+        client_id = query.get("client_id") or None
+        if collection == "clients":
+            items = store.list_clients()
+        elif collection == "grants":
+            items = store.list_grants(client_id)
+        elif collection == "tokens":
+            items = store.list_access_tokens(client_id)
+        elif collection == "refresh-families":
+            items = store.list_refresh_token_families(client_id)
+        elif collection == "signing-keys":
+            items = store.list_signing_keys()
+        elif collection == "audit":
+            try:
+                limit = int(query.get("limit", "100"))
+            except ValueError as exc:
+                raise AdminServiceError("audit limit must be an integer.") from exc
+            items = store.list_audit_events(limit=limit)
+        else:
+            raise AdminNotFoundError("Unknown OAuth collection.")
+        redacted = [_redact_oauth_item(item) for item in items]
+        return {"ok": True, "items": redacted, "count": len(redacted)}
+
+    def oauth_action(self, resource: str, identifier: str, action: str) -> dict[str, Any]:
+        store = self._require_oauth_store()
+        before_events = {
+            str(item.get("event_id"))
+            for item in store.list_audit_events(limit=500)
+            if item.get("event_id") is not None
+        }
+        changed = False
+        exists = False
+        if resource == "clients" and action in {"enable", "disable"}:
+            item = store.get_client(identifier)
+            exists = item is not None
+            if item is not None:
+                desired = action == "enable"
+                changed = (
+                    bool(item.get("enabled")) is not desired
+                    and store.set_client_enabled(identifier, desired)
+                )
+        elif resource == "grants" and action == "revoke":
+            item = store.get_grant(identifier)
+            exists = item is not None
+            if item is not None:
+                changed = (
+                    item.get("revoked_at") is None
+                    and store.revoke_grant(identifier)
+                )
+        elif resource == "tokens" and action == "revoke":
+            item = next((row for row in store.list_access_tokens() if row.get("jti") == identifier), None)
+            exists = item is not None
+            if item is not None:
+                changed = (
+                    item.get("revoked_at") is None
+                    and store.revoke_access_token(identifier)
+                )
+        elif resource == "refresh-families" and action == "revoke":
+            item = next(
+                (row for row in store.list_refresh_token_families() if row.get("family_id") == identifier),
+                None,
+            )
+            exists = item is not None
+            if item is not None:
+                changed = (
+                    item.get("revoked_at") is None
+                    and store.revoke_refresh_family(identifier)
+                )
+        elif resource == "signing-keys" and action in {"activate", "retire", "revoke"}:
+            item = next((row for row in store.list_signing_keys() if row.get("kid") == identifier), None)
+            exists = item is not None
+            if item is not None:
+                desired_status = {"activate": "active", "retire": "retired", "revoke": "revoked"}[action]
+                if action == "activate":
+                    applied = store.activate_signing_key(identifier)
+                elif action == "retire":
+                    applied = store.retire_signing_key(identifier)
+                else:
+                    applied = store.revoke_signing_key(identifier)
+                changed = item.get("status") != desired_status and applied
+        else:
+            raise AdminNotFoundError("Unknown OAuth management action.")
+        audit_event_id = None
+        if changed:
+            for event in store.list_audit_events(limit=500):
+                candidate = event.get("event_id")
+                if candidate is not None and str(candidate) not in before_events:
+                    audit_event_id = str(candidate)
+                    break
+        return {
+            "ok": True,
+            "resource": resource,
+            "id": identifier,
+            "action": action,
+            "found": exists,
+            "affected_count": 1 if changed else 0,
+            "audit_event_id": audit_event_id,
+        }
+
+    def workspaces_payload(self) -> dict[str, Any]:
+        current = self.settings_store.read()
+        try:
+            catalog = WorkspaceCatalog.from_settings(current, self.fallback_workspace)
+        except WorkspaceCatalogError as exc:
+            raise AdminServiceError(str(exc)) from exc
+        return {
+            "ok": True,
+            **catalog.settings_payload(),
+            "persisted_revision": document_revision(current),
+        }
+
+    def workspace_add(self, body: dict[str, Any]) -> dict[str, Any]:
+        expected = _required_revision(body)
+        entry = body.get("workspace")
+        if not isinstance(entry, dict):
+            raise AdminServiceError("workspace must be an object.")
+        with self._settings_lock:
+            current = self._checked_settings(expected)
+            catalog = WorkspaceCatalog.from_settings(current, self.fallback_workspace)
+            entries = [item.payload() for item in catalog.entries]
+            new_entry = {
+                "id": entry.get("id"),
+                "name": entry.get("name"),
+                "root": entry.get("root"),
+                "enabled": entry.get("enabled", True),
+                "default": entry.get("default", False),
+            }
+            entries.append(new_entry)
+            default_id = str(new_entry["id"]) if new_entry["default"] else catalog.default_id
+            for item in entries:
+                item["default"] = item.get("id") == default_id
+            self._write_workspace_settings(current, entries, default_id)
+        return self.workspaces_payload()
+
+    def workspace_disable(self, identifier: str, body: dict[str, Any]) -> dict[str, Any]:
+        expected = _required_revision(body)
+        with self._settings_lock:
+            current = self._checked_settings(expected)
+            catalog = WorkspaceCatalog.from_settings(current, self.fallback_workspace)
+            if identifier == catalog.default_id:
+                raise AdminServiceError("The default Workspace cannot be disabled.")
+            entries = [item.payload() for item in catalog.entries]
+            target = next((item for item in entries if item["id"] == identifier), None)
+            if target is None:
+                raise AdminNotFoundError("Workspace is not present in the catalog.")
+            target["enabled"] = False
+            self._write_workspace_settings(current, entries, catalog.default_id)
+        return self.workspaces_payload()
+
+    def workspace_default(self, identifier: str, body: dict[str, Any]) -> dict[str, Any]:
+        expected = _required_revision(body)
+        with self._settings_lock:
+            current = self._checked_settings(expected)
+            catalog = WorkspaceCatalog.from_settings(current, self.fallback_workspace)
+            entries = [item.payload() for item in catalog.entries]
+            target = next((item for item in entries if item["id"] == identifier), None)
+            if target is None:
+                raise AdminNotFoundError("Workspace is not present in the catalog.")
+            if not target["enabled"]:
+                raise AdminServiceError("A disabled Workspace cannot become the default.")
+            for item in entries:
+                item["default"] = item["id"] == identifier
+            self._write_workspace_settings(current, entries, identifier)
+        return self.workspaces_payload()
+
+    def workspace_check(self, identifier: str) -> dict[str, Any]:
+        current = self.settings_store.read()
+        catalog = WorkspaceCatalog.from_settings(current, self.fallback_workspace)
+        entry = next((item for item in catalog.entries if item.id == identifier), None)
+        if entry is None:
+            raise AdminNotFoundError("Workspace is not present in the catalog.")
+        return {
+            "ok": True,
+            "workspace": entry.payload(),
+            "check": {
+                "exists": entry.root.exists(),
+                "is_directory": entry.root.is_dir(),
+                "enabled": entry.enabled,
+                "is_default": entry.default,
+            },
+        }
+
+    def chat_conversations(self, query: dict[str, str]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        workspace_id = query.get("workspace_id") or None
+        if workspace_id is not None:
+            self._workspace_scope(workspace_id)
+        page = _query_int(query, "page", 1)
+        page_size = _query_int(query, "page_size", 50)
+        payload = store.list_conversations(
+            workspace_id,
+            page=page,
+            page_size=page_size,
+            query=query.get("query") or None,
+        )
+        return {"ok": True, **payload}
+
+    def chat_conversation_detail(self, workspace_id: str, conversation_id: str, query: dict[str, str]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        payload = store.conversation_detail(
+            workspace_id,
+            conversation_id,
+            message_page=_query_int(query, "message_page", 1),
+            message_page_size=_query_int(query, "message_page_size", 100),
+            context_page=_query_int(query, "context_page", 1),
+            context_page_size=_query_int(query, "context_page_size", 100),
+        )
+        if payload is None:
+            raise AdminNotFoundError("Conversation is not present in the selected Workspace.")
+        return {"ok": True, **payload}
+
+    def chat_record_messages(self, workspace_id: str, conversation_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            raise AdminServiceError("messages must be a list.")
+        return {
+            "ok": True,
+            **store.record_messages(
+                workspace_id,
+                conversation_id,
+                messages,
+                title=body.get("title"),
+                source=body.get("source") or "admin-api",
+            ),
+        }
+
+    def chat_record_context(self, workspace_id: str, conversation_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        entries = body.get("entries")
+        if not isinstance(entries, list):
+            raise AdminServiceError("entries must be a list.")
+        return {
+            "ok": True,
+            **store.record_context(
+                workspace_id,
+                conversation_id,
+                entries,
+                title=body.get("title"),
+                source=body.get("source") or "admin-api",
+            ),
+        }
+
+    def chat_delete(self, resource: str, workspace_id: str, identifier: str) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        if resource == "messages":
+            result = store.delete_message(workspace_id, identifier)
+        elif resource == "context":
+            result = store.delete_context(workspace_id, identifier)
+        elif resource == "conversations":
+            result = store.delete_conversation(workspace_id, identifier)
+        elif resource == "sessions":
+            result = store.delete_imported_session(workspace_id, identifier)
+        else:
+            raise AdminNotFoundError("Unknown chat deletion resource.")
+        return {"ok": True, **result}
+
+    def chat_clear_workspace(self, workspace_id: str) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        self._workspace_scope(workspace_id)
+        return {"ok": True, **store.clear_workspace(workspace_id)}
+
+    def codex_scan(self, body: dict[str, Any]) -> dict[str, Any]:
+        workspace_id = body.get("workspace_id")
+        if not isinstance(workspace_id, str):
+            raise AdminServiceError("workspace_id is required.")
+        scope = self._workspace_scope(workspace_id)
+        roots = body.get("roots")
+        if roots is not None and (not isinstance(roots, list) or not all(isinstance(item, str) for item in roots)):
+            raise AdminServiceError("roots must be a list of relative paths.")
+        try:
+            policy = _scan_policy(body)
+            return {"ok": True, **self.session_scanner.scan(scope, roots=roots, policy=policy)}
+        except CodexSessionError as exc:
+            raise AdminServiceError(str(exc)) from exc
+
+    def codex_import(self, body: dict[str, Any]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        workspace_id = body.get("workspace_id")
+        candidate_ids = body.get("candidate_ids")
+        if not isinstance(workspace_id, str):
+            raise AdminServiceError("workspace_id is required.")
+        if not isinstance(candidate_ids, list) or not all(isinstance(item, str) for item in candidate_ids):
+            raise AdminServiceError("candidate_ids must be a list of strings.")
+        roots = body.get("roots")
+        if roots is not None and (not isinstance(roots, list) or not all(isinstance(item, str) for item in roots)):
+            raise AdminServiceError("roots must be a list of relative paths.")
+        scope = self._workspace_scope(workspace_id)
+        try:
+            return {
+                "ok": True,
+                **self.session_scanner.import_candidates(
+                    store,
+                    scope,
+                    candidate_ids=candidate_ids,
+                    roots=roots,
+                    policy=_scan_policy(body),
+                ),
+            }
+        except (CodexSessionError, TranscriptStoreError) as exc:
+            raise AdminServiceError(str(exc)) from exc
+
+    def codex_sessions(self, query: dict[str, str]) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        workspace_id = query.get("workspace_id") or None
+        if workspace_id is not None:
+            self._workspace_scope(workspace_id)
+        return {
+            "ok": True,
+            **store.list_imported_sessions(
+                workspace_id,
+                page=_query_int(query, "page", 1),
+                page_size=_query_int(query, "page_size", 50),
+            ),
+        }
+
+    def _workspace_scope(self, workspace_id: str) -> WorkspaceScope:
+        current = self.settings_store.read()
+        try:
+            catalog = WorkspaceCatalog.from_settings(current, self.fallback_workspace)
+            entry = catalog.get(workspace_id)
+        except WorkspaceCatalogError as exc:
+            raise AdminNotFoundError("Workspace is unknown or disabled.") from exc
+        return WorkspaceScope.create(entry.id, entry.root)
+
+    def _require_transcript_store(self) -> TranscriptStore:
+        if self.transcript_store is None:
+            raise AdminUnavailableError("Chat persistence is not configured.")
+        return self.transcript_store
+
+    def dispatch(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any],
+        query: dict[str, str],
+    ) -> dict[str, Any]:
+        relative = path.removeprefix(ADMIN_API_PREFIX).strip("/")
+        parts = [part for part in relative.split("/") if part]
+        if method == "GET" and parts == ["status"]:
+            return self.status_payload()
+        if method == "GET" and parts == ["settings"]:
+            return self.settings_payload()
+        if method == "POST" and parts == ["settings", "validate"]:
+            return self.validate_settings(body)
+        if method == "PUT" and parts == ["settings"]:
+            return self.save_settings(body)
+        if method == "GET" and parts == ["gateway"]:
+            return self.gateway_payload()
+        if method == "PUT" and parts == ["gateway"]:
+            return self.save_gateway(body)
+        if method == "GET" and parts == ["secrets"]:
+            return self.secrets_payload()
+        if len(parts) == 2 and parts[0] == "secrets" and method == "PUT":
+            return self.set_secret(parts[1], body)
+        if len(parts) == 2 and parts[0] == "secrets" and method == "DELETE":
+            return self.delete_secret(parts[1])
+        if method == "GET" and parts == ["workspaces"]:
+            return self.workspaces_payload()
+        if method == "POST" and parts == ["workspaces"]:
+            return self.workspace_add(body)
+        if len(parts) == 3 and parts[0] == "workspaces" and method == "POST":
+            if parts[2] == "disable":
+                return self.workspace_disable(parts[1], body)
+            if parts[2] == "default":
+                return self.workspace_default(parts[1], body)
+        if len(parts) == 3 and parts[0] == "workspaces" and parts[2] == "check" and method == "GET":
+            return self.workspace_check(parts[1])
+        if len(parts) == 2 and parts[0] == "oauth" and method == "GET":
+            return self.oauth_payload(parts[1], query)
+        if len(parts) == 4 and parts[0] == "oauth" and method == "POST":
+            return self.oauth_action(parts[1], parts[2], parts[3])
+        if method == "GET" and parts == ["chat", "conversations"]:
+            return self.chat_conversations(query)
+        if len(parts) == 4 and parts[:2] == ["chat", "conversations"] and method == "GET":
+            return self.chat_conversation_detail(parts[2], parts[3], query)
+        if len(parts) == 5 and parts[:2] == ["chat", "conversations"] and method == "POST":
+            if parts[4] == "messages":
+                return self.chat_record_messages(parts[2], parts[3], body)
+            if parts[4] == "context":
+                return self.chat_record_context(parts[2], parts[3], body)
+        if len(parts) == 4 and parts[0] == "chat" and parts[1] in {"messages", "context", "sessions"} and method == "DELETE":
+            return self.chat_delete(parts[1], parts[2], parts[3])
+        if len(parts) == 4 and parts[:2] == ["chat", "conversations"] and method == "DELETE":
+            return self.chat_delete("conversations", parts[2], parts[3])
+        if len(parts) == 4 and parts[:2] == ["chat", "workspaces"] and parts[3] == "clear" and method == "POST":
+            return self.chat_clear_workspace(parts[2])
+        if method == "POST" and parts == ["codex", "sessions", "scan"]:
+            return self.codex_scan(body)
+        if method == "POST" and parts == ["codex", "sessions", "import"]:
+            return self.codex_import(body)
+        if method == "GET" and parts == ["codex", "sessions"]:
+            return self.codex_sessions(query)
+        if len(parts) == 4 and parts[:2] == ["codex", "sessions"] and method == "DELETE":
+            return self.chat_delete("sessions", parts[2], parts[3])
+        raise AdminNotFoundError("Unknown Admin API endpoint.")
+
+    def _checked_settings(self, expected_revision: str) -> dict[str, Any]:
+        current = self.settings_store.read()
+        if not _constant_equal(expected_revision, document_revision(current)):
+            raise AdminConflictError(
+                "Settings changed after this page was loaded; reload before saving."
+            )
+        return current
+
+    def _write_workspace_settings(
+        self,
+        current: dict[str, Any],
+        entries: list[dict[str, Any]],
+        default_id: str,
+    ) -> None:
+        try:
+            normalized, _warnings = normalize_startup_settings_with_warnings(
+                current,
+                {
+                    "workspace_catalog": entries,
+                    "default_workspace_id": default_id,
+                },
+                self.fallback_workspace,
+            )
+            self.settings_store.write(normalized)
+        except (SettingsStoreError, SettingsValidationError, WorkspaceCatalogError) as exc:
+            raise AdminServiceError(str(exc)) from exc
+
+    def _require_oauth_store(self) -> OAuthAuthorizationStore:
+        if self.oauth_store is None:
+            raise AdminUnavailableError("OAuth persistence is not configured.")
+        return self.oauth_store
+
+def _query_int(query: dict[str, str], key: str, default: int) -> int:
+    raw = query.get(key)
+    if raw in (None, ""):
+        return default
+    assert raw is not None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise AdminServiceError(f"{key} must be an integer.") from exc
+
+
+def _scan_policy(body: dict[str, Any]) -> ScanPolicy:
+    values: dict[str, int] = {}
+    for field in ("max_depth", "max_files", "max_file_bytes", "max_total_bytes", "max_messages"):
+        if field in body:
+            raw = body[field]
+            if isinstance(raw, bool):
+                raise AdminServiceError(f"{field} must be an integer.")
+            try:
+                values[field] = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise AdminServiceError(f"{field} must be an integer.") from exc
+    return ScanPolicy(**values).validated()
+
+
+def _required_revision(body: dict[str, Any]) -> str:
+    value = body.get("expected_revision")
+    if not isinstance(value, str) or not value:
+        raise AdminServiceError("expected_revision is required.")
+    return value
+
+
+def _constant_equal(left: str, right: str) -> bool:
+    return hashlib.sha256(left.encode("utf-8")).digest() == hashlib.sha256(
+        right.encode("utf-8")
+    ).digest()
+
+
+__all__ = [
+    "ADMIN_API_PREFIX",
+    "SERVER_SECRET_VAULT_FILENAME",
+    "AdminConflictError",
+    "AdminNotFoundError",
+    "AdminService",
+    "AdminServiceError",
+    "AdminUnavailableError",
+    "document_revision",
+    "gateway_file_revision",
+]
