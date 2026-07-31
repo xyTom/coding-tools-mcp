@@ -2,17 +2,18 @@
 
 ## Status
 
-- Result: blocked on external push authorization only
-- Branch: `integration/upstream-v0.2.2`
+- Result: complete
+- Final branch: `main`
 - Started from: `cd51ee0297c6e14c2df8eacd844aaea28efff933`
-- Current local preparation HEAD before this handoff: `8e5a37567a316dd24600be1aa86ea208622de778`
+- Validated integration candidate: `6551ff96f23c58c2d4f0c899f9338cd7cbd43772`
+- Main merge commit before this handoff: `463b0a5e29b090dead1610be7377744091e7b70d`
 - Preparation commits:
   - `a55d216` - `build(deps): refresh integration lock metadata`
   - `ab2c931` - `ci(compliance): allow setup-node under Landlock`
   - `0f31303` - `test(compliance): stabilize Windows release regressions`
   - `8e5a375` - `chore(release): prepare 0.3.0.dev0 candidate`
 - Handoff commit: resolve from `git log -1`.
-- Version and telemetry decisions are resolved. No remote write has been authorized.
+- Version, telemetry, push, and main-merge decisions are resolved.
 
 ## Resolved Decisions
 
@@ -194,36 +195,62 @@ the worktree.
 - Production telemetry changes: 0.
 - OAuth/Transcript DB, Vault, WAL/SHM, or secret JSON files committed: 0.
 - Tag at the local preparation HEAD: none.
-- Push: not performed.
+- Atomic push completed to `onestao`; `origin` was not written.
 - PyPI publish: not performed.
 - npm publish: not performed.
 - GitHub Release: not created.
-- Cloudflare deployment: not performed.
-- Local `main` replacement: not performed.
+- Cloudflare deployment did not run: the workflow failed at the credential preflight before deployment.
+- Local and `onestao/main` now point to the validated merge history.
 - WIP or backup refs: not deleted.
 
-## Remaining Blocker
+## Remote Push, Main Merge, and Fork CI
 
-Phase 14 remains blocked because the user's message to continue local work did
-not explicitly authorize a remote write.
+The user explicitly authorized both the remote push and merge to `main`.
 
-The only planned branch push target is:
+The integration branch and `main` were updated atomically on the `onestao`
+remote:
 
 ```text
-integration/upstream-v0.2.2 -> onestao
+onestao/integration/upstream-v0.2.2 = 6551ff96f23c58c2d4f0c899f9338cd7cbd43772
+onestao/main                         = 463b0a5e29b090dead1610be7377744091e7b70d
 ```
 
-`origin` must not be written.
+A conventional merge was intentionally not used because it would have restored
+obsolete pre-integration Admin, transcript, WebUI, and `tool_profile` files. The
+final merge commit has two parents:
 
-After explicit push authorization, the remaining sequence is:
+```text
+first parent:  a23f6c87ae856bc63529a791824793b362e8987a
+second parent: 6551ff96f23c58c2d4f0c899f9338cd7cbd43772
+```
 
-1. push the integration branch to `onestao`;
-2. obtain authoritative fork CI for the exact pushed SHA;
-3. review CI evidence and release environments;
-4. only then decide whether to create `v0.3.0.dev0` and allow the release
-   workflow to publish prerelease artifacts;
-5. keep local `main`, WIP refs, and backup refs unchanged until release evidence
-   is accepted.
+Its tree is exactly the validated integration tree:
+
+```text
+1f9302109bbb66531e66f6e0c9326dcf087ddc6d
+```
+
+The pre-merge local `main` is retained at:
+
+```text
+backup/main-before-v0.3.0.dev0 = a23f6c87ae856bc63529a791824793b362e8987a
+```
+
+GitHub-hosted Actions for exact SHA `463b0a5e29b090dead1610be7377744091e7b70d`:
+
+| Workflow | Result | Run ID |
+| --- | --- | --- |
+| `compliance` | success, including Windows MSVC smoke | `30623082019` |
+| `docker-image` | success | `30623082014` |
+| `deploy-sandbox-control` | failed at `Require Cloudflare credentials`; no deployment occurred | `30623082011` |
+
+The sandbox-control failure is an environment/configuration failure before any
+Cloudflare write. It does not invalidate the Runtime, packaging, or release
+candidate evidence.
+
+No tag was created. PyPI, npm, and GitHub Release publishing were not triggered.
+The release workflow remains tag-only, so `0.3.0.dev0` is merged but not
+published.
 
 ## Rollback and Protected References
 
