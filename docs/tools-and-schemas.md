@@ -32,8 +32,14 @@ The default catalog contains exactly 20 tools:
 - `view_image`: one MCP image content block plus structured metadata.
 
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 19 tools are
-always advertised, and `listChanged` is `false`.
+content. That capability gate is not a tool profile. The other 19 local tools
+are always advertised.
+
+Optional upstream tools are appended only during Runtime initialization and use
+`{alias}__{remote_name}`. Local names are permanently reserved. Upstream schema,
+annotations, extension fields, `content`, `structuredContent`, and `isError` are
+preserved. Namespace collisions fail closed, and an established Runtime never
+changes its snapshot; therefore `listChanged` is `false`.
 
 ## Result envelope
 
@@ -48,10 +54,10 @@ Every successful tool call has:
 ```
 
 `content` is not a JSON mirror. `structuredContent` is the complete machine
-interface and retains existing fields where possible. Model-facing text is
-bounded at 16 KiB; if it is shortened, the full structured value is still
-present. Errors use the same envelope with readable recovery guidance and
-`isError: true`.
+interface and retains existing fields where possible. Model-facing text follows
+each tool's own byte/result limits, with an emergency safety ceiling for
+pathological entries; there is no generic 16 KiB preview truncation. Errors use
+the same envelope with readable recovery guidance and `isError: true`.
 
 `view_image` is the exception to text-only content: its base64 appears exactly
 once in one `image` block. `structuredContent` contains path, media type, byte
