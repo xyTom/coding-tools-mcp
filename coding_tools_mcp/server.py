@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import base64
 import ctypes
 import hashlib
@@ -32,22 +33,53 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
+from .admin import (
+    ADMIN_API_PREFIX,
+    SERVER_SECRET_VAULT_FILENAME,
+    AdminService,
+    AdminServiceError,
+    AdminUnavailableError,
+    gateway_file_revision,
+)
 from .envutils import ENV_PREFIX, truthy_env
+from .codex_sessions import CodexSessionScanner
 from .errors import JsonRpcError, ToolFailure
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
     OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,
+    OAUTH_GRANT_TYPE_REFRESH_TOKEN,
     OAUTH_GRANT_TYPES_SUPPORTED,
     OAUTH_MAX_BODY_BYTES,
     OAUTH_RESPONSE_TYPES_SUPPORTED,
     MAX_PENDING_CODES,
     OAUTH_TOKEN_TTL_SECONDS,
+    OAuthClientAuthenticationError,
     OAuthConfig,
+    OAuthIdentity,
+    OAuthInvalidGrantError,
+    OAuthServiceError,
+    PersistentOAuthClientRegistry,
+    authenticate_access_token,
     create_access_token,
+    create_authorization_grant,
+    exchange_refresh_token,
+    initialize_signing_key_ring,
+    issue_refresh_token,
     valid_pkce_challenge,
-    validate_access_token,
     verify_pkce,
+)
+from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from .secret_vault import SecretVault, SecretVaultError
+from .settings_definition import (
+    SettingsValidationError,
+    normalize_allowed_origins,
+    normalize_oauth_client_workspace_bindings,
+)
+from .settings_store import (
+    ServerSettingsStore,
+    SettingsStoreError,
+    default_settings_dir,
 )
 from .patching import (
     AtomicPatchCommitter,
@@ -79,8 +111,22 @@ from .project_context import ProjectContext, load_project_context
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
+from .transcript import TranscriptStore
 from .transport_http import HTTPSessionManager
 from .transport_stdio import serve_stdio
+from .upstream import (
+    UpstreamConfigError,
+    UpstreamConfigSnapshot,
+    UpstreamManager,
+    load_upstream_config_snapshot,
+)
+from .workspace_binding import (
+    WorkspaceBinding,
+    WorkspaceBindingError,
+    WorkspaceBindingResolver,
+)
+from .webui import admin_console_html
+from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 
 
 SERVER_NAME = "coding-tools-mcp"
@@ -321,6 +367,20 @@ class RuntimePolicy:
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
     fake_readonly_annotations: bool = False
+
+
+@dataclass(frozen=True)
+class AuthorizationContext:
+    method: str
+    oauth_identity: OAuthIdentity | None = None
+
+    def authorization_key(self, workspace_id: str) -> tuple[str, str | None, str | None, str]:
+        return (
+            self.method,
+            self.oauth_identity.client_id if self.oauth_identity is not None else None,
+            self.oauth_identity.grant_id if self.oauth_identity is not None else None,
+            workspace_id,
+        )
 
 
 OAUTH_TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
@@ -700,35 +760,25 @@ def json_response_payload(payload: Any) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-@functools.lru_cache(maxsize=8)
-def _configured_allowed_origins(raw: str) -> frozenset[str]:
-    return frozenset(item.strip().rstrip("/") for item in raw.split(",") if item.strip())
+_ACTIVE_ALLOWED_ORIGINS: frozenset[str] = frozenset()
+
+
+def configure_allowed_origins(value: Any) -> frozenset[str]:
+    global _ACTIVE_ALLOWED_ORIGINS
+    normalized = frozenset(normalize_allowed_origins(value))
+    _ACTIVE_ALLOWED_ORIGINS = normalized
+    return normalized
 
 
 def is_allowed_origin(origin: str) -> bool:
-    # Authentication does not replace browser Origin validation.
+    # Authentication does not replace browser Origin validation. The same
+    # canonical validator is used for startup and Admin settings writes.
     try:
-        parsed = urllib.parse.urlparse(origin)
-    except ValueError:
+        normalized_values = normalize_allowed_origins([origin])
+        parsed = urllib.parse.urlsplit(normalized_values[0])
+    except (IndexError, SettingsValidationError, ValueError):
         return False
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in {"", "/"}
-        or parsed.params
-        or parsed.query
-        or parsed.fragment
-    ):
-        return False
-    try:
-        _ = parsed.port
-    except ValueError:
-        return False
-    normalized = origin.rstrip("/")
-    configured = _configured_allowed_origins(os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS", ""))
-    return parsed.hostname in {"localhost", "127.0.0.1", "::1"} or normalized in configured
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"} or normalized_values[0] in _ACTIVE_ALLOWED_ORIGINS
 
 
 def is_loopback_bind_host(host: str) -> bool:
@@ -1213,17 +1263,28 @@ class Runtime:
         auth_token: str | None = None,
         oauth_config: OAuthConfig | None = None,
         project_context: ProjectContext | None = None,
+        workspace_binding: WorkspaceBinding | None = None,
+        authorization_context: AuthorizationContext | None = None,
+        upstream_manager: UpstreamManager | None = None,
         fake_readonly_annotations: bool = False,
         transport: str = "stdio",
     ) -> None:
         self.workspace = Workspace(workspace)
+        if workspace_binding is not None and workspace_binding.root != self.workspace.root:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Workspace binding root does not match Runtime workspace.",
+                category="validation",
+            )
+        self.workspace_binding = workspace_binding or WorkspaceBinding(
+            "default",
+            self.workspace.root,
+            transport,
+        )
+        self.authorization_context = authorization_context or AuthorizationContext(
+            self.workspace_binding.authorization_method
+        )
         self.enable_view_image = enable_view_image
-        self._exposed_tool_names = [
-            name
-            for name, spec in TOOL_REGISTRY.items()
-            if spec.gated_by is None or getattr(self, spec.gated_by)
-        ]
-        self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
         if permission_mode not in PERMISSION_MODE_CHOICES:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
@@ -1256,6 +1317,32 @@ class Runtime:
         self.allow_network = allow_network or self.capabilities.network
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
+        self.upstream_manager = upstream_manager or UpstreamManager.empty(
+            PROTOCOL_VERSION,
+            reserved_names=TOOL_REGISTRY,
+        )
+        local_tool_names = [
+            name
+            for name, spec in TOOL_REGISTRY.items()
+            if spec.gated_by is None or getattr(self, spec.gated_by)
+        ]
+        upstream_definitions = self.upstream_manager.tool_definitions()
+        self._upstream_tool_definitions = {
+            str(definition["name"]): definition for definition in upstream_definitions
+        }
+        upstream_tool_names = self.upstream_manager.tool_names()
+        collisions = sorted(set(TOOL_REGISTRY) & set(upstream_tool_names))
+        if collisions:
+            self.upstream_manager.close()
+            raise ToolFailure(
+                "UPSTREAM_TOOL_COLLISION",
+                f"Upstream Gateway collided with reserved local tools: {', '.join(collisions)}",
+                category="configuration",
+            )
+        self._local_tool_name_set = frozenset(local_tool_names)
+        self._upstream_tool_name_set = frozenset(upstream_tool_names)
+        self._exposed_tool_names = [*local_tool_names, *upstream_tool_names]
+        self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
         self.server_instance_id = secrets.token_urlsafe(12)
         self._set_runtime_dir(runtime_dir_for_workspace(self.workspace.root, self.server_instance_id))
         self.fallback_runtime_dir = fallback_runtime_dir_for_workspace(self.workspace.root, self.server_instance_id)
@@ -1283,6 +1370,9 @@ class Runtime:
         self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
 
+    def session_authorization_key(self) -> tuple[str, str | None, str | None, str]:
+        return self.authorization_context.authorization_key(self.workspace_binding.workspace_id)
+
     def _set_runtime_dir(self, runtime_dir: Path) -> None:
         self.runtime_dir = runtime_dir
         self.home_dir = self.runtime_dir / "home"
@@ -1302,6 +1392,7 @@ class Runtime:
             if session.process.poll() is None:
                 terminate_process_group(session.process, signal.SIGTERM)
             session.drain_readers()
+        self.upstream_manager.close()
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
         self.telemetry.finish()
 
@@ -1383,15 +1474,27 @@ class Runtime:
         }
 
     def list_tools(self) -> dict[str, Any]:
-        return {
-            "tools": [
-                tool_definition(name, fake_readonly=self.fake_readonly_annotations)
-                for name in self.exposed_tool_names()
-            ]
-        }
+        local_definitions = [
+            tool_definition(name, fake_readonly=self.fake_readonly_annotations)
+            for name in self._exposed_tool_names
+            if name in self._local_tool_name_set
+        ]
+        upstream_definitions = [
+            copy.deepcopy(self._upstream_tool_definitions[name])
+            for name in self._exposed_tool_names
+            if name in self._upstream_tool_name_set
+        ]
+        return {"tools": [*local_definitions, *upstream_definitions]}
 
     def exposed_tool_names(self) -> list[str]:
         return list(self._exposed_tool_names)
+
+    def real_tool_annotations(self, name: str) -> dict[str, Any]:
+        if name in self._local_tool_name_set:
+            return tool_annotations(name, fake_readonly=False)
+        definition = self._upstream_tool_definitions.get(name)
+        annotations = definition.get("annotations") if isinstance(definition, dict) else None
+        return copy.deepcopy(annotations) if isinstance(annotations, dict) else {}
 
     def auth_enabled(self) -> bool:
         return self.auth_token is not None or self.oauth_config is not None
@@ -1459,6 +1562,7 @@ class Runtime:
             },
             "tools": tools,
             "tool_count": len(tools),
+            "upstream": self.upstream_manager.status_payload(),
         }
 
     def call_tool(
@@ -1470,7 +1574,14 @@ class Runtime:
     ) -> dict[str, Any]:
         started_at = time.time()
         args = arguments or {}
-        handler = self._tool_handlers.get(name) if name in self._exposed_tool_name_set else None
+        if name in self._upstream_tool_name_set:
+            result = self.upstream_manager.call_tool(name, args)
+            structured = result.get("structuredContent")
+            payload = copy.deepcopy(structured) if isinstance(structured, dict) else {}
+            payload.setdefault("ok", not bool(result.get("isError")))
+            self.emit_tool_trace(name, args, payload, started_at)
+            return result
+        handler = self._tool_handlers.get(name) if name in self._local_tool_name_set else None
         if handler is None:
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         spec = TOOL_REGISTRY[name]
@@ -4013,7 +4124,10 @@ def open_landlock_ruleset(workspace: Path, read_roots: list[str], *, write_roots
 
 def add_landlock_path(ruleset_fd: int, path: Path, allowed_access: int, *, required: bool = True) -> None:
     try:
-        fd = os.open(path, getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC)
+        fd = os.open(
+            path,
+            getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0),
+        )
     except OSError as exc:
         if required:
             raise ToolFailure(
@@ -4649,7 +4763,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
     names = runtime.exposed_tool_names()
     # Always the real annotations, never the tools/list override: this card is
     # what an operator fetches to find out what the endpoint actually does.
-    annotations = {name: tool_annotations(name, fake_readonly=False) for name in names}
+    annotations = {name: runtime.real_tool_annotations(name) for name in names}
     read_only = [name for name in names if annotations[name].get("readOnlyHint") is True]
     mutating = [name for name in names if annotations[name].get("readOnlyHint") is not True]
     payload = {
@@ -4707,22 +4821,196 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             head_only=head_only,
         )
 
+    def _admin_service(self) -> AdminService | None:
+        service = getattr(self.server, "admin_service", None)  # type: ignore[attr-defined]
+        return service if isinstance(service, AdminService) else None
+
+    def _is_admin_authorized(self) -> bool:
+        configured = getattr(self.server, "admin_token", None)  # type: ignore[attr-defined]
+        if not isinstance(configured, str) or not configured:
+            return False
+        explicit = self.headers.get("X-Admin-Token", "").strip()
+        bearer = self.headers.get("Authorization", "").strip()
+        candidates = [explicit]
+        if bearer.startswith("Bearer "):
+            candidates.append(bearer.removeprefix("Bearer ").strip())
+        return any(value and secrets.compare_digest(value, configured) for value in candidates)
+
+    def _read_admin_json(self) -> dict[str, Any] | None:
+        if self.command in {"GET", "HEAD", "DELETE"}:
+            return {}
+        if self.headers.get_content_type().lower() != "application/json":
+            self.send_json({"error": {"code": "invalid_content_type", "message": "Content-Type must be application/json"}}, status=415)
+            return None
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self.send_json({"error": {"code": "invalid_request", "message": "Content-Length is required"}}, status=411)
+            return None
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self.send_json({"error": {"code": "invalid_request", "message": "Content-Length must be an integer"}}, status=400)
+            return None
+        if length < 0 or length > MAX_HTTP_REQUEST_BYTES:
+            self.send_json({"error": {"code": "invalid_request", "message": "Admin request body size is invalid"}}, status=413)
+            return None
+        try:
+            value = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_json({"error": {"code": "invalid_json", "message": "Body must be valid JSON"}}, status=400)
+            return None
+        if not isinstance(value, dict):
+            self.send_json({"error": {"code": "invalid_request", "message": "Body must be a JSON object"}}, status=400)
+            return None
+        return value
+
+    def handle_admin_request(self, method: str, *, head_only: bool = False) -> None:
+        service = self._admin_service()
+        if service is None:
+            self.send_json({"error": "Unknown endpoint"}, status=404, head_only=head_only)
+            return
+        origin = self.headers.get("Origin")
+        if origin and not is_allowed_origin(origin):
+            self.send_json({"error": {"code": "origin_denied", "message": "Origin denied"}}, status=403, head_only=head_only)
+            return
+        if not self._is_admin_authorized():
+            self.send_json(
+                {"error": {"code": "admin_auth_required", "message": "Admin authentication is required"}},
+                status=401,
+                extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-admin"'},
+                head_only=head_only,
+            )
+            return
+        body = self._read_admin_json()
+        if body is None:
+            return
+        parsed = urllib.parse.urlsplit(self.path)
+        query = {key: values[-1] for key, values in urllib.parse.parse_qs(parsed.query).items() if values}
+        try:
+            payload = service.dispatch(method, posixpath.normpath(parsed.path), body, query)
+        except AdminUnavailableError as exc:
+            self.send_json(
+                {
+                    "error": {
+                        "code": exc.code,
+                        "message": "An Admin backing service is unavailable.",
+                    }
+                },
+                status=exc.status,
+                head_only=head_only,
+            )
+            return
+        except AdminServiceError as exc:
+            self.send_json(
+                {"error": {"code": exc.code, "message": str(exc)}},
+                status=exc.status,
+                head_only=head_only,
+            )
+            return
+        except (OAuthStoreError, SecretVaultError, SettingsStoreError):
+            self.send_json(
+                {
+                    "error": {
+                        "code": "admin_unavailable",
+                        "message": "An Admin backing service is unavailable.",
+                    }
+                },
+                status=503,
+                head_only=head_only,
+            )
+            return
+        except Exception:  # noqa: BLE001 - Admin responses must remain redacted.
+            self.send_json(
+                {
+                    "error": {
+                        "code": "admin_internal_error",
+                        "message": "The Admin request could not be completed.",
+                    }
+                },
+                status=500,
+                head_only=head_only,
+            )
+            return
+        self.send_json(payload, head_only=head_only)
+
     def do_GET(self) -> None:
+        normalized = posixpath.normpath(self.path.split("?", 1)[0])
+        if normalized == "/admin":
+            if self._admin_service() is None:
+                self.send_json({"error": "Unknown endpoint"}, status=404)
+                return
+            origin = self.headers.get("Origin")
+            if origin and not is_allowed_origin(origin):
+                self.send_json(
+                    {"error": {"code": "origin_denied", "message": "Origin denied"}},
+                    status=403,
+                )
+                return
+            if not self._is_admin_authorized():
+                self.send_json(
+                    {"error": {"code": "admin_auth_required", "message": "Admin authentication is required"}},
+                    status=401,
+                    extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-admin"'},
+                )
+                return
+            body = admin_console_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("GET")
+            return
         self.handle_metadata_request(head_only=False)
 
     def do_HEAD(self) -> None:
+        normalized = posixpath.normpath(self.path.split("?", 1)[0])
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("GET", head_only=True)
+            return
         self.handle_metadata_request(head_only=True)
+
+    def do_PUT(self) -> None:
+        normalized = posixpath.normpath(self.path.split("?", 1)[0])
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("PUT")
+            return
+        self.send_json({"error": "Unknown endpoint"}, status=404)
 
     def do_DELETE(self) -> None:
         request_path = self.path.split("?", 1)[0]
-        if posixpath.normpath(request_path) != MCP_ENDPOINT_PATH:
+        normalized = posixpath.normpath(request_path)
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("DELETE")
+            return
+        if normalized != MCP_ENDPOINT_PATH:
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
         if not self.is_authorized():
             self.send_unauthorized()
             return
         session_id = self.headers.get("Mcp-Session-Id")
-        if not session_id or not self.server.sessions.delete(session_id):  # type: ignore[attr-defined]
+        runtime = self.server.sessions.get(session_id) if session_id else None  # type: ignore[attr-defined]
+        if runtime is None:
+            self.send_rpc_error(-32001, "Unknown MCP session", status=404)
+            return
+        authorization_context = getattr(self, "_authorization_context", None)
+        if (
+            not isinstance(authorization_context, AuthorizationContext)
+            or runtime.session_authorization_key()
+            != authorization_context.authorization_key(runtime.workspace_binding.workspace_id)
+        ):
+            self.send_rpc_error(
+                -32000,
+                "Authorization context does not match the initialized MCP session",
+                status=403,
+            )
+            return
+        if not self.server.sessions.delete(session_id):  # type: ignore[attr-defined]
             self.send_rpc_error(-32001, "Unknown MCP session", status=404)
             return
         self.send_response(200)
@@ -4732,7 +5020,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         request_path = self.path.split("?", 1)[0]
-        if posixpath.normpath(request_path) not in {
+        normalized = posixpath.normpath(request_path)
+        if not normalized.startswith(ADMIN_API_PREFIX) and normalized not in {
+            "/admin",
             MCP_ENDPOINT_PATH,
             "/.well-known/mcp.json",
             "/.well-known/mcp/server-card.json",
@@ -4749,7 +5039,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "Origin denied"}, status=403)
             return
         self.send_response(204)
-        self.send_header("Allow", "GET, HEAD, POST, DELETE, OPTIONS")
+        self.send_header("Allow", "GET, HEAD, POST, PUT, DELETE, OPTIONS")
         self.send_cors_headers()
         self.end_headers()
 
@@ -4789,6 +5079,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         request_path = self.path.split("?", 1)[0]
         normalized = posixpath.normpath(request_path)
+        if normalized.startswith(ADMIN_API_PREFIX):
+            self.handle_admin_request("POST")
+            return
         if normalized == "/oauth/authorize":
             self.handle_oauth_authorize_post()
             return
@@ -4868,9 +5161,18 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                     -32600, "initialize must not include Mcp-Session-Id", request_id=request.get("id")
                 )
                 return
+            authorization_context = getattr(self, "_authorization_context", None)
+            if not isinstance(authorization_context, AuthorizationContext):
+                self.send_rpc_error(
+                    -32000,
+                    "Request authorization context is unavailable",
+                    status=503,
+                    request_id=request.get("id"),
+                )
+                return
             try:
-                self._runtime = self.server.sessions.create()  # type: ignore[attr-defined]
-            except RuntimeError as exc:
+                self._runtime = self.server.sessions.create(authorization_context)  # type: ignore[attr-defined]
+            except (RuntimeError, WorkspaceBindingError) as exc:
                 self.send_rpc_error(-32000, str(exc), status=503, request_id=request.get("id"))
                 return
             self._send_session_header = True
@@ -4880,6 +5182,19 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if runtime is None:
                 self.send_rpc_error(
                     -32001, "Unknown MCP session", status=404, request_id=response_id(request)
+                )
+                return
+            authorization_context = getattr(self, "_authorization_context", None)
+            if (
+                not isinstance(authorization_context, AuthorizationContext)
+                or runtime.session_authorization_key()
+                != authorization_context.authorization_key(runtime.workspace_binding.workspace_id)
+            ):
+                self.send_rpc_error(
+                    -32000,
+                    "Authorization context does not match the initialized MCP session",
+                    status=403,
+                    request_id=request.get("id"),
                 )
                 return
             self._runtime = runtime
@@ -4917,15 +5232,31 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return jsonrpc_error(response_id(request), -32603, str(exc))
 
     def is_authorized(self) -> bool:
+        self._authorization_context = None
         if not self.runtime.auth_enabled():
+            self._authorization_context = AuthorizationContext("noauth")
             return True
         header = self.headers.get("Authorization", "").strip()
         if self.runtime.auth_token is not None:
             if secrets.compare_digest(header, f"Bearer {self.runtime.auth_token}"):
+                self._authorization_context = AuthorizationContext("bearer")
                 return True
         if self.runtime.oauth_config is not None and header.startswith("Bearer "):
             token = header[len("Bearer "):]
-            if validate_access_token(token, self.runtime.oauth_config, self.oauth_base_url()):
+            try:
+                identity = authenticate_access_token(
+                    token,
+                    self.runtime.oauth_config,
+                    self.oauth_base_url(),
+                )
+            except OAuthStoreError:
+                self.log_error("OAuth bearer validation unavailable; request denied")
+                return False
+            if identity is not None:
+                self._authorization_context = AuthorizationContext(
+                    "oauth",
+                    oauth_identity=identity,
+                )
                 return True
         return False
 
@@ -5075,10 +5406,16 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if _p("response_type") != "code":
             self._send_html("<h2>Error</h2><p>response_type must be 'code'</p>", status=400)
             return
-        if cfg.registry.get(client_id) is None:
+        try:
+            client = cfg.registry.get(client_id)
+            redirect_allowed = cfg.registry.accepts_redirect(client_id, redirect_uri)
+        except OAuthStoreError:
+            self._send_html("<h2>Error</h2><p>OAuth persistence is unavailable</p>", status=503)
+            return
+        if client is None:
             self._send_html("<h2>Error</h2><p>Unknown client_id</p>", status=400)
             return
-        if not cfg.registry.accepts_redirect(client_id, redirect_uri):
+        if not redirect_allowed:
             self._send_html("<h2>Error</h2><p>redirect_uri is not registered for this client</p>", status=400)
             return
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
@@ -5121,7 +5458,13 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 error=error,
             ), status=status)
 
-        if cfg.registry.get(client_id) is None or not cfg.registry.accepts_redirect(client_id, redirect_uri):
+        try:
+            client = cfg.registry.get(client_id)
+            redirect_allowed = cfg.registry.accepts_redirect(client_id, redirect_uri)
+        except OAuthStoreError:
+            fail("OAuth persistence is unavailable", status=503)
+            return
+        if client is None or not redirect_allowed:
             fail("Invalid client or redirect URI")
             return
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
@@ -5132,6 +5475,16 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         if not secrets.compare_digest(password, cfg.password):
             fail("Invalid password", status=401)
+            return
+        try:
+            grant_id = create_authorization_grant(
+                cfg,
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                scopes="mcp",
+            )
+        except OAuthServiceError:
+            fail("OAuth authorization store is unavailable", status=503)
             return
 
         code = secrets.token_urlsafe(32)
@@ -5147,6 +5500,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "client_id": client_id,
                 "redirect_uri": redirect_uri,
                 "state": state,
+                "grant_id": grant_id,
                 "expires_at": now + OAUTH_CODE_TTL_SECONDS,
                 "server_url": self.oauth_base_url(),
                 "resource": resource.rstrip("/"),
@@ -5167,9 +5521,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "unsupported_grant_type"}, status=400)
             return
 
-        def _err(error: str, description: str) -> None:
+        def _err(error: str, description: str, *, status: int = 400) -> None:
             self.log_message("OAuth token error: %s - %s", error, description)
-            self.send_json({"error": error, "error_description": description}, status=400)
+            self.send_json(
+                {"error": error, "error_description": description},
+                status=status,
+            )
 
         body = self._read_oauth_body()
         if body is None:
@@ -5203,13 +5560,53 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
 
-        if grant_type != OAUTH_GRANT_TYPE_AUTHORIZATION_CODE:
-            _err("unsupported_grant_type", "Only authorization_code is supported")
+        if grant_type == OAUTH_GRANT_TYPE_REFRESH_TOKEN:
+            refresh_token = _p("refresh_token")
+            if not refresh_token:
+                _err("invalid_grant", "refresh_token is required")
+                return
+            try:
+                response = exchange_refresh_token(
+                    cfg,
+                    refresh_token=refresh_token,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    auth_method=presented_auth_method,
+                    server_url=self.oauth_base_url(),
+                )
+            except OAuthClientAuthenticationError:
+                _err("invalid_client", "Invalid client authentication")
+                return
+            except OAuthInvalidGrantError:
+                _err("invalid_grant", "Invalid, expired, or reused refresh token")
+                return
+            except OAuthServiceError:
+                _err(
+                    "server_error",
+                    "Refresh-token persistence is unavailable",
+                    status=503,
+                )
+                return
+            self.send_json(response)
             return
-        if cfg.registry.get(client_id) is None:
+        if grant_type != OAUTH_GRANT_TYPE_AUTHORIZATION_CODE:
+            supported = ", ".join(OAUTH_GRANT_TYPES_SUPPORTED)
+            _err("unsupported_grant_type", f"Supported grant types: {supported}")
+            return
+        try:
+            client = cfg.registry.get(client_id)
+            authenticated = cfg.registry.authenticates(
+                client_id,
+                client_secret,
+                presented_auth_method,
+            )
+        except OAuthStoreError:
+            _err("server_error", "OAuth client registry is unavailable", status=503)
+            return
+        if client is None:
             _err("invalid_client", "Unknown client_id")
             return
-        if not cfg.registry.authenticates(client_id, client_secret, presented_auth_method):
+        if not authenticated:
             _err("invalid_client", "Invalid client_secret")
             return
         if not code:
@@ -5241,9 +5638,40 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             _err("invalid_grant", "PKCE verification failed")
             return
 
+        grant_id = code_data.get("grant_id")
+        if not isinstance(grant_id, str) or not grant_id:
+            _err("server_error", "Authorization grant is unavailable")
+            return
         server_url = resource
-        access_token = create_access_token(cfg, server_url, client_id=client_id)
-        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
+        try:
+            access_token = create_access_token(
+                cfg,
+                server_url,
+                client_id=client_id,
+                grant_id=grant_id,
+            )
+            refresh_token = issue_refresh_token(
+                cfg,
+                grant_id=grant_id,
+                client_id=client_id,
+                scopes="mcp",
+            )
+        except OAuthServiceError:
+            _err(
+                "server_error",
+                "OAuth token state could not be persisted",
+                status=503,
+            )
+            return
+        self.send_json(
+            {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": cfg.token_ttl,
+                "scope": "mcp",
+                "refresh_token": refresh_token,
+            }
+        )
 
     def handle_oauth_register(self) -> None:
         cfg = self.runtime.oauth_config
@@ -5266,6 +5694,15 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         try:
             registered = cfg.registry.register(metadata)
+        except OAuthStoreError:
+            self.send_json(
+                {
+                    "error": "server_error",
+                    "error_description": "OAuth persistence is unavailable",
+                },
+                status=503,
+            )
+            return
         except ValueError as exc:
             self.send_json({"error": "invalid_client_metadata", "error_description": str(exc)}, status=400)
             return
@@ -5276,10 +5713,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if origin and is_allowed_origin(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, DELETE, OPTIONS")
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Accept, Authorization, Content-Type, MCP-Protocol-Version, Mcp-Session-Id",
+                "Accept, Authorization, X-Admin-Token, Content-Type, MCP-Protocol-Version, Mcp-Session-Id",
             )
 
     def send_json(
@@ -5314,10 +5751,15 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         handler: type[MCPHandler],
         control_runtime: Runtime,
         runtime_factory: Any,
+        *,
+        admin_service: AdminService | None = None,
+        admin_token: str | None = None,
     ) -> None:
         super().__init__(address, handler)
         self.control_runtime = control_runtime
         self.sessions = HTTPSessionManager(runtime_factory)
+        self.admin_service = admin_service
+        self.admin_token = admin_token or None
 
     def server_close(self) -> None:
         self.sessions.close()
@@ -5333,21 +5775,36 @@ def build_runtime(
     oauth_config: OAuthConfig | None = None,
     emit_warning: bool = True,
     project_context: ProjectContext | None = None,
+    workspace_binding: WorkspaceBinding | None = None,
+    authorization_context: AuthorizationContext | None = None,
+    upstream_manager: UpstreamManager | None = None,
     transport: str = "stdio",
 ) -> Runtime:
-    workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
-    runtime = Runtime(
-        workspace,
-        enable_view_image=args.enable_view_image,
-        permission_mode=runtime_policy.permission_mode,
-        shell_env_policy=runtime_policy.shell_env_policy,
-        allow_network=runtime_policy.allow_network,
-        auth_token=auth_token,
-        oauth_config=oauth_config,
-        project_context=project_context,
-        fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
-        transport=transport,
+    workspace = (
+        workspace_binding.root
+        if workspace_binding is not None
+        else Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
     )
+    try:
+        runtime = Runtime(
+            workspace,
+            enable_view_image=args.enable_view_image,
+            permission_mode=runtime_policy.permission_mode,
+            shell_env_policy=runtime_policy.shell_env_policy,
+            allow_network=runtime_policy.allow_network,
+            auth_token=auth_token,
+            oauth_config=oauth_config,
+            project_context=project_context,
+            workspace_binding=workspace_binding,
+            authorization_context=authorization_context,
+            upstream_manager=upstream_manager,
+            fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
+            transport=transport,
+        )
+    except BaseException:
+        if upstream_manager is not None:
+            upstream_manager.close()
+        raise
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
             "WARNING: permission_mode=dangerous disables MCP safety gates. Use only inside an isolated container or VM.",
@@ -5364,6 +5821,352 @@ def build_runtime(
 
 
 AUTH_MODE_CHOICES = ("bearer", "noauth", "oauth")
+OAUTH_DB_FILENAME = "oauth.sqlite3"
+OAUTH_SECRET_VAULT_FILENAME = "oauth-secrets.json"
+OAUTH_PASSWORD_SECRET = "oauth/authorization-password"
+OAUTH_TOKEN_SECRET = "oauth/token-secret"
+OAUTH_REFRESH_PEPPER_SECRET = "oauth/refresh-pepper"
+
+
+def _vault_secret(
+    vault: SecretVault,
+    name: str,
+    *,
+    generated_value: Callable[[], str],
+) -> tuple[str, bool]:
+    if name in vault.list_names():
+        return vault.get_secret(name), False
+    value = generated_value()
+    vault.set_secret(name, value)
+    return value, True
+
+
+def _hex_secret(
+    vault: SecretVault,
+    name: str,
+    *,
+    configured_hex: str | None,
+    byte_length: int,
+) -> bytes:
+    if configured_hex:
+        try:
+            value = bytes.fromhex(configured_hex)
+        except ValueError as exc:
+            raise ValueError(f"{name} must be hex-encoded bytes.") from exc
+        if len(value) < byte_length:
+            raise ValueError(f"{name} must contain at least {byte_length} bytes.")
+        normalized = value.hex()
+        if name not in vault.list_names() or vault.get_secret(name) != normalized:
+            vault.set_secret(name, normalized)
+        return value
+    stored, _created = _vault_secret(
+        vault,
+        name,
+        generated_value=lambda: secrets.token_bytes(byte_length).hex(),
+    )
+    try:
+        value = bytes.fromhex(stored)
+    except ValueError as exc:
+        raise ValueError(f"Secret vault entry {name!r} is not valid hex.") from exc
+    if len(value) < byte_length:
+        raise ValueError(f"Secret vault entry {name!r} is too short.")
+    return value
+
+
+def build_persistent_oauth_config(
+    config_dir: Path,
+    *,
+    master_key: str | None,
+    password: str | None,
+    server_url: str | None,
+    token_ttl: int,
+    token_secret_hex: str | None = None,
+    refresh_pepper_hex: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+    redirect_uris: tuple[str, ...] = (),
+    registration_workspace_id: str | None = "default",
+    client_workspace_id: str | None = None,
+) -> tuple[OAuthConfig, bool]:
+    vault = SecretVault(config_dir / OAUTH_SECRET_VAULT_FILENAME, master_key)
+    if not vault.enabled():
+        raise ValueError(
+            f"{ENV_PREFIX}_SECRETS_KEY is required when OAuth persistence is enabled."
+        )
+    resolved_password = password
+    password_created = False
+    if not resolved_password:
+        resolved_password, password_created = _vault_secret(
+            vault,
+            OAUTH_PASSWORD_SECRET,
+            generated_value=lambda: secrets.token_urlsafe(32),
+        )
+    token_secret = _hex_secret(
+        vault,
+        OAUTH_TOKEN_SECRET,
+        configured_hex=token_secret_hex,
+        byte_length=32,
+    )
+    refresh_pepper = _hex_secret(
+        vault,
+        OAUTH_REFRESH_PEPPER_SECRET,
+        configured_hex=refresh_pepper_hex,
+        byte_length=32,
+    )
+    store = OAuthAuthorizationStore(config_dir / OAUTH_DB_FILENAME, pepper=refresh_pepper)
+    signing_kid, active_secret, signing_keys = initialize_signing_key_ring(
+        store,
+        vault,
+        token_secret,
+        legacy_secret_ref=OAUTH_TOKEN_SECRET,
+    )
+    registry = PersistentOAuthClientRegistry(
+        store,
+        registration_workspace_id=registration_workspace_id,
+    )
+    if client_id:
+        registry.add_preregistered(
+            client_id,
+            redirect_uris or ("http://127.0.0.1/callback",),
+            client_secret=client_secret,
+            workspace_id=client_workspace_id,
+        )
+    return (
+        OAuthConfig(
+            password=resolved_password,
+            server_url=server_url,
+            token_secret=active_secret,
+            token_ttl=token_ttl,
+            registry=registry,
+            store=store,
+            secret_vault=vault,
+            signing_kid=signing_kid,
+            signing_keys=signing_keys,
+        ),
+        password_created,
+    )
+
+
+SERVER_SETTINGS_FILENAME = "server-settings.json"
+UPSTREAM_CONFIG_FILENAME = "mcp-servers.json"
+TRANSCRIPT_DB_FILENAME = "transcripts.sqlite3"
+
+
+def load_workspace_startup(
+    args: argparse.Namespace,
+) -> tuple[Path, dict[str, Any], WorkspaceCatalog]:
+    config_dir = default_settings_dir()
+    settings = ServerSettingsStore(config_dir / SERVER_SETTINGS_FILENAME).read()
+    fallback_root = Path(
+        args.workspace
+        or os.environ.get(f"{ENV_PREFIX}_WORKSPACE")
+        or os.getcwd()
+    )
+    catalog = WorkspaceCatalog.from_settings(settings, fallback_root)
+    return config_dir, settings, catalog
+
+
+def upstream_config_path(args: argparse.Namespace, config_dir: Path) -> Path:
+    explicit = (
+        getattr(args, "upstream_config", None)
+        or os.environ.get(f"{ENV_PREFIX}_UPSTREAM_CONFIG")
+        or None
+    )
+    return Path(str(explicit)).expanduser() if explicit else config_dir / UPSTREAM_CONFIG_FILENAME
+
+
+def load_upstream_startup(
+    args: argparse.Namespace,
+    config_dir: Path,
+) -> UpstreamConfigSnapshot:
+    path = upstream_config_path(args, config_dir)
+    explicit = bool(
+        getattr(args, "upstream_config", None)
+        or os.environ.get(f"{ENV_PREFIX}_UPSTREAM_CONFIG")
+    )
+    if not path.exists() and not explicit:
+        return UpstreamConfigSnapshot.empty()
+    return load_upstream_config_snapshot(path)
+
+
+def upstream_secret_resolver(
+    snapshot: UpstreamConfigSnapshot,
+    vault: SecretVault,
+) -> Callable[[str], str] | None:
+    refs: set[str] = set()
+    for config in snapshot.configs:
+        for value in config.env.values():
+            if isinstance(value, dict):
+                secret_ref = value.get("secret_ref")
+                if isinstance(secret_ref, str) and secret_ref:
+                    refs.add(secret_ref)
+    if not refs:
+        return vault.get_secret if vault.enabled() else None
+    if not vault.enabled():
+        raise SecretVaultError(
+            "Gateway secret_ref requires CODING_TOOLS_MCP_SECRETS_KEY and the server Secret Vault."
+        )
+    for ref in sorted(refs):
+        vault.get_secret(ref)
+    return vault.get_secret
+
+
+def load_upstream_startup_with_revision(
+    args: argparse.Namespace,
+    config_dir: Path,
+) -> tuple[UpstreamConfigSnapshot, str]:
+    path = upstream_config_path(args, config_dir)
+    before = gateway_file_revision(path)
+    snapshot = load_upstream_startup(args, config_dir)
+    after = gateway_file_revision(path)
+    if before != after:
+        raise UpstreamConfigError(
+            "Gateway configuration changed while the startup snapshot was being created."
+        )
+    return snapshot, before
+
+
+def build_upstream_manager(
+    snapshot: UpstreamConfigSnapshot,
+    *,
+    secret_resolver: Callable[[str], str] | None = None,
+) -> UpstreamManager:
+    return UpstreamManager.from_snapshot(
+        snapshot,
+        protocol_version=PROTOCOL_VERSION,
+        secret_resolver=secret_resolver,
+        reserved_names=TOOL_REGISTRY,
+    )
+
+
+def apply_oauth_workspace_bindings(
+    config: OAuthConfig,
+    catalog: WorkspaceCatalog,
+    bindings: dict[str, str],
+) -> None:
+    if config.store is None:
+        raise OAuthServiceError("OAuth authorization store is not configured.")
+    normalized = normalize_oauth_client_workspace_bindings(bindings, catalog)
+    for client_id, workspace_id in normalized.items():
+        if config.store.get_client(client_id) is None:
+            raise OAuthServiceError(
+                f"OAuth Workspace binding references unknown client_id {client_id!r}."
+            )
+        if not config.store.set_client_workspace(client_id, workspace_id):
+            raise OAuthServiceError(
+                f"OAuth Workspace binding could not be applied to client_id {client_id!r}."
+            )
+
+    enabled = catalog.enabled_entries()
+    if len(enabled) == 1:
+        default_id = catalog.default_id
+        for client in config.store.list_clients():
+            if not client.get("workspace_id"):
+                if not config.store.set_client_workspace(str(client["client_id"]), default_id):
+                    raise OAuthServiceError(
+                        "OAuth client could not be migrated to the sole enabled Workspace."
+                    )
+
+
+def active_settings_payload(
+    startup_settings: dict[str, Any],
+    workspace_catalog: WorkspaceCatalog,
+    args: argparse.Namespace,
+    runtime_policy: RuntimePolicy,
+    allowed_origins: frozenset[str],
+) -> dict[str, Any]:
+    active = dict(startup_settings)
+    active.update(workspace_catalog.settings_payload())
+    active.update(
+        {
+            "workspace": str(workspace_catalog.default().root),
+            "host": str(args.host),
+            "port": int(args.port),
+            "permission_mode": runtime_policy.permission_mode,
+            "shell_env_inherit": runtime_policy.shell_env_policy.inherit,
+            "allowed_origins": sorted(allowed_origins),
+        }
+    )
+    return active
+
+
+def resolve_admin_token(
+    args: argparse.Namespace,
+    startup_settings: dict[str, Any],
+    vault: SecretVault,
+) -> str | None:
+    direct = (
+        getattr(args, "admin_token", None)
+        or os.environ.get(f"{ENV_PREFIX}_ADMIN_TOKEN")
+        or None
+    )
+    if direct:
+        return str(direct)
+    secret_ref = startup_settings.get("admin_token_secret_ref")
+    if not secret_ref:
+        return None
+    if not isinstance(secret_ref, str):
+        raise SecretVaultError("admin_token_secret_ref must be a string.")
+    return vault.get_secret(secret_ref)
+
+
+class BoundRuntimeFactory:
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        runtime_policy: RuntimePolicy,
+        resolver: WorkspaceBindingResolver,
+        *,
+        auth_token: str | None,
+        oauth_config: OAuthConfig | None,
+        upstream_snapshot: UpstreamConfigSnapshot | None = None,
+        upstream_secret_resolver: Callable[[str], str] | None = None,
+    ) -> None:
+        self.args = args
+        self.runtime_policy = runtime_policy
+        self.resolver = resolver
+        self.auth_token = auth_token
+        self.oauth_config = oauth_config
+        self.upstream_snapshot = upstream_snapshot or UpstreamConfigSnapshot.empty()
+        self.upstream_secret_resolver = upstream_secret_resolver
+        self._project_contexts: dict[tuple[str, str], ProjectContext] = {}
+        self._lock = threading.Lock()
+
+    def project_context(self, binding: WorkspaceBinding) -> ProjectContext:
+        key = (binding.workspace_id, str(binding.root))
+        with self._lock:
+            cached = self._project_contexts.get(key)
+        if cached is not None:
+            return cached
+        loaded = load_project_context(binding.root)
+        with self._lock:
+            return self._project_contexts.setdefault(key, loaded)
+
+    def __call__(self, context: AuthorizationContext) -> Runtime:
+        binding = self.resolver.resolve_http(context.method, context.oauth_identity)
+        try:
+            upstream_manager = build_upstream_manager(
+                self.upstream_snapshot,
+                secret_resolver=self.upstream_secret_resolver,
+            )
+        except UpstreamConfigError as exc:
+            raise RuntimeError("Upstream Gateway initialization failed.") from exc
+        try:
+            return build_runtime(
+                self.args,
+                self.runtime_policy,
+                auth_token=self.auth_token,
+                oauth_config=self.oauth_config,
+                emit_warning=False,
+                project_context=self.project_context(binding),
+                workspace_binding=binding,
+                authorization_context=context,
+                upstream_manager=upstream_manager,
+                transport="http",
+            )
+        except BaseException:
+            upstream_manager.close()
+            raise
 
 
 def run_http(args: argparse.Namespace) -> int:
@@ -5375,9 +6178,37 @@ def run_http(args: argparse.Namespace) -> int:
     auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or None
     try:
         runtime_policy = runtime_policy_from_args(args)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        config_dir, startup_settings, workspace_catalog = load_workspace_startup(args)
+        workspace_bindings = normalize_oauth_client_workspace_bindings(
+            startup_settings.get("oauth_client_workspace_bindings"),
+            workspace_catalog,
+        )
+        upstream_snapshot, active_gateway_revision = load_upstream_startup_with_revision(
+            args,
+            config_dir,
+        )
+        allowed_origin_source = startup_settings.get("allowed_origins")
+        if allowed_origin_source is None:
+            allowed_origin_source = os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS", "")
+        allowed_origins = configure_allowed_origins(allowed_origin_source)
+    except (
+        SettingsStoreError,
+        UpstreamConfigError,
+        WorkspaceCatalogError,
+        ValueError,
+    ) as exc:
+        print(f"ERROR: Startup configuration is unavailable: {exc}", file=sys.stderr)
         return 2
+    server_vault = SecretVault(
+        config_dir / SERVER_SECRET_VAULT_FILENAME,
+        os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"),
+    )
+    try:
+        gateway_secret_resolver = upstream_secret_resolver(upstream_snapshot, server_vault)
+    except SecretVaultError as exc:
+        print(f"ERROR: Gateway credentials are unavailable: {exc}", file=sys.stderr)
+        return 2
+    workspace_resolver = WorkspaceBindingResolver(workspace_catalog)
 
     oauth_config: OAuthConfig | None = None
     oauth_mode = (
@@ -5388,55 +6219,76 @@ def run_http(args: argparse.Namespace) -> int:
     if oauth_mode:
         client_id = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_ID") or None
         client_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_CLIENT_SECRET") or None
-        env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD")
-        password = env_password or secrets.token_urlsafe(32)
+        env_password = os.environ.get(f"{ENV_PREFIX}_OAUTH_PASSWORD") or None
+        client_workspace_id = (
+            os.environ.get(f"{ENV_PREFIX}_OAUTH_WORKSPACE_ID")
+            or (workspace_bindings.get(client_id) if client_id else None)
+        )
+        if client_id and client_workspace_id:
+            workspace_bindings[client_id] = client_workspace_id
+        registration_workspace_id = (
+            workspace_catalog.default_id
+            if len(workspace_catalog.enabled_entries()) == 1
+            else None
+        )
         server_url = (os.environ.get(f"{ENV_PREFIX}_SERVER_URL") or "").rstrip("/") or None
-        if not env_password:
-            print(f"OAuth authorize password: {password}", file=sys.stderr)
-        raw_secret = os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or ""
-        if raw_secret:
-            try:
-                token_secret = bytes.fromhex(raw_secret)
-            except ValueError:
-                print(
-                    f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_SECRET must be hex-encoded bytes.",
-                    file=sys.stderr,
-                )
-                return 2
-            if len(token_secret) < 32:
-                print(
-                    f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_SECRET must contain at least 32 bytes.",
-                    file=sys.stderr,
-                )
-                return 2
-        else:
-            token_secret = secrets.token_bytes(32)
         try:
-            token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL") or OAUTH_TOKEN_TTL_SECONDS)
+            token_ttl = int(
+                os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_TTL")
+                or OAUTH_TOKEN_TTL_SECONDS
+            )
         except ValueError:
             print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be an integer.", file=sys.stderr)
             return 2
         if not 60 <= token_ttl <= 604_800:
-            print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.", file=sys.stderr)
+            print(
+                f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.",
+                file=sys.stderr,
+            )
             return 2
-        oauth_config = OAuthConfig(
-            password=password,
-            server_url=server_url,
-            token_secret=token_secret,
-            token_ttl=token_ttl,
+        raw_redirects = (
+            os.environ.get(f"{ENV_PREFIX}_OAUTH_REDIRECT_URIS")
+            or "http://127.0.0.1/callback"
         )
-        if client_id:
-            raw_redirects = os.environ.get(f"{ENV_PREFIX}_OAUTH_REDIRECT_URIS") or "http://127.0.0.1/callback"
-            redirect_uris = tuple(item.strip() for item in raw_redirects.split(",") if item.strip())
-            try:
-                oauth_config.registry.add_preregistered(
-                    client_id,
-                    redirect_uris,
-                    client_secret=client_secret,
-                )
-            except ValueError as exc:
-                print(f"ERROR: invalid OAuth redirect URI configuration: {exc}", file=sys.stderr)
-                return 2
+        redirect_uris = tuple(
+            item.strip() for item in raw_redirects.split(",") if item.strip()
+        )
+        try:
+            oauth_config, password_created = build_persistent_oauth_config(
+                config_dir,
+                master_key=os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"),
+                password=env_password,
+                server_url=server_url,
+                token_ttl=token_ttl,
+                token_secret_hex=(
+                    os.environ.get(f"{ENV_PREFIX}_OAUTH_TOKEN_SECRET") or None
+                ),
+                refresh_pepper_hex=(
+                    os.environ.get(f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_PEPPER")
+                    or None
+                ),
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uris=redirect_uris,
+                registration_workspace_id=registration_workspace_id,
+                client_workspace_id=client_workspace_id,
+            )
+            apply_oauth_workspace_bindings(
+                oauth_config,
+                workspace_catalog,
+                workspace_bindings,
+            )
+        except (
+            OSError,
+            OAuthServiceError,
+            OAuthStoreError,
+            SecretVaultError,
+            ValueError,
+        ) as exc:
+            print(f"ERROR: OAuth persistence is unavailable: {exc}", file=sys.stderr)
+            return 2
+        if password_created:
+            print(f"OAuth authorize password: {oauth_config.password}", file=sys.stderr)
         if auth_token:
             print(
                 "Auth: dual credentials enabled — both static bearer token and OAuth 2.1 access tokens will be accepted.",
@@ -5473,20 +6325,85 @@ def run_http(args: argparse.Namespace) -> int:
         )
         return 2
 
-    runtime = build_runtime(args, runtime_policy, auth_token=auth_token, oauth_config=oauth_config, transport="http")
-
-    def runtime_factory() -> Runtime:
-        return build_runtime(
-            args,
-            runtime_policy,
-            auth_token=auth_token,
-            oauth_config=oauth_config,
-            emit_warning=False,
-            project_context=runtime.project_context,
-            transport="http",
+    default_workspace = workspace_catalog.default()
+    control_binding = WorkspaceBinding(
+        default_workspace.id,
+        default_workspace.root,
+        "control",
+    )
+    try:
+        control_upstream = build_upstream_manager(
+            upstream_snapshot,
+            secret_resolver=gateway_secret_resolver,
         )
+    except UpstreamConfigError as exc:
+        print(f"ERROR: Upstream Gateway configuration is unavailable: {exc}", file=sys.stderr)
+        return 2
+    runtime = build_runtime(
+        args,
+        runtime_policy,
+        auth_token=auth_token,
+        oauth_config=oauth_config,
+        project_context=load_project_context(control_binding.root),
+        workspace_binding=control_binding,
+        authorization_context=AuthorizationContext("control"),
+        upstream_manager=control_upstream,
+        transport="http",
+    )
+    runtime_factory = BoundRuntimeFactory(
+        args,
+        runtime_policy,
+        workspace_resolver,
+        auth_token=auth_token,
+        oauth_config=oauth_config,
+        upstream_snapshot=upstream_snapshot,
+        upstream_secret_resolver=gateway_secret_resolver,
+    )
 
-    server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime, runtime_factory)
+    try:
+        admin_token = resolve_admin_token(args, startup_settings, server_vault)
+    except SecretVaultError as exc:
+        runtime.close()
+        print(f"ERROR: Admin authentication is unavailable: {exc}", file=sys.stderr)
+        return 2
+    admin_service: AdminService | None = None
+    if admin_token:
+        gateway_path = upstream_config_path(args, config_dir)
+        try:
+            admin_active_settings = active_settings_payload(
+                startup_settings,
+                workspace_catalog,
+                args,
+                runtime_policy,
+                allowed_origins,
+            )
+            if oauth_config is not None and oauth_config.server_url is not None:
+                admin_active_settings["oauth_server_url"] = oauth_config.server_url
+            admin_service = AdminService(
+                settings_store=ServerSettingsStore(config_dir / SERVER_SETTINGS_FILENAME),
+                active_settings=admin_active_settings,
+                fallback_workspace=workspace_catalog.default().root,
+                gateway_path=gateway_path,
+                active_gateway_revision=active_gateway_revision,
+                secret_vault=server_vault,
+                oauth_store=oauth_config.store if oauth_config is not None else None,
+                active_gateway_status=runtime.upstream_manager.status_payload,
+                transcript_store=TranscriptStore(config_dir / TRANSCRIPT_DB_FILENAME),
+                session_scanner=CodexSessionScanner(),
+            )
+        except (AdminServiceError, OSError, SecretVaultError, SettingsStoreError) as exc:
+            runtime.close()
+            print(f"ERROR: Admin service is unavailable: {exc}", file=sys.stderr)
+            return 2
+
+    server = RuntimeHTTPServer(
+        (args.host, args.port),
+        MCPHandler,
+        runtime,
+        runtime_factory,
+        admin_service=admin_service,
+        admin_token=admin_token,
+    )
     if oauth_config:
         url_label = oauth_config.server_url or "dynamic request URL"
         suffix = " + bearer" if runtime.auth_token else ""
@@ -5509,16 +6426,50 @@ def run_http(args: argparse.Namespace) -> int:
 def run_stdio(args: argparse.Namespace) -> int:
     try:
         runtime_policy = runtime_policy_from_args(args)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        config_dir, _settings, workspace_catalog = load_workspace_startup(args)
+        binding = WorkspaceBindingResolver(workspace_catalog).resolve_stdio()
+        upstream_snapshot = load_upstream_startup(args, config_dir)
+        server_vault = SecretVault(
+            config_dir / SERVER_SECRET_VAULT_FILENAME,
+            os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"),
+        )
+        gateway_secret_resolver = upstream_secret_resolver(upstream_snapshot, server_vault)
+        upstream_manager = build_upstream_manager(
+            upstream_snapshot,
+            secret_resolver=gateway_secret_resolver,
+        )
+    except (
+        SettingsStoreError,
+        UpstreamConfigError,
+        WorkspaceBindingError,
+        WorkspaceCatalogError,
+        ValueError,
+    ) as exc:
+        print(f"ERROR: Startup configuration is unavailable: {exc}", file=sys.stderr)
         return 2
-    runtime = build_runtime(args, runtime_policy)
+    runtime = build_runtime(
+        args,
+        runtime_policy,
+        project_context=load_project_context(binding.root),
+        workspace_binding=binding,
+        authorization_context=AuthorizationContext("stdio"),
+        upstream_manager=upstream_manager,
+        transport="stdio",
+    )
     return serve_stdio(runtime)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve workspace-confined coding tools over MCP.")
     parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
+    parser.add_argument(
+        "--upstream-config",
+        default=None,
+        help=(
+            "JSON config for upstream MCP Gateway servers; defaults to "
+            f"{ENV_PREFIX}_UPSTREAM_CONFIG or the stable config directory/{UPSTREAM_CONFIG_FILENAME}"
+        ),
+    )
     parser.add_argument(
         "--host",
         default=os.environ.get(f"{ENV_PREFIX}_HOST") or "127.0.0.1",
@@ -5535,6 +6486,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--auth-token",
         default=None,
         help=f"require Authorization: Bearer <token> on /mcp; defaults to {ENV_PREFIX}_AUTH_TOKEN",
+    )
+    parser.add_argument(
+        "--admin-token",
+        default=None,
+        help=(
+            "enable the authenticated Admin API with a dedicated token; defaults to "
+            f"{ENV_PREFIX}_ADMIN_TOKEN"
+        ),
     )
     parser.add_argument(
         "--oauth-mode",

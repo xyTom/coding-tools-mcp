@@ -23,11 +23,14 @@ below. Unless that switch is set, the annotations in this document are what
 - Streamable HTTP uses `POST /mcp`. `DELETE /mcp` terminates the selected
   `Mcp-Session-Id`. Because this server does not provide an SSE stream,
   `GET /mcp` and `HEAD /mcp` return `405`.
-- Each successful HTTP `initialize` creates an independent runtime. Its cwd,
-  process sessions, retained output, and runtime directories are not shared
-  with other MCP sessions.
-- Subsequent HTTP messages must include the returned `Mcp-Session-Id` and the
-  negotiated `MCP-Protocol-Version`. Unknown or expired sessions return `404`.
+- Each successful HTTP `initialize` creates an independent Runtime. Its
+  authorization context, Workspace binding, cwd, process sessions, retained
+  output, project instructions, runtime directories, and upstream-tool snapshot
+  are not shared with other MCP Sessions.
+- Subsequent HTTP messages must include the returned `Mcp-Session-Id`, the
+  negotiated `MCP-Protocol-Version`, and credentials matching the Session's
+  initialization context. Unknown or expired Sessions return `404`; a different
+  Agent/Grant/Workspace context returns `403`.
 - JSON-RPC batches are rejected. Cancellation uses
   `notifications/cancelled.params.requestId`.
 - stdio is newline-delimited JSON-RPC. stdout contains protocol messages only;
@@ -40,6 +43,21 @@ The server accepts only the protocol versions listed above. A supported version
 is echoed in `initialize`; arbitrary older dates and unknown future dates are
 rejected rather than compared lexicographically.
 
+## Session identity and Workspace binding
+
+Bearer validation produces an explicit identity context only after JWT and
+persistent Store checks succeed: `client_id`, `grant_id`, `workspace_id`, and
+`jti`. HTTP initialization resolves that identity through the validated
+Workspace Catalog and freezes the result for the lifetime of the MCP Session.
+Handlers do not infer identity again from names, redirect URIs, request metadata,
+or presentation fields.
+
+A missing, disabled, unknown, or unauthorized Workspace fails closed. Existing
+Sessions intentionally retain their frozen binding after a Catalog entry is
+disabled; new Sessions are rejected until a valid mapping is restored. stdio
+uses the configured default Workspace and does not create a synthetic OAuth
+identity.
+
 ## Automatic project context
 
 Initialization automatically loads bounded root project instructions from
@@ -51,7 +69,7 @@ depth, per-file, and total-byte limits.
 
 ## Workspace and patch guarantees
 
-- One server runtime owns one canonical workspace root.
+- One Runtime owns one immutable canonical Workspace root; HTTP creates one Runtime per MCP Session.
 - Direct path inputs are workspace-relative. Absolute paths, `..` traversal,
   NUL bytes, and symlink escapes are rejected.
 - `apply_patch` parses and validates every operation before committing.
@@ -110,7 +128,7 @@ Tool failures keep the same envelope with `isError: true`, a readable error in
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UPSTREAM_TOOL_COLLISION"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -150,24 +168,43 @@ of pretending pipes are a TTY.
 
 ## HTTP authentication
 
-Non-loopback deployment requires bearer or OAuth authentication unless the
-operator explicitly selects no-auth. OAuth implements Authorization Code +
-PKCE S256, protected-resource metadata, authorization-server metadata, exact
-redirect URI matching, one-time five-minute codes, 24-hour access tokens, and
-RFC 7591 dynamic client registration at `POST /oauth/register`. Public and
-confidential clients are bound to their registered authentication method.
+Non-loopback deployment requires static bearer or OAuth authentication unless
+the operator explicitly selects no-auth. OAuth implements Authorization Code +
+PKCE S256, protected-resource and authorization-server metadata, exact redirect
+URI matching, one-time five-minute codes, RFC 7591 dynamic registration, and
+`authorization_code` plus `refresh_token` grants. Registration metadata is
+narrowed to supported grant/response types; public and confidential clients are
+bound to their registered authentication method.
 
-Dynamic registrations and authorization codes are process-local; restarting
-the server requires clients to register again. Configure a stable
-`CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` and public server URL only when tokens must
-survive tunnel churn. Forwarded headers are ignored unless
-`CODING_TOOLS_MCP_TRUST_PROXY_HEADERS=1` is explicitly set.
+Clients, Grants, access-token `jti` metadata, refresh-token families, and
+signing-key metadata persist in `oauth.sqlite3`. Refresh-token replacement,
+old-token consumption, access-token metadata, family timestamps, and issuance
+audits commit atomically; a failed exchange leaves the original token retryable.
+Reuse of an already-rotated token revokes its family. Access validation checks
+the active Client, Grant, token, Workspace mapping, and signing key. Signing
+material is
+loaded from `oauth-secrets.json` through the
+`CODING_TOOLS_MCP_SECRETS_KEY`-protected Secret Vault. Store or Vault failure is
+fail-closed; there is no in-memory fallback. Authorization codes remain
+process-local and short-lived.
+
+A dedicated Admin token is a separate authority. Ordinary MCP bearer and OAuth
+access tokens cannot call `/admin` or `/admin/api`. Forwarded headers remain
+ignored unless `CODING_TOOLS_MCP_TRUST_PROXY_HEADERS=1` is explicitly set.
 
 ## Stable tool inventory
 
-The default catalog has 20 tools, including `view_image`. Setting
+The local catalog has 20 reserved tool names, including `view_image`. Setting
 `CODING_TOOLS_MCP_ENABLE_VIEW_IMAGE=0` is the sole installation capability gate
 and removes only that optional binary-content tool. It is not a tool profile.
+
+Optional upstream MCP tools are discovered before Runtime initialization and
+frozen into that Runtime's catalog under `{alias}__{remote_name}`. Local names
+remain reserved. Duplicate aliases, local-name collisions, or upstream
+namespace collisions fail closed with `UPSTREAM_TOOL_COLLISION`; partial
+catalogs are not published. Upstream schemas, annotations, extension fields,
+`content`, `structuredContent`, and `isError` are preserved. Existing Sessions
+never receive dynamic Gateway changes, so `listChanged: false` remains truthful.
 
 Each definition below lists the live input property names and annotations. The
 authoritative JSON Schemas are returned by `tools/list` and checked for drift in
@@ -341,4 +378,6 @@ subagent orchestration, or high-level prompt wrappers.
 `structuredContent`. The machine fields are retained where practical, while the
 text block is now a concise human/model summary. Removed compatibility surfaces
 are tool profiles, the `view_image.output` selector, duplicate image data URLs,
-and JSON-RPC batches.
+and JSON-RPC batches. A persisted legacy `tool_profile` key is ignored, emits
+`legacy_tool_profile_ignored`, and is removed on the next successful settings
+write; it never controls the catalog.

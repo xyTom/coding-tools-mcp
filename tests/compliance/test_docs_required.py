@@ -30,6 +30,11 @@ class RequiredDocsTests(unittest.TestCase):
             "docs/troubleshooting.md",
             "docs/competitive-analysis.md",
             "docs/runtime-contract-v0.2.md",
+            "docs/remote-mcp.md",
+            "docs/admin-api.md",
+            "docs/admin-webui.md",
+            "docs/chat-persistence.md",
+            "docs/migration-v0.1-to-v0.2.2.md",
             "Dockerfile",
             ".dockerignore",
             "docker-compose.yml",
@@ -78,6 +83,70 @@ class RequiredDocsTests(unittest.TestCase):
             for needle in needles:
                 with self.subTest(path=rel_path, needle=needle):
                     self.assertIn(needle, text)
+
+
+    def test_integrated_v022_docs_cover_final_boundaries(self) -> None:
+        expectations = {
+            "README.md": [
+                "Integrated v0.2.2 architecture",
+                "refresh_token",
+                "Admin WebUI",
+                "migration-v0.1-to-v0.2.2.md",
+            ],
+            "README.zh-CN.md": [
+                "集成后的 v0.2.2 架构",
+                "持久化 OAuth",
+                "升级与回滚",
+            ],
+            "docs/runtime-contract-v0.2.md": [
+                "Session identity and Workspace binding",
+                "listChanged: false",
+                "UPSTREAM_TOOL_COLLISION",
+                "refresh_token",
+                "legacy_tool_profile_ignored",
+            ],
+            "docs/remote-mcp.md": [
+                "CODING_TOOLS_MCP_SECRETS_KEY",
+                "oauth.sqlite3",
+                "oauth_client_workspace_bindings",
+                "restart_required",
+            ],
+            "docs/admin-webui.md": [
+                "stale HTTP 409",
+                "no upstream start, stop, reload",
+                "textContent",
+            ],
+            "docs/chat-persistence.md": [
+                "workspace_id",
+                "summary",
+                "telemetry",
+            ],
+            "docs/migration-v0.1-to-v0.2.2.md": [
+                "legacy_tool_profile_ignored",
+                "server-settings.json",
+                "oauth.sqlite3",
+                "oauth-secrets.json",
+                "full snapshot rollback",
+                "Refresh rotation",
+                "original refresh token remains retryable",
+            ],
+            "docs/telemetry.md": [
+                "chat/transcript content",
+                "Workspace IDs, OAuth Agent/Client",
+                "CODING_TOOLS_MCP_TELEMETRY=off",
+            ],
+        }
+        for rel_path, needles in expectations.items():
+            text = (ROOT / rel_path).read_text(encoding="utf-8")
+            for needle in needles:
+                with self.subTest(path=rel_path, needle=needle):
+                    self.assertIn(needle, text)
+
+    def test_v01_profile_doc_is_history_not_current_contract(self) -> None:
+        self.assertFalse((ROOT / "docs/profile-v0.1.md").exists())
+        contract = (ROOT / "docs/runtime-contract-v0.2.md").read_text(encoding="utf-8")
+        self.assertIn("There are no\ntool profiles", contract)
+        self.assertNotIn("--tool-profile", contract)
 
     def test_ci_workflows_include_required_gates(self) -> None:
         compliance = (ROOT / ".github/workflows/compliance.yml").read_text(encoding="utf-8")

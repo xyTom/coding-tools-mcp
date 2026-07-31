@@ -1,5 +1,57 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Persistent OAuth authorization state in `oauth.sqlite3`: Clients, Grants,
+  access-token metadata, refresh-token families, signing-key metadata, and
+  redacted audit events survive restart. Authorization Code + PKCE now returns
+  rotating refresh tokens; replay of an already-rotated token revokes its family.
+- Immutable OAuth Agent-to-Workspace binding. `client_id`, `grant_id`,
+  `workspace_id`, and `jti` are produced by bearer validation and frozen into
+  each HTTP MCP Session. cwd, processes, retained output, paths, and project
+  instructions remain isolated by Session.
+- Runtime-initialized upstream MCP Gateway snapshots with stable namespaces,
+  collision fail-closed behavior, preserved schemas/annotations/
+  `structuredContent`, and restart-only administration.
+- Dedicated authenticated Admin API and WebUI for revision-aware Settings,
+  Workspace Catalog, Gateway, OAuth revocation/key lifecycle, Secret Vault,
+  and Workspace-partitioned chat/Codex session persistence.
+- Packaged self-contained Admin WebUI, Desktop package data, privacy-safe Admin
+  telemetry mode, and Windows-portable npm launcher contract tests.
+- `docs/migration-v0.1-to-v0.2.2.md` with upgrade, backup, reauthorization,
+  and rollback guidance.
+
+### Changed
+
+- The stable user configuration directory now owns `server-settings.json`,
+  `mcp-servers.json`, `oauth.sqlite3`, `oauth-secrets.json`, the server Secret
+  Vault, and `transcripts.sqlite3`; managed Workspace roots no longer own server
+  identity state.
+- Legacy `tool_profile` is accepted only as migration input, removed on write,
+  and reported as `legacy_tool_profile_ignored`. It never controls `tools/list`.
+- Settings and Gateway writes use optimistic revisions. Gateway changes require
+  restart and never mutate existing Runtime tool snapshots.
+
+### Security
+
+- Ordinary MCP bearer and OAuth credentials never grant Admin authority.
+- OAuth, Gateway, Vault, and chat management responses are redacted; raw bearer
+  tokens, refresh tokens, signing material, client secrets, hashes/digests, and
+  credential references are not displayed.
+- OAuth Store/Vault failures, missing Workspace mappings, disabled Workspaces,
+  upstream namespace collisions, and invalid Gateway credential references fail
+  closed.
+
+### Fixed
+
+- Refresh-token rotation, replacement-token insertion, access-token metadata,
+  family timestamps, and both issuance audits now commit in one SQLite
+  transaction. If access-token persistence or auditing fails, the whole exchange
+  rolls back, the original refresh token remains usable, and no replacement or
+  access-token metadata is left behind.
+
 ## 0.2.2 - 2026-07-28
 
 ### Fixed
@@ -15,9 +67,9 @@
 ### Changed
 
 - Raised the default OAuth access token lifetime from one hour to 24 hours
-  (`CODING_TOOLS_MCP_OAUTH_TOKEN_TTL`, still capped at 604800). The server
-  does not issue refresh tokens, so a one-hour default forced re-authorization
-  every hour.
+  (`CODING_TOOLS_MCP_OAUTH_TOKEN_TTL`, still capped at 604800). The original
+  upstream 0.2.2 release did not issue refresh tokens; the integrated
+  Unreleased state above now supports rotating refresh tokens.
 - Advertised grant and response types now derive from single constants shared
   by authorization-server metadata and the registration endpoint.
 

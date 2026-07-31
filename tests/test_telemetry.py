@@ -248,13 +248,14 @@ class InstallIdTests(unittest.TestCase):
 
     def test_install_id_is_random_stable_and_resettable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.dict(os.environ, {"HOME": tmp}):
+            with patch.object(Path, "home", return_value=Path(tmp)):
                 first = telemetry.install_id()
                 self.assertEqual(telemetry.install_id(), first)
                 path = Path(tmp) / ".coding-tools-mcp" / "id"
                 self.assertEqual(path.read_text(encoding="utf-8").strip(), first)
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+                if os.name != "nt":
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
 
                 telemetry._install_id = None
                 path.unlink()

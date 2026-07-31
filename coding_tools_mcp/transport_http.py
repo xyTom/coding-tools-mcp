@@ -26,14 +26,14 @@ class HTTPSessionRecord:
 class HTTPSessionManager:
     """Own independent Runtime instances for Streamable HTTP sessions."""
 
-    def __init__(self, factory: Callable[[], Any]) -> None:
+    def __init__(self, factory: Callable[[Any], Any]) -> None:
         self._factory = factory
         self._sessions: dict[str, HTTPSessionRecord] = {}
         self._lock = threading.Lock()
         self._creating = 0
         self._closed = False
 
-    def create(self) -> Any:
+    def create(self, context: Any) -> Any:
         self.prune()
         with self._lock:
             if self._closed:
@@ -44,7 +44,7 @@ class HTTPSessionManager:
         runtime: Any | None = None
         installed = False
         try:
-            runtime = self._factory()
+            runtime = self._factory(context)
             record = HTTPSessionRecord(runtime=runtime, last_seen=time.time())
             with self._lock:
                 if self._closed:

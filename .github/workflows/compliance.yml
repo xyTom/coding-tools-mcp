@@ -26,6 +26,13 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Allow setup-node toolchain under Landlock
+        shell: bash
+        run: |
+          node_executable="$(readlink -f "$(command -v node)")"
+          node_root="$(dirname "$(dirname "$node_executable")")"
+          echo "CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS=$node_root" >> "$GITHUB_ENV"
+
       - name: Install runtime and CI tools
         run: |
           python -m pip install --upgrade pip
