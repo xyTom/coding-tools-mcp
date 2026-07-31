@@ -119,6 +119,7 @@ from .upstream import (
     UpstreamConfigSnapshot,
     UpstreamManager,
     load_upstream_config_snapshot,
+    upstream_error_result,
 )
 from .upstream_search import ToolSearchFilters
 from .workspace_binding import (
@@ -581,9 +582,15 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
 
 _BROKER_INSTRUCTIONS = (
     "Additional external tools may be available through the upstream broker. "
-    "Use upstream_tool_search to find a tool and upstream_tool_describe to inspect "
-    "its sanitized schema and digest. Unknown risk classification is mutating."
+    "Use upstream_tool_search to find a tool, upstream_tool_describe to inspect "
+    "its sanitized schema and digest, then call it through the matching read-only "
+    "or mutating broker route. Unknown risk classification is mutating."
 )
+
+_BROKER_PASSTHROUGH = frozenset(
+    {"upstream_tool_call", "upstream_tool_call_mutating"}
+)
+_SCHEMA_DIGEST_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 @dataclass(frozen=True)
@@ -637,6 +644,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Return one upstream tool's sanitized public definition and schema digest.",
         read_only=True,
         idempotent=True,
+    ),
+    "upstream_tool_call": ToolSpec(
+        title="Call read-only upstream tool",
+        description="Call one catalog tool classified as read-only after digest and public-schema validation.",
+        read_only=True,
+        open_world=True,
+    ),
+    "upstream_tool_call_mutating": ToolSpec(
+        title="Call mutating upstream tool",
+        description="Call one catalog tool classified as mutating with a required public schema digest.",
+        destructive=True,
+        open_world=True,
     ),
     "check_exec_environment": ToolSpec(
         title="Check exec environment",
@@ -1622,6 +1641,12 @@ class Runtime:
                     with self.request_sessions_lock:
                         self.request_sessions.pop(request_id, None)
                 self.request_context.request_id = None
+            if name in _BROKER_PASSTHROUGH:
+                structured = payload.get("structuredContent")
+                trace_payload = copy.deepcopy(structured) if isinstance(structured, dict) else {}
+                trace_payload.setdefault("ok", not bool(payload.get("isError")))
+                self.emit_tool_trace(name, args, trace_payload, started_at)
+                return payload
             payload.setdefault("ok", True)
             self.emit_tool_trace(name, args, payload, started_at)
             content = spec.content_builder(payload) if spec.content_builder else None
@@ -1707,6 +1732,90 @@ class Runtime:
                 category="validation",
             )
         return description
+
+    def upstream_tool_call(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._upstream_broker_call(args, expected_risk="readonly")
+
+    def upstream_tool_call_mutating(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._upstream_broker_call(args, expected_risk="mutating")
+
+    def _upstream_broker_call(
+        self,
+        args: dict[str, Any],
+        *,
+        expected_risk: str,
+    ) -> dict[str, Any]:
+        name = str(args["name"])
+        state = self.upstream_manager.state
+        tool = state.all_tools.get(name)
+        if tool is None or name not in state.catalog:
+            return upstream_error_result(
+                "UPSTREAM_TOOL_NOT_FOUND",
+                f"Unknown upstream catalog tool: {name}",
+                category="validation",
+                tool_name=name,
+            )
+        if tool.effective_risk != expected_risk:
+            code = (
+                "UPSTREAM_TOOL_NOT_READONLY"
+                if expected_risk == "readonly"
+                else "UPSTREAM_TOOL_NOT_MUTATING"
+            )
+            return upstream_error_result(
+                code,
+                f"Upstream tool {name!r} is classified as {tool.effective_risk}.",
+                category="validation",
+                alias=name.partition("__")[0],
+                tool_name=name,
+            )
+        digest = args.get("schema_digest")
+        if digest is not None:
+            digest_text = str(digest)
+            if not _SCHEMA_DIGEST_RE.fullmatch(digest_text):
+                return upstream_error_result(
+                    "UPSTREAM_SCHEMA_CHANGED",
+                    "schema_digest must be the 32-character lowercase hex digest from upstream_tool_describe.",
+                    category="validation",
+                    alias=name.partition("__")[0],
+                    tool_name=name,
+                )
+            if digest_text != tool.public_schema_digest:
+                return upstream_error_result(
+                    "UPSTREAM_SCHEMA_CHANGED",
+                    f"Schema changed for {name!r}; call upstream_tool_describe again.",
+                    category="validation",
+                    details={
+                        "expected": digest_text,
+                        "current": tool.public_schema_digest,
+                    },
+                    alias=name.partition("__")[0],
+                    tool_name=name,
+                )
+        elif expected_risk == "mutating":
+            return upstream_error_result(
+                "UPSTREAM_SCHEMA_CHANGED",
+                "A current schema_digest from upstream_tool_describe is required for mutating calls.",
+                category="validation",
+                details={"current": tool.public_schema_digest},
+                alias=name.partition("__")[0],
+                tool_name=name,
+            )
+        arguments = args.get("arguments") or {}
+        public_schema = tool.public_definition.get("inputSchema")
+        if not isinstance(public_schema, dict):
+            public_schema = {"type": "object", "additionalProperties": True}
+        try:
+            validate_schema_value(arguments, public_schema, path="arguments")
+        except ToolFailure as exc:
+            return upstream_error_result(
+                "UPSTREAM_ARGUMENTS_INVALID",
+                exc.message,
+                category="validation",
+                details={"validation_code": exc.code},
+                alias=name.partition("__")[0],
+                tool_name=name,
+            )
+        return self.upstream_manager.call_tool(name, arguments)
 
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
@@ -4504,45 +4613,162 @@ def validate_arguments(tool_name: str, args: dict[str, Any]) -> None:
 
 
 def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> None:
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for branch in all_of:
+            if isinstance(branch, dict):
+                validate_schema_value(value, branch, path=path)
+
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list) and any_of:
+        if not any(
+            _schema_branch_matches(value, branch, path=path)
+            for branch in any_of
+            if isinstance(branch, dict)
+        ):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} does not match any allowed schema.",
+                category="validation",
+            )
+
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list) and one_of:
+        matches = sum(
+            1
+            for branch in one_of
+            if isinstance(branch, dict) and _schema_branch_matches(value, branch, path=path)
+        )
+        if matches != 1:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must match exactly one allowed schema.",
+                category="validation",
+            )
+
     expected_type = schema.get("type")
     if expected_type is not None and not schema_type_matches(value, expected_type):
-        raise ToolFailure("INVALID_ARGUMENT", f"{path} must be {schema_type_name(expected_type)}.", category="validation")
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{path} must be {schema_type_name(expected_type)}.",
+            category="validation",
+        )
+
+    if "const" in schema and value != schema["const"]:
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{path} must equal {schema['const']!r}.",
+            category="validation",
+        )
+    if "enum" in schema and isinstance(schema["enum"], list) and value not in schema["enum"]:
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{path} must be one of {schema['enum']!r}.",
+            category="validation",
+        )
 
     if isinstance(value, str):
         min_length = schema.get("minLength")
+        max_length = schema.get("maxLength")
         if isinstance(min_length, int) and len(value) < min_length:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} is shorter than {min_length}.", category="validation")
-        if "enum" in schema and value not in schema["enum"]:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} must be one of {schema['enum']!r}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} is shorter than {min_length}.",
+                category="validation",
+            )
+        if isinstance(max_length, int) and len(value) > max_length:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} is longer than {max_length}.",
+                category="validation",
+            )
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str):
+            try:
+                matched = re.search(pattern, value) is not None
+            except re.error:
+                matched = True
+            if not matched:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{path} does not match the required pattern.",
+                    category="validation",
+                )
 
-    if isinstance(value, int) and not isinstance(value, bool):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
         minimum = schema.get("minimum")
         maximum = schema.get("maximum")
         if isinstance(minimum, (int, float)) and value < minimum:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} must be >= {minimum}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must be >= {minimum}.",
+                category="validation",
+            )
         if isinstance(maximum, (int, float)) and value > maximum:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} must be <= {maximum}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must be <= {maximum}.",
+                category="validation",
+            )
 
-    if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        item_schema = schema["items"]
-        for index, item in enumerate(value):
-            validate_schema_value(item, item_schema, path=f"{path}[{index}]")
+    if isinstance(value, list):
+        min_items = schema.get("minItems")
+        max_items = schema.get("maxItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must contain at least {min_items} items.",
+                category="validation",
+            )
+        if isinstance(max_items, int) and len(value) > max_items:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must contain at most {max_items} items.",
+                category="validation",
+            )
+        if isinstance(schema.get("items"), dict):
+            item_schema = schema["items"]
+            for index, item in enumerate(value):
+                validate_schema_value(item, item_schema, path=f"{path}[{index}]")
 
     if isinstance(value, dict):
         properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
         required = schema.get("required", [])
+        if not isinstance(required, list):
+            required = []
         for key in required:
-            if key not in value:
-                raise ToolFailure("INVALID_ARGUMENT", f"{path}.{key} is required.", category="validation")
+            if isinstance(key, str) and key not in value:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{path}.{key} is required.",
+                    category="validation",
+                )
         additional = schema.get("additionalProperties", True)
         for key, item in value.items():
             child_path = f"{path}.{key}"
-            if key in properties:
-                validate_schema_value(item, properties[key], path=child_path)
+            child_schema = properties.get(key)
+            if isinstance(child_schema, dict):
+                validate_schema_value(item, child_schema, path=child_path)
+            elif key in properties:
+                continue
             elif additional is False:
-                raise ToolFailure("INVALID_ARGUMENT", f"{child_path} is not a recognized argument.", category="validation")
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{child_path} is not a recognized argument.",
+                    category="validation",
+                )
             elif isinstance(additional, dict):
                 validate_schema_value(item, additional, path=child_path)
+
+
+def _schema_branch_matches(value: Any, schema: dict[str, Any], *, path: str) -> bool:
+    try:
+        validate_schema_value(value, schema, path=path)
+    except ToolFailure:
+        return False
+    return True
 
 
 def schema_type_matches(value: Any, expected_type: str | list[str]) -> bool:
@@ -4638,6 +4864,22 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "name": {**string, "minLength": 1},
             },
             ["name"],
+        ),
+        "upstream_tool_call": object_schema(
+            {
+                "name": {**string, "minLength": 1},
+                "arguments": {"type": "object", "additionalProperties": True, "default": {}},
+                "schema_digest": {**string, "pattern": "^[0-9a-f]{32}$"},
+            },
+            ["name"],
+        ),
+        "upstream_tool_call_mutating": object_schema(
+            {
+                "name": {**string, "minLength": 1},
+                "arguments": {"type": "object", "additionalProperties": True, "default": {}},
+                "schema_digest": {**string, "pattern": "^[0-9a-f]{32}$"},
+            },
+            ["name", "schema_digest"],
         ),
         "check_exec_environment": object_schema(),
         "get_default_cwd": object_schema(),
