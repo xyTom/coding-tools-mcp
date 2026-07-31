@@ -22,6 +22,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .upstream_result import budget_tool_result
 from .upstream_sanitize import raw_schema_digest, sanitize_definition, schema_digest
 
 
@@ -206,9 +207,19 @@ class BaseUpstreamClient:
             )
         return [copy.deepcopy(tool) for tool in tools]
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def call_tool_raw(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         response = self.request("tools/call", {"name": name, "arguments": arguments})
-        return normalize_tool_result(response)
+        if not isinstance(response, dict):
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream tools/call result was not an object.",
+                category="protocol",
+            )
+        return response
+
+    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Backward-compatible raw call followed by normalization only."""
+        return normalize_tool_result(self.call_tool_raw(name, arguments))
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         raise NotImplementedError
@@ -659,24 +670,30 @@ class UpstreamManager:
                 tool_name=name,
             )
         try:
-            return client.call_tool(tool.remote_name, arguments or {})
+            raw_result = client.call_tool_raw(tool.remote_name, arguments or {})
+            normalized = normalize_tool_result(raw_result)
+            return budget_tool_result(normalized)
         except UpstreamError as exc:
-            return upstream_error_result(
-                exc.code,
-                exc.message,
-                category=exc.category,
-                retryable=exc.retryable,
-                details=exc.details,
-                alias=alias,
-                tool_name=name,
+            return budget_tool_result(
+                upstream_error_result(
+                    exc.code,
+                    exc.message,
+                    category=exc.category,
+                    retryable=exc.retryable,
+                    details=exc.details,
+                    alias=alias,
+                    tool_name=name,
+                )
             )
         except OSError:
-            return upstream_error_result(
-                "UPSTREAM_DISCONNECTED",
-                "Upstream MCP server disconnected.",
-                retryable=True,
-                alias=alias,
-                tool_name=name,
+            return budget_tool_result(
+                upstream_error_result(
+                    "UPSTREAM_DISCONNECTED",
+                    "Upstream MCP server disconnected.",
+                    retryable=True,
+                    alias=alias,
+                    tool_name=name,
+                )
             )
 
     def status_payload(self) -> dict[str, Any]:

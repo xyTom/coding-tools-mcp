@@ -32,6 +32,7 @@ from coding_tools_mcp.upstream import (
     parse_server_config,
     resolve_env_config,
 )
+from coding_tools_mcp.upstream_result import RESULT_INLINE_MAX, result_json_bytes
 from coding_tools_mcp.workspace_binding import WorkspaceBinding
 
 
@@ -90,7 +91,7 @@ class FakeUpstreamClient(BaseUpstreamClient):
     def list_tools(self) -> list[dict[str, object]]:
         return copy.deepcopy(self.tools)
 
-    def call_tool(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
+    def call_tool_raw(self, name: str, arguments: dict[str, object]) -> dict[str, object]:
         self.calls.append((name, copy.deepcopy(arguments)))
         if self.behavior == "timeout":
             raise UpstreamError(
@@ -327,6 +328,65 @@ class UpstreamGatewayTests(unittest.TestCase):
         self.assertNotIn("privateInstructions", registered.public_definition)
         self.assertEqual(registered.effective_risk, "mutating")
         self.assertIsNone(registered.raw_schema_digest)
+        manager.close()
+
+    def test_direct_upstream_call_enforces_the_final_result_budget(self) -> None:
+        config = UpstreamServerConfig(
+            alias="github",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+        )
+        client = FakeUpstreamClient(config, "2025-11-25")
+        manager = build_manager([config], [client])
+        raw_result = {
+            "content": [
+                {"type": "text", "text": "direct-output-" * 30_000},
+                {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "data": "direct-image-payload-" * 20_000,
+                },
+            ],
+            "isError": True,
+        }
+
+        with patch.object(client, "call_tool_raw", return_value=raw_result) as raw_call:
+            result = manager.call_tool("github__search", {"q": "large"})
+
+        raw_call.assert_called_once_with("search", {"q": "large"})
+        self.assertLessEqual(len(result_json_bytes(result)), RESULT_INLINE_MAX)
+        self.assertIs(result["isError"], True)
+        self.assertTrue(result["structuredContent"]["_truncated"])
+        self.assertNotIn("_result_handle", json.dumps(result))
+        self.assertNotIn("direct-image-payload-", json.dumps(result))
+        manager.close()
+
+    def test_large_upstream_error_envelope_is_budgeted(self) -> None:
+        config = UpstreamServerConfig(
+            alias="github",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+        )
+        client = FakeUpstreamClient(config, "2025-11-25")
+        manager = build_manager([config], [client])
+        failure = UpstreamError(
+            "UPSTREAM_RPC_ERROR",
+            "remote failure " * 20_000,
+            category="upstream",
+            details={"rpc_error": {"data": "error-payload-" * 30_000}},
+        )
+
+        with patch.object(client, "call_tool_raw", side_effect=failure):
+            result = manager.call_tool("github__search", {"q": "large-error"})
+
+        self.assertLessEqual(len(result_json_bytes(result)), RESULT_INLINE_MAX)
+        self.assertIs(result["isError"], True)
+        self.assertEqual(
+            result["structuredContent"]["error"]["code"],
+            "UPSTREAM_RPC_ERROR",
+        )
+        self.assertTrue(result["structuredContent"]["_truncated"])
+        self.assertNotIn("_result_handle", json.dumps(result))
         manager.close()
 
     def test_local_tool_policy_sets_effective_risk_without_rewriting_annotations(self) -> None:
