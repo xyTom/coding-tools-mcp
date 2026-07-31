@@ -1,43 +1,62 @@
-# Upstream Tool Broker — v6 分步实施任务书
+# Upstream Tool Broker — v6 Stable-Catalog 分步实施任务书
 
-> 状态：**Architecture approved / Implementation-ready**
+> 状态：**Architecture approved / v0.2.2 contract adapted / Implementation-ready**
 >
-> 本任务书将 v6 技术规格改造成适合短上下文模型逐步执行的工作包，并补入生命周期一致性、结果硬预算和 Broker 参数验证三项强制约束。
+> 本任务书是 v6 Broker 方案针对当前 `v0.2.2` 固定工具目录契约的正式适配版。
+> 它取代此前正文中依赖 `tool_profile`、动态 `start_server()` / `stop_server()`、
+> 运行时改变 `tools/list` 的执行要求。
 >
-> **执行优先级：本任务书正文 > 附录 A 技术规格。**  
-> 附录中与正文冲突的伪代码、字段名或并发语义，以正文为准。
+> **执行优先级：本任务书正文 > T00 handoff > 附录 A 原始技术规格。**
+> 附录 A 仅用于复用 sanitizer、BM25、ResultStore 等局部算法；其中任何
+> `tool_profile`、动态生命周期或 `listChanged=true` 伪代码均为失效参考，禁止照抄。
 
 ---
 
-## 0. 目标与边界
+## 0. 契约修订决定
 
-### 0.1 总目标
+### 0.1 决定来源
 
-将 `coding-tools-mcp` 从“全量透传所有外部 MCP 工具”的聚合器，升级为：
+T00 在当前目标工作树验证到：
 
-- 少量高频工具直接进入 `tools/list`；
-- 其他外部工具进入服务端 catalog；
-- Agent 通过搜索、描述、调用 Broker 按需使用；
-- read-only 与 mutating 调用严格分离；
-- 工具定义、结果大小和搜索返回均有硬预算；
-- 多客户端、start/stop/restart 并发时不存在跨代工具/连接混用；
-- 保持旧配置缺少 `expose_mode` 时的行为不变。
+- `docs/integration-contract-v0.2.2.md` 将本地工具目录定义为固定目录；
+- legacy `full`、`read-only`、`compat-readonly-all` 仅是设置迁移输入；
+- `tool_profile` 不得控制 `tools/list`、Gateway 可见性、路由或 annotations；
+- 每个 `Runtime` 在初始化时发现 upstream，并冻结定义与路由直至该 Runtime 关闭；
+- Admin Gateway 写入只持久化配置并返回 `restart_required`；
+- 不存在运行时 start、stop、reload、profile 或 list-changed 路径；
+- `tools.listChanged=false` 必须持续真实。
 
-### 0.2 不在本轮实现
+因此本任务书选择 T00 handoff 推荐的：
 
-以下内容只保留接口与后续扩展位，不在 Phase 1–2 强行实现：
+> **Stable-catalog adaptation**
 
-- 向量检索或 embedding；
-- 完整 JSON Schema `$ref` resolver；
-- OAuth principal + MCP session 复合隔离；
-- 动态 `tools/listChanged`；
-- workspace 切换时动态改变 direct 工具集；
-- 自动 `expose_mode=auto`；
-- 长期持久化 ResultStore。
+不恢复已移除的 profile 产品行为，不修改 v0.2.2 的固定目录与 Runtime 冻结契约。
 
-### 0.3 最终可见工具
+### 0.2 适配后的总目标
 
-upstream gateway 启用时，Broker 工具固定存在：
+将“所有外部 MCP 工具都直接进入 `tools/list`”改造为：
+
+- 五个本地 Broker 工具永久登记在 `TOOL_REGISTRY`；
+- upstream 配置、catalog、direct/broker 分流在 Runtime 构造前解析；
+- 每个 Runtime 初始化时完成一次 upstream discovery；
+- 该 Runtime 的 direct definitions、catalog、路由与 clients 随后保持冻结；
+- broker-only 工具的完整 Schema 不进入 `tools/list`；
+- Agent 通过 search → describe → readonly/mutating call 按需调用；
+- Runtime 运行期间不改变工具目录，不发送 `tools/list_changed`；
+- Admin 配置更新只影响之后新建的 Runtime 或服务重启后的 Runtime；
+- 旧 Runtime 继续使用自己冻结的 catalog 和 clients，直到关闭。
+
+### 0.3 固定本地 Broker 工具
+
+以下五个工具最终必须无条件存在于本地 `TOOL_REGISTRY`，不得根据：
+
+- upstream 配置是否为空；
+- catalog 当前是否为空；
+- legacy profile；
+- HTTP session；
+- workspace；
+
+进行隐藏或动态注册：
 
 ```text
 upstream_tool_search
@@ -47,11 +66,43 @@ upstream_tool_call_mutating
 upstream_result_fetch
 ```
 
-`tool_profile=read-only` 时不暴露：
+catalog 为空时：
 
-```text
-upstream_tool_call_mutating
-```
+- search 返回空结果；
+- describe/call 返回结构化 not-found；
+- result_fetch 返回结构化 not-found/no-session；
+- `tools/list` 仍保持固定。
+
+### 0.4 mutating 工具的安全语义
+
+当前 Runtime 不存在真正的 read-only profile，因此：
+
+- `upstream_tool_call_mutating` **始终在固定目录中可见**；
+- 它的真实 annotations 必须是 `readOnlyHint=false`、`destructiveHint=true`、
+  `openWorldHint=true`；
+- `upstream_tool_call` 只执行 effective risk 为 readonly 的目标；
+- `upstream_tool_call_mutating` 只执行 effective risk 为 mutating/unknown 的目标；
+- unknown annotations 默认 mutating；
+- mutating 调用必须先 describe，并提交匹配的 public schema digest；
+- Broker 在网关侧验证公开 `inputSchema`；
+- 不得把 fake-readonly annotation override 当作安全边界；
+- 不得声称“工具未出现在目录中所以安全”；
+- 不在本任务中发明新的 `tool_profile` 或产品级审批系统。
+
+现有 HTTP authentication、Runtime permission policy、客户端基于真实 annotations 的确认流程
+继续生效，但 Gateway 文档不得把这些描述为远端副作用的绝对安全边界。
+
+### 0.5 不在本轮实现
+
+- 动态 `tools/listChanged`；
+- Runtime 内 start/stop/reload upstream；
+- workspace 切换时改变 direct 工具；
+- live profile filtering；
+- 向量检索；
+- 完整 `$ref` resolver；
+- OAuth principal + session 复合 ResultStore owner；
+- ResultStore 持久化；
+- `expose_mode=auto`。
 
 ---
 
@@ -59,48 +110,68 @@ upstream_tool_call_mutating
 
 ### 1.1 一次只执行一个任务卡
 
-每个 Agent/session 只能执行一个 `Txx` 任务卡：
+每个 Agent/session 只执行一个 `Txx`：
 
-1. 只读取该任务卡列出的文件和附录章节；
-2. 读取上一任务的 handoff；
-3. 不提前实现下一任务；
-4. 完成本任务的定点测试；
-5. 创建一个独立提交；
-6. 输出 handoff 后停止。
+1. 确认当前独立工作树、分支、HEAD 和 clean 状态；
+2. 读取当前任务卡；
+3. 读取上一任务 handoff；
+4. 只读取任务卡指定的代码文件或局部；
+5. 不提前实现下一任务；
+6. 运行本任务定点测试；
+7. 一个任务一个提交；
+8. 写 handoff 后停止。
 
-禁止把整份附录 A 全量塞入每个 Agent 的上下文。
+禁止把整份附录 A 全量塞入 Agent 上下文。
 
-### 1.2 每次新 Agent 的输入组成
-
-建议只提供：
+### 1.2 每次 Agent 的最小输入
 
 ```text
 1. 当前任务卡全文；
 2. 上一任务 handoff；
-3. git status / HEAD；
-4. 当前任务卡指定的 2–5 个代码文件或局部行；
-5. 本任务失败测试输出。
+3. git status + HEAD；
+4. 任务卡指定的 2–5 个文件或局部；
+5. 本任务失败测试输出；
+6. 必要时只读取附录 A 指定算法章节。
 ```
 
-### 1.3 每个任务的提交规则
+### 1.3 强制停止条件
 
-- 工作树开始时必须 clean；
-- 不混入无关重构；
-- 一项任务一个提交；
-- 提交消息使用任务卡给出的建议；
+遇到以下任一情况必须停在当前任务：
+
+- 需要恢复 `tool_profile`；
+- 需要添加动态 `start_server()` / `stop_server()`；
+- 需要把 `listChanged` 改为 true；
+- 需要让 Admin 配置写入立即改变现有 Runtime；
+- 需要改变本地 `TOOL_REGISTRY` 的固定目录原则；
+- 需要破坏 v0.2.2 规范测试才能继续；
+- 发现上一任务的数据结构无法满足本任务且无法局部兼容。
+
+### 1.4 提交规则
+
+- 开始时 worktree clean；
+- 不混入其他分支或原目录修改；
+- 不恢复用户 stash；
+- 不推送远程，除非用户明确要求；
 - 测试失败不能标记 complete；
-- 若发现设计冲突，停止在当前任务并写入 handoff，不跨任务修补。
+- 文档与代码在对应任务中同步；
+- 不用大范围顺手重构掩盖本任务 diff。
 
-### 1.4 Handoff 模板
+### 1.5 Handoff 模板
 
-每个任务结束必须输出并保存到提交说明或 `docs/handoff`：
+保存到：
+
+```text
+docs/upstream-broker-handoffs/Txx-<slug>.md
+```
+
+模板：
 
 ```markdown
-## Txx Handoff
+# Txx Handoff — <title>
 
 Status: complete | blocked | partial
-HEAD: <full sha>
-Commit: <short sha> <subject>
+Parent HEAD: <sha before task>
+Branch: feat/upstream-tool-broker-v6
 Worktree: clean | dirty
 
 Implemented:
@@ -113,8 +184,11 @@ Tests:
 - command: ...
   result: PASS | FAIL
 
-Compatibility:
-- ...
+Stable-catalog compatibility:
+- no tool_profile control path: yes/no
+- no dynamic start/stop/reload: yes/no
+- listChanged remains false: yes/no
+- existing Runtime snapshot remains immutable: yes/no
 
 Known limitations:
 - ...
@@ -128,390 +202,375 @@ Do not redo:
 
 ---
 
-## 2. 强制架构约束
+## 2. 全局强制架构约束
 
-以下约束覆盖附录中的旧伪代码。
+### 2.1 Runtime 快照只在构造期发布一次
 
-### 2.1 Registry 与 client 必须属于同一代快照
-
-最终注册状态必须包含：
+采用：
 
 ```python
 @dataclass(frozen=True)
 class UpstreamRegistryState:
     all_tools: Mapping[str, UpstreamTool]
-    direct_tool_names: frozenset[str]
+    direct_tool_names: tuple[str, ...]
     catalog: Mapping[str, UpstreamToolCatalogEntry]
     search_index: CatalogSearchIndex | None
     clients: Mapping[str, BaseUpstreamClient]
-    generation: int
 ```
 
 要求：
 
-- `all_tools`、`catalog`、`clients` 必须来自同一个 generation；
-- `call_tool()` 只能从同一个局部 `state = self._state` 中同时取得 tool 和 client；
-- 禁止“旧 state 的 tool + 新 clients 字典中的 client”；
-- 使用 `MappingProxyType` 或等价只读映射，避免 frozen dataclass 内部字典被修改；
-- start/restart：新 client 完成 initialize + tools/list 后才发布新 state；
-- stop：先原子发布移除 alias 的新 state，再关闭旧 client；
-- 旧 client 的关闭必须等待已进入调用临界区的请求完成；
-- 与 stop/restart 竞争但尚未取得 client lease 的调用，允许返回 retryable not-available，不要求强行成功；
-- 不允许死锁、跨代执行、使用已关闭 client 或目录/工具状态撕裂。
+- `all_tools`、direct names、catalog、index、clients 来自同一次 discovery；
+- 使用 `MappingProxyType` 或等价只读映射；
+- 构造阶段先在局部初始化全部 enabled clients 与 tools；
+- 任一配置/名称碰撞/初始化错误按当前 tolerant snapshot 规则记录；
+- 完成后一次赋值给 `self._state`；
+- 正常 Runtime 生命周期不再替换 `_state`；
+- `close()` 只负责阻止新调用并关闭该 Runtime 自己的 clients；
+- 不提供 public start/stop/restart API；
+- Admin 配置写入不持有或修改现有 Runtime 的 `_state`。
 
-建议 client 生命周期接口：
+由于不存在 live swap，本轮不需要 generation CAS 或动态 index replacement。
 
-```python
-class BaseUpstreamClient:
-    def __init__(...):
-        self._lifecycle_lock = threading.RLock()
-        self._closed = False
+### 2.2 client 与关闭并发
 
-    def call_tool_raw(...):
-        with self._lifecycle_lock:
-            if self._closed:
-                raise UpstreamError(
-                    "UPSTREAM_NOT_AVAILABLE",
-                    "Upstream client is closed.",
-                    retryable=True,
-                )
-            return self._call_tool_raw_locked(...)
+每个 Runtime 独占自己的 upstream clients。
 
-    def close(self):
-        with self._lifecycle_lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._close_locked()
-```
+最低要求：
 
-不要直接把现有 transport 的全部 `request()` 强制改造成同一个私有函数；可以采用最小改动的 wrapper，但必须保证 `call_tool_raw()` 与 `close()` 互斥。
+- `call_tool_raw()` 与 `close()` 不能造成中途破坏或数据竞争；
+- 已进入调用临界区的调用可安全完成；
+- close 后的新调用返回 retryable `UPSTREAM_NOT_AVAILABLE`；
+- close 幂等；
+- HTTP 与 stdio transport 保持当前协议行为；
+- 不通过新增动态 manager lifecycle 来解决并发。
 
-### 2.2 Broker 结果必须有最终 envelope 硬预算
+可采用 client lifecycle lock/lease，但必须最小改动，并与 transport 已有 request lock 顺序一致。
 
-内容感知截断完成后必须再次序列化检查。
+### 2.3 Schema 与公开元数据
 
-保证：
+- raw definition 仅服务端诊断使用；
+- public definition 面向 `tools/list` 和 describe；
+- sanitizer 是 untrusted metadata containment，不宣称消灭提示注入；
+- 顶层显式构建；
+- Schema 递归类型检查、深度/属性/enum/value 预算；
+- `$ref` 节点降级，不留下悬空引用；
+- `type` 支持字符串和字符串数组；
+- 单个 public definition 最终不超过 8 KiB；
+- catalog description 不超过 200 字符；
+- raw description 不进入普通 Broker 输出。
+
+### 2.4 风险分类与 Digest
 
 ```text
-len(final MCP tool result envelope) <= RESULT_INLINE_MAX
+local tool_policy override
+  > explicit readOnlyHint=true and destructiveHint!=true
+  > default mutating
 ```
 
-若第一次截断后仍超限，返回最小降级 envelope：
-
-```python
-{
-    "content": [{
-        "type": "text",
-        "text": "Upstream result exceeded the inline budget. "
-                "Use upstream_result_fetch with the returned handle."
-    }],
-    "structuredContent": {
-        "_truncated": True,
-        "_original_bytes": original_bytes,
-        "_result_handle": handle,  # 有 handle 时
-    },
-    "isError": original_is_error,
-}
-```
-
-要求：
-
-- 多个 text block 的总和不能绕过预算；
-- 未知 content type 在超限路径中不得原样保留；
-- image/audio/blob 不能裁成损坏 base64，必须整块省略；
-- resource URI 可保留，嵌入 text 可截断，blob 必须省略；
-- 即使原结果没有 `structuredContent`，也必须创建 metadata dict；
-- 没有真实 session owner 时不生成 handle，但仍返回小型截断结果；
-- direct upstream 调用默认不存 overflow，Broker 调用才按 session 存储。
-
-### 2.3 Broker 调用必须验证公开 Schema
-
-Broker 转发前必须验证：
-
-```python
-tool.public_definition["inputSchema"]
-```
-
-不能只依赖上游 MCP 自己校验。
-
-首版支持的验证子集：
-
-- `type`：object、array、string、integer、number、boolean、null；
-- type 数组，例如 `["string", "null"]`；
-- `properties`；
-- `required`；
-- `additionalProperties`；
-- `enum`、`const`；
-- `minimum`、`maximum`；
-- `minLength`、`maxLength`；
-- `minItems`、`maxItems`；
-- `oneOf`、`anyOf`、`allOf`；
-- 数组 `items`。
-
-降级为 loose schema 时自然允许任意对象。
-
-错误格式：
-
-```text
-UPSTREAM_ARGUMENTS_INVALID
-category=validation
-```
-
-### 2.4 Digest 以公开 Schema 为准
-
-数据结构采用：
+数据结构：
 
 ```python
 public_schema_digest: str
 raw_schema_digest: str | None
 ```
 
-规则：
+- search/describe/call 使用 public digest；
+- mutating call digest 必填；
+- readonly call digest可选；
+- raw-only 变化不应使 public digest漂移；
+- fake-readonly override 不改变 effective risk。
 
-- Broker search/describe/call 使用 `public_schema_digest`；
-- raw digest 仅用于 admin/诊断；
-- 附录中所有普通 `schema_digest` 均解释为 public digest；
-- readonly call 的 digest 可选；
-- mutating call 的 digest **必填**；
-- mutating call 未 describe 或 digest 过期时拒绝；
-- public Schema 未变化时，不因 raw 中被 sanitizer 删除的字段改变而使 public digest 漂移。
+### 2.5 Broker 参数验证
 
-### 2.5 Schema sanitizer 额外约束
+转发前验证：
 
-- 顶层 definition 必须显式构建，不应先复制再删；
-- `title`、`description`、`inputSchema`、`outputSchema` 类型不合法时不得进入 public definition；
-- property value 不是 dict 时降级为 loose schema，不原样透传；
-- JSON Schema `type` 同时支持字符串和字符串数组；
-- `$ref` 节点降级，不保留悬空引用；
-- 单工具公开定义最终必须满足 `MAX_DEFINITION_BYTES`；
-- sanitizer 只称为 untrusted metadata containment，不称为彻底防提示注入。
-
-### 2.6 Result fetch 硬限制
-
-- offset 单位：Unicode codepoint；
-- `offset >= 0`；
-- `1 <= limit <= 32000`；
-- Schema 与运行时双重 clamp；
-- fetch 不允许一次重新取回 8 MiB 全文；
-- ResultStore 是 TTL + FIFO，不称为 LRU。
-
-### 2.7 当前隔离边界
-
-本轮 ResultStore owner：
-
-```text
-MCP session ID
+```python
+tool.public_definition["inputSchema"]
 ```
 
-stdio 使用进程级随机 owner。
+首版支持：
 
-OAuth principal 复合隔离仅记录为后续工作；不得伪称已完成。
+- object、array、string、integer、number、boolean、null；
+- type 数组；
+- properties、required、additionalProperties；
+- enum、const；
+- minimum、maximum；
+- minLength、maxLength；
+- minItems、maxItems；
+- oneOf、anyOf、allOf；
+- items。
+
+失败返回：
+
+```text
+UPSTREAM_ARGUMENTS_INVALID
+category=validation
+```
+
+### 2.6 结果最终硬预算
+
+保证：
+
+```text
+len(final MCP result envelope) <= RESULT_INLINE_MAX
+```
+
+管线：
+
+```text
+raw result
+→ normalize
+→ serialize original
+→ Broker: 有 owner 时存储原文
+→ content-aware truncate
+→ 再次 serialize
+→ 超限则最小 envelope
+```
+
+要求：
+
+- 多 text blocks 累计受限；
+- image/audio/blob 整块省略，不裁坏 base64；
+- resource URI 可保留，内嵌 text 截断，blob 省略；
+- unknown block 在超限路径转占位符；
+- structuredContent 递归预算；
+- 原结果无 structuredContent 时创建 metadata；
+- 保留原 `isError`；
+- direct upstream 默认不存 overflow；
+- Broker 才产生 result handle。
+
+### 2.7 ResultStore
+
+```text
+single result <= 8 MiB
+per owner <= 16 handles / 16 MiB
+global <= 64 MiB
+TTL = 5 min
+FIFO
+fetch limit <= 32000 Unicode codepoints
+```
+
+owner：
+
+- HTTP：当前 MCP session ID；
+- stdio：Runtime/进程级随机 owner；
+- 无 owner：不存储；
+- 禁止 `__default__`；
+- OAuth principal 复合隔离明确为未实现。
+
+### 2.8 固定 catalog 与配置生效边界
+
+配置字段：
+
+```text
+expose_mode: direct | broker
+pinned_tools: remote_name[]
+tags: string[]
+tool_policy: remote_name -> readonly | mutating
+tool_search.custom_synonyms: global map
+```
+
+生效规则：
+
+- 配置在 Runtime 创建前加载；
+- 旧配置缺 `expose_mode` → direct；
+- direct：过滤后的工具全部进入 direct + catalog；
+- broker：过滤后的工具全部进入 catalog，只有 pinned 进入 direct；
+- include/exclude 先执行；
+- 当前 Runtime 的结果随后冻结；
+- Admin 修改返回 `restart_required=true`；
+- 旧 Runtime 不变；
+- 新 Runtime/服务重启后使用新配置；
+- `listChanged=false`。
 
 ---
 
 ## 3. 任务依赖图
 
 ```text
-T00 基线冻结
+T00  基线冻结与契约冲突发现（已完成）
   ↓
-T01 Registry 快照迁移
+T00R Stable-catalog 任务书修订（本次文档任务）
   ↓
-T02 Schema sanitizer + 风险 + digest
+T01  固定 Registry 快照迁移（行为不变）
   ↓
-T03 结果预算与截断
+T02  Schema sanitizer、风险与 public digest
   ↓
-T04 BM25 搜索模块
+T03  结果硬预算（inline，无 handle）
   ↓
-T05 配置、catalog、direct/broker 分流
+T04  独立 BM25 Catalog 搜索模块
   ↓
-T06 Broker 搜索与描述工具
+T05  启动配置、Catalog 与 direct/broker 冻结分流
   ↓
-T07 Broker 调用、参数验证、passthrough
+T06  固定 Broker search/describe 工具
   ↓
-T08 ResultStore 与 result_fetch
+T07  固定 readonly/mutating call、参数验证、passthrough
   ↓
-T09 client/state 生命周期并发加固
+T08  Session ResultStore 与 result_fetch
   ↓
-T10 配置管理、文档与兼容迁移
+T09  Runtime close/client 并发与多 Runtime 隔离
   ↓
-T11 全量验证、性能与发布交接
+T10  Admin restart-only 配置、文档和运维报告
+  ↓
+T11  全量验证与发布交接
 ```
 
-T01–T03 对现有 direct 工具行为保持兼容。  
-只有 T05 以后才允许已有配置显式切换到 broker。
+T01–T04 不改变当前 direct upstream 工具可见行为。
+T05 开始，`expose_mode=broker` 只在新 Runtime 初始化时生效。
 
 ---
 
 # 4. 分步任务卡
 
-## T00 — 基线冻结与测试地图
+## T00 — 基线冻结与契约冲突发现
 
-### 目标
+状态：**complete / blocked as designed**
 
-建立实施基线，不修改运行逻辑。
-
-### 只读取
-
-- `coding_tools_mcp/upstream.py`
-- `coding_tools_mcp/server.py`
-- `tests/compliance/test_upstream_gateway.py`
-- upstream/admin 配置加载相关测试
-- 附录 A 的“数据结构总览”和测试清单
-
-### 工作内容
-
-1. 记录：
-   - HEAD；
-   - 当前 upstream 工具数；
-   - `tool_profile=full/read-only` 下 tools/list；
-   - 当前 Zotero 等 upstream 状态；
-   - 全量测试结果。
-2. 找出：
-   - `UpstreamTool` 所有使用点；
-   - `self.tools` 所有读写点；
-   - `BaseUpstreamClient.call_tool()` 所有调用点；
-   - HTTP/stdio session_id 注入路径；
-   - tool definition/schema validation 现有公共函数。
-3. 新建实施 handoff 文档，列出每个任务的目标文件与现有测试入口。
-4. 不改生产行为。
-
-### 验收
-
-- 工作树 clean；
-- 全量测试基线明确；
-- 所有迁移触点有清单；
-- 没有功能提交混入。
-
-### 建议提交
+权威 handoff：
 
 ```text
-docs(broker): freeze upstream broker implementation baseline
+docs/upstream-broker-handoffs/T00-baseline.md
 ```
+
+不要重复基线测试，除非 T01 开始前 HEAD 或依赖已变化。
 
 ---
 
-## T01 — Registry 快照迁移（行为不变）
+## T00R — Stable-catalog 任务书修订
 
 ### 目标
 
-将当前 `self.tools + self.clients` 迁移为同代只读 Registry snapshot，但仍保持全部 upstream 工具 direct。
+解决 T00 发现的产品契约冲突，仅修订任务书，不改生产代码。
 
-### 只读取
+### 必须确认
 
-- `upstream.py`：Base clients、UpstreamManager、start/stop/init
-- `server.py`：list_tools、direct upstream dispatch
-- T00 handoff
-- 附录 A 的“不可变注册状态”
-
-### 实现
-
-1. 新增：
-   - `UpstreamRegistryState`
-   - `generation`
-   - `clients` 映射进入 state
-   - `MappingProxyType`
-2. 保持：
-   - 所有工具 direct；
-   - 原工具名称；
-   - 原 annotations 行为；
-   - 原配置语义。
-3. 所有读方法只读一次：
-   ```python
-   state = self._state
-   ```
-4. start/restart：
-   - 在局部构建 client 和工具；
-   - 完成 initialize/list_tools；
-   - 一次发布新 generation。
-5. stop：
-   - 一次发布移除 alias 的 state；
-   - 发布后再关闭旧 client。
-6. 暂不加入 catalog 搜索和 Broker。
-7. `state` 属性不允许调用者修改内部映射。
-
-### 并发语义
-
-本任务先保证：
-
-- 不出现旧工具和新 client 混用；
-- stop 后的新读取看不到已删除工具；
-- 已取得旧 state 的调用要么安全完成，要么返回 retryable closed/not-available；
-- 不要求引入最终 client lease 测试，T09 再加固。
+- 删除所有 live `tool_profile` 分支要求；
+- 删除动态 start/stop/restart 要求；
+- Broker 五工具改为固定本地目录；
+- direct/broker 只在 Runtime 初始化时决定；
+- Admin 写入仅 restart-required；
+- T11 smoke 不再要求切换 profile 或实时 start/stop；
+- 附录旧伪代码明确降级为非规范参考。
 
 ### 测试
 
-- 原 upstream gateway 测试全部通过；
-- tools/list 顺序稳定；
-- state mapping 无法外部修改；
-- restart 后 generation 增加；
-- 缺少 alias 时结构化错误保持一致。
+```text
+python -m pytest tests/compliance/test_upstream_gateway.py -q
+uv run --frozen python -m unittest discover -s tests -p "test_*.py"
+```
+
+文档任务允许使用 T00 已通过的全量基线；至少运行 upstream contract 定点测试和文档静态搜索：
+
+```text
+任务书正文不得要求：
+- tool_profile 控制目录
+- UpstreamManager.start_server/stop_server
+- listChanged=true
+```
 
 ### 建议提交
 
 ```text
-refactor(upstream): migrate registry to atomic snapshots
+docs(broker): adapt taskbook to stable catalog contract
 ```
 
 ---
 
-## T02 — Schema sanitizer、风险分类与公开 Digest
+## T01 — 固定 Registry 快照迁移（行为不变）
 
 ### 目标
 
-建立 raw/public definition 双轨，并限制外部元数据进入模型上下文。
+把当前 mutable `_tools + _tool_order + clients` 迁移为一次构造、只读发布的
+`UpstreamRegistryState`，保持现有 direct exposure、错误和 annotations 行为不变。
 
 ### 只读取
 
-- `upstream.py`：namespaced definition、profiled definition
-- 新建 `upstream_sanitize.py`
-- schema/tool definition 测试
-- T01 handoff
-- 附录 A Phase 1 sanitizer
+- `coding_tools_mcp/upstream.py`：clients、UpstreamManager、initialize、close；
+- `coding_tools_mcp/server.py`：Runtime 构造、list_tools、direct dispatch；
+- `tests/compliance/test_upstream_gateway.py`；
+- T00 与 T00R handoff。
 
 ### 实现
 
-1. 新建 `upstream_sanitize.py`：
-   - 文本控制字符清除；
-   - 递归 Schema 类型检查；
-   - property/enum/depth/value 限额；
-   - `$ref` 降级；
-   - outputSchema 递归处理；
-   - 最终 8 KiB 硬预算；
-   - `type` 支持 str/list；
-   - 顶层显式构建。
-2. `UpstreamTool` 改为：
-   ```python
-   raw_definition
-   public_definition
-   effective_risk
-   public_schema_digest
-   raw_schema_digest
-   ```
-3. `tool_definitions()` 只使用 public definition。
-4. 风险：
-   - local policy > annotation > unknown=mutating；
-   - `compat-readonly-all` 只改变对客户端的兼容展示，不改变 effective risk。
-5. Digest：
-   - public digest 由 public inputSchema 生成；
-   - raw digest 可选，仅诊断。
+1. 新增 frozen `UpstreamRegistryState`：
+   - all_tools；
+   - stable direct name tuple；
+   - empty/future catalog slot；
+   - empty/future search index slot；
+   - clients。
+2. 使用 `MappingProxyType` 防外部修改。
+3. `_initialize_configs()` 在局部构建完整 snapshot，一次发布。
+4. 保持当前 tolerant config snapshot 语义和 status payload。
+5. `tool_definitions()`、`tool_names()`、`has_tool()`、`call_tool()` 每次只读取一个局部 state。
+6. `close()` 幂等关闭 state 中 clients，不添加 start/stop/reload API。
+7. 所有 upstream 工具仍 direct。
+8. 不引入 catalog 搜索、expose_mode 生效、sanitizer 或 result budget。
+
+### 验收
+
+- 原工具名称与顺序不变；
+- 两个 Runtime 不共享 clients/session；
+- state mapping 不可修改；
+- `tool_profile` 字符串未进入 `upstream.py`；
+- `UpstreamManager` 仍无 start_server/stop_server；
+- `listChanged=false`；
+- 原 Gateway 定点测试通过。
+
+### 建议提交
+
+```text
+refactor(upstream): freeze registry in immutable runtime state
+```
+
+---
+
+## T02 — Schema sanitizer、风险分类与 public Digest
+
+### 目标
+
+建立 raw/public definition 双轨，限制外部 MCP 元数据进入模型上下文。
+
+### 只读取
+
+- `coding_tools_mcp/upstream.py` 的 `UpstreamTool`、definition 构建与 tool definitions；
+- 新建 `coding_tools_mcp/upstream_sanitize.py`；
+- T01 handoff；
+- 附录 A sanitizer 局部章节。
+
+### 实现
+
+1. 顶层 public definition 显式构建；
+2. title/description/control chars/Schema 递归清洗；
+3. property、enum、深度、default/const/examples 限额；
+4. `$ref` 节点降级；
+5. outputSchema 递归清洗；
+6. `type` 支持 str/list；
+7. 四阶段硬降级，最终 `< 8192 bytes`；
+8. `UpstreamTool` 保存：raw/public/effective risk/public digest/raw digest；
+9. 风险规则：local policy > real annotation > unknown mutating；
+10. `tool_definitions()` 只返回 public definition；
+11. fake-readonly compatibility override 不改变 effective risk。
 
 ### 禁止
 
 - 不实现 Broker；
-- 不切换 expose_mode；
-- 不把 raw description 暴露给普通 describe；
-- 不声称 sanitizer 消除提示注入。
+- 不让 expose_mode 生效；
+- 不把 raw definition 返回模型；
+- 不修改固定目录契约。
 
 ### 测试
 
-至少覆盖附录 sanitizer 测试，并增加：
+覆盖：
 
-- 顶层非法 title/outputSchema 类型被丢弃；
-- 非 dict property schema 降级；
-- `type=["string","null"]` 保留；
-- raw 改变但 public 不变时 public digest 不变；
-- hard fallback 后仍严格低于上限。
+- 非法顶层类型丢弃；
+- 非 dict property 降级；
+- `$ref` 不悬空；
+- `type=["string","null"]`；
+- hard byte budget；
+- raw-only 变化不影响 public digest；
+- unknown risk=mutating；
+- 原 Gateway annotations 合规测试更新后通过。
 
 ### 建议提交
 
@@ -525,42 +584,37 @@ feat(upstream): contain untrusted tool metadata
 
 ### 目标
 
-为现有 direct upstream 结果增加安全的 inline 硬预算，暂不引入 ResultStore。
+给现有 direct upstream 结果加入最终 envelope 硬预算，暂不实现 ResultStore。
 
 ### 只读取
 
-- `upstream.py`：normalize_tool_result、client call path
-- MCP content block 相关测试
-- T02 handoff
-- 附录 A “结果截断”
+- `coding_tools_mcp/upstream.py` 的 client call、normalize、result error；
+- MCP content/result shape 测试；
+- T02 handoff；
+- 附录 A result truncation 局部章节。
 
 ### 实现
 
-1. `normalize_tool_result()` 与 budget/truncate 责任分离。
-2. 新增 content-type-aware truncation：
-   - text：按累计 envelope 预算截断；
-   - image/audio/blob：整块省略；
-   - resource：保留 URI、截断 text、移除 blob；
-   - unknown：超限时转占位符；
-   - structuredContent：递归裁剪。
-3. 截断后再次序列化。
-4. 若仍超过 `RESULT_INLINE_MAX`，返回最小 envelope。
-5. 创建 metadata：
-   ```text
-   _truncated
-   _original_bytes
-   ```
-6. Phase 1 不生成 handle。
-7. 保留原 `isError`。
+1. client raw call 与 Manager normalize/budget 责任分离；
+2. text 按累计 envelope 预算；
+3. image/audio/blob 整块省略；
+4. resource 保留 URI，裁 text，移除 blob；
+5. unknown large block 转占位符；
+6. structuredContent 递归限制；
+7. 无 structuredContent 时创建 metadata；
+8. 最终 serialize 再检查；
+9. 仍超限返回最小 envelope；
+10. 保留 `isError`；
+11. Phase 1 仅 `_truncated + _original_bytes`，无 handle。
 
-### 关键验收
+### 验收
 
-- 最终 envelope 始终不超过预算；
-- 多 text block 不能叠加绕过；
-- image/base64 不返回损坏数据；
-- 没有 structuredContent 时仍有 metadata；
-- 小结果保持原样；
-- direct 调用行为除超大结果外不变。
+- 小结果结构保持；
+- missing content 仍按 v0.2.2 契约规范化为空数组，不复制 structured text；
+- 多 text block 不绕过；
+- binary 不损坏；
+- final envelope 不超过上限；
+- direct 调用不产生 handle。
 
 ### 建议提交
 
@@ -574,61 +628,41 @@ fix(upstream): enforce hard result envelope budgets
 
 ### 目标
 
-在不接入 Runtime Broker 的情况下完成可单测的搜索引擎。
+实现纯模块、可单测的字段加权搜索，不接入 Runtime Broker。
 
 ### 只读取
 
-- 新建 `upstream_search.py`
-- T03 handoff
-- 附录 A 搜索引擎章节
-- 不需要加载整个 `server.py`
+- 新建 `coding_tools_mcp/upstream_search.py`；
+- T03 handoff；
+- 附录 A tokenizer/BM25 局部章节。
 
 ### 实现
 
-1. `ToolTokenizer` 实例级：
-   - NFKC；
-   - separator；
-   - camelCase；
-   - CJK 已知短语、bigram、必要 unigram；
-   - custom synonyms 不污染全局。
-2. `merge_synonyms()`：
-   - built-in + 全局 custom；
-   - 每词最多 10 个；
-   - 去重且顺序稳定。
-3. 字段 BM25：
-   - name 5；
-   - title 4；
-   - tags 4；
-   - alias 3；
-   - argument names 2；
-   - description 1。
-4. 结构化过滤：
-   - server；
-   - readonly；
-   - tags；
-   - name_prefix。
-5. 快速路径：
-   - public name；
-   - alias/remote；
-   - 唯一 remote；
-   - 唯一 prefix。
-6. 结果：
-   - 默认 5；
-   - 最大 20；
-   - 不返回 Schema；
-   - 稳定排序。
-7. SearchBackend Protocol 与实现签名保持一致。
+- instance-level `ToolTokenizer`；
+- NFKC、separator、camelCase；
+- CJK known phrase + bigram + fallback；
+- built-in + global custom synonyms；
+- 单词扩展最多 10，去重、稳定；
+- 字段权重 name 5/title 4/tags 4/alias 3/arguments 2/description 1；
+- server/risk/tags/name_prefix filters；
+- exact public、alias/remote、唯一 remote、唯一 prefix 快速路径；
+- 默认 5、最大 20；
+- 结果不含完整 Schema；
+- deterministic sort；
+- SearchBackend Protocol 与实现一致。
 
 ### 测试
 
-执行附录 A 搜索测试全部项目，尤其：
+重点：
 
 - `searchLibrary`；
+- `snake_case`；
 - “搜索文献”；
 - custom “核磁” → nmr；
-- 两 server 同 remote_name；
-- 同义词不重复加分；
-- 不同 tokenizer 实例互不污染。
+- 两 server 同 remote name；
+- query token 不重复加分；
+- tokenizer 实例互不污染；
+- 50、200、500 工具 fixture 均正确返回且结果受限。
 
 ### 建议提交
 
@@ -638,78 +672,84 @@ feat(upstream): add field-weighted broker search index
 
 ---
 
-## T05 — 配置、Catalog 与 direct/broker 分流
+## T05 — 启动配置、Catalog 与 direct/broker 冻结分流
 
 ### 目标
 
-接入 catalog 和暴露模式，但暂不提供 Broker 调用工具。
-
-### 依赖警告
-
-本任务与 T06 必须连续完成后才能让用户实际切换已有 MCP 到 broker。  
-T05 提交可存在，但管理台/UI 不应在 T06 前主动引导用户启用 broker。
+在 Runtime 初始化快照中接入 catalog、搜索索引和 exposure 配置；
+不提供任何 live mutation API。
 
 ### 只读取
 
-- `upstream.py` 配置解析、manager 初始化
-- upstream config/admin 读写代码
-- `mcp-servers.json` 示例
-- T04 handoff
-- 附录 A expose_mode 章节
+- `coding_tools_mcp/upstream.py` 配置 snapshot 与 Manager 初始化；
+- Gateway Admin 配置 parser/validator；
+- T04 handoff；
+- v0.2.2 integration contract 的 Upstream/Admin 章节。
 
 ### 实现
 
-配置字段：
+配置：
 
 ```text
 expose_mode: direct | broker
 pinned_tools
 tags
 tool_policy
-tool_search.custom_synonyms（全局）
+tool_search.custom_synonyms
 ```
 
 规则：
 
-- 旧配置缺字段 → direct；
-- direct：全部进入 direct + catalog；
-- broker：只有 pinned 进入 direct，全部进入 catalog；
-- include/exclude 先过滤；
-- collision 基于全部 all_tools；
-- pinned 使用 remote_name；
-- catalog 保存紧凑 public metadata；
-- search index 与 state 同代发布；
-- context budget 只报告 upstream direct exposure，并注明不含 built-in/admin。
+1. include/exclude 先过滤；
+2. 旧配置缺 expose_mode → direct；
+3. direct：全部进入 direct + catalog；
+4. broker：全部进入 catalog，只有 pinned remote names 进入 direct；
+5. collision 基于全部 all_tools 和本地 `TOOL_REGISTRY` reserved names；
+6. catalog 只保存紧凑 public metadata；
+7. index 在构造期建立并随 state 冻结；
+8. Manager 不新增 start/stop/reload；
+9. Admin 写配置只 validate/persist/revision/restart_required；
+10. 当前 Runtime 不读取更新后的配置。
+
+### 迁移安全
+
+T05 完成后 broker-only 工具会从新 Runtime 的 direct list 消失，但 T06 尚未提供发现工具。
+因此：
+
+- T05 与 T06 应连续实施；
+- 文档/UI 在 T06 完成前不得推荐用户切到 broker；
+- 默认仍 direct，现有配置行为不变。
 
 ### 测试
 
-- 旧配置行为完全不变；
-- broker-only 不在 tools/list；
-- pinned 在 tools/list；
-- direct/catalog 统计正确；
-- start/stop/restart 后 state 内部一致；
-- custom synonyms 配置进入 tokenizer。
+- legacy config direct；
+- broker-only 不在 direct definitions；
+- pinned 在 direct；
+- catalog/index 与 definitions 来自同一 Runtime snapshot；
+- Admin 更新不影响已创建 Runtime；
+- 新 Runtime 读取新配置；
+- no dynamic methods；
+- listChanged=false。
 
 ### 建议提交
 
 ```text
-feat(upstream): add catalog and exposure modes
+feat(upstream): freeze catalog and exposure at runtime startup
 ```
 
 ---
 
-## T06 — Broker 搜索、描述与固定注册
+## T06 — 固定 Broker Search 与 Describe
 
 ### 目标
 
-提供只读发现能力，让 broker-only 工具真正可发现，但暂不执行外部调用。
+把发现能力作为固定本地工具加入 `TOOL_REGISTRY`。
 
 ### 只读取
 
-- `server.py`：tool registry、schemas、handlers、instructions
-- `upstream.py`：state/search_catalog
-- T05 handoff
-- 附录 A Broker search/describe
+- `coding_tools_mcp/server.py` 的 `ToolSpec`、`TOOL_REGISTRY`、schemas、handlers；
+- `coding_tools_mcp/upstream.py` 的 frozen catalog/search；
+- T05 handoff。
 
 ### 实现
 
@@ -720,383 +760,355 @@ upstream_tool_search
 upstream_tool_describe
 ```
 
-并同时预注册后续工具定义名称，但尚未完成的 call/fetch 不得暴露；或者在本任务只注册 search/describe，在 T07/T08 完成时再固定扩展。最终状态必须固定五个。
+要求：
 
-search：
-
-- read-only profile 强制 `read_only=True`；
-- 默认 limit=5，max=20；
-- 返回紧凑结果和 public digest；
-- 不返回完整 Schema。
-
-describe：
-
-- 只返回 `public_definition`；
-- 返回 `public_schema_digest`；
-- 不返回 raw definition；
-- 对不存在工具返回结构化 not-found。
-
-instructions：
-
-- 固定短文本；
-- 不列动态 server/tool 数量；
-- 不引入 `listChanged=true`。
+- 两者 `read_only=True`、`idempotent=True`；
+- 不根据 gateway_enabled/catalog/profile 条件隐藏；
+- search 支持 query、server、read_only、tags、name_prefix、limit；
+- `read_only` 仅是调用参数过滤器，不是 Runtime profile；
+- search 返回紧凑 metadata + public digest，不返回 Schema；
+- describe 返回 public definition + public digest；
+- raw definition 永不返回；
+- catalog 空时稳定返回空/not-found；
+- instructions 使用固定短文本，不列动态 server/tool 数量；
+- `listChanged=false`。
 
 ### 测试
 
-- catalog 空时 search 返回空；
-- read-only 搜不到 mutating；
+- 两工具始终在本地固定目录；
+- 两个 Runtime catalog 不同但本地工具目录名称一致；
+- empty catalog；
+- readonly filter；
 - describe 不泄漏 raw；
-- instructions 为常量长度；
-- 工具定义顺序稳定。
+- deterministic definitions/order；
+- legacy profile 输入不改变结果。
 
 ### 建议提交
 
 ```text
-feat(broker): expose upstream search and describe
+feat(broker): add fixed upstream discovery tools
 ```
 
 ---
 
-## T07 — Broker 调用、参数验证与 passthrough
+## T07 — 固定 Broker Calls、参数验证与 passthrough
 
 ### 目标
 
-实现 readonly/mutating Broker 执行路径，确保 envelope 不二次包裹。
+增加两个固定调用工具，严格区分 readonly 与 mutating，避免 envelope 二次包裹。
 
 ### 只读取
 
-- `server.py`：`_call_tool()`、local handlers、argument validation
-- `upstream.py`：client call path
-- T06 handoff
-- 附录 A Broker passthrough
-- 当前项目已有 schema validation helper
+- `server.py` 的 ToolSpec、call dispatch、argument validation；
+- `upstream.py` 的 raw/normalized call path；
+- T06 handoff。
 
 ### 实现
 
-1. 新增：
-   ```text
-   upstream_tool_call
-   upstream_tool_call_mutating
-   ```
-2. passthrough：
-   - handler 返回完整 MCP envelope；
-   - 不再进入 `tool_result()`；
-   - `isError` 原样传递。
-3. 风险硬校验：
-   - readonly 只允许 effective_risk=readonly；
-   - mutating 只允许 mutating/unknown；
-   - read-only profile 不暴露 mutating call。
-4. 参数验证：
-   - 使用 public inputSchema；
-   - 实现任务书 §2.3 的 Schema 子集；
-   - 错误返回 `UPSTREAM_ARGUMENTS_INVALID`。
-5. Digest：
-   - readonly 可选；
-   - mutating 必填；
-   - 必须是 32-char lower hex；
-   - 不匹配返回 `UPSTREAM_SCHEMA_CHANGED`。
-6. `BaseUpstreamClient.call_tool_raw()`：
-   - 返回 raw tools/call result；
-   - Manager 成为唯一 normalize/budget 责任方；
-   - 原 `call_tool()` 可保留兼容 wrapper，但新 Manager 路径只调用 raw。
-7. 本任务仍不生成 result handle；超大 Broker 结果按 T03 最小 envelope 返回。
+固定注册：
+
+```text
+upstream_tool_call
+upstream_tool_call_mutating
+```
+
+ToolSpec：
+
+```text
+upstream_tool_call:
+  read_only=true
+  idempotent=false  # 目标虽声明只读，也不假定所有远端实现幂等
+  open_world=true
+
+upstream_tool_call_mutating:
+  read_only=false
+  destructive=true
+  open_world=true
+```
+
+调用要求：
+
+1. search/describe 只查当前 Runtime frozen catalog；
+2. readonly route 只允许 effective risk=readonly；
+3. mutating route 只允许 mutating/unknown；
+4. readonly digest 可选；
+5. mutating public digest 必填且为 32-char lower hex；
+6. public digest 不匹配 → `UPSTREAM_SCHEMA_CHANGED`；
+7. 使用 public inputSchema 验证参数；
+8. 失败 → `UPSTREAM_ARGUMENTS_INVALID`；
+9. handler 返回完整 MCP envelope，dispatch 直接 passthrough；
+10. 不进入 `make_tool_result()` 二次包裹；
+11. upstream `isError` 保留；
+12. 不添加 profile visibility 分支；
+13. fake-readonly override 只影响向客户端展示本地 annotation 的现有兼容路径，不改变 handler 风险校验。
 
 ### 测试
 
+- 两调用工具永久存在；
+- real annotations 正确；
 - passthrough 无嵌套；
-- upstream isError=true 保留；
-- readonly/mutating 互相拒绝；
+- readonly/mutating 互拒；
 - mutating 无 digest 拒绝；
-- 参数 required/type/bounds/extra fields 验证；
-- loose schema 保持兼容；
-- public digest 变化检测；
-- raw-only 变化不影响 public digest。
+- digest stale 拒绝；
+- required/type/enum/const/bounds/oneOf 验证；
+- loose schema 兼容；
+- upstream isError=true 保留；
+- legacy profile 不隐藏 mutating call。
 
 ### 建议提交
 
 ```text
-feat(broker): validate and dispatch upstream calls
+feat(broker): validate and dispatch fixed upstream calls
 ```
 
 ---
 
-## T08 — Session ResultStore 与分段读取
+## T08 — Session ResultStore 与固定 Result Fetch
 
 ### 目标
 
-为 Broker 超大结果增加 session 隔离的短期存储和受限 fetch。
+为 Broker 超大结果提供 session 隔离的短期原文存储与分页读取。
 
 ### 只读取
 
-- `upstream.py`：Manager call/budget
-- `server.py`：tool context/session path
-- HTTP/stdio transport 启动代码
-- T07 handoff
-- 附录 A ResultStore
+- `upstream.py` Manager call/budget；
+- `server.py` request/session context、stdio startup；
+- T07 handoff。
 
 ### 实现
+
+固定注册：
+
+```text
+upstream_result_fetch
+```
+
+ToolSpec：read_only=true、idempotent=true。
 
 ResultStore：
 
 ```text
-single result <= 8 MiB
-per session <= 16 handles / 16 MiB
+single <= 8 MiB
+per owner <= 16 handles / 16 MiB
 global <= 64 MiB
-TTL = 5 min
+TTL 5 min
 FIFO
 ```
 
 owner：
 
-- HTTP：真实 MCP session ID；
-- stdio：进程级随机 owner；
-- 无 owner：不存储；
-- 不使用 `__default__`；
-- OAuth principal 复合隔离不在本任务。
+- HTTP MCP session ID；
+- stdio Runtime/进程级随机 ID；
+- 无 owner不存；
+- 禁止共享 default；
+- OAuth principal 未实现要如实记录。
 
 fetch：
 
-- offset=Unicode codepoint；
-- limit 最大 32000；
-- Schema + runtime clamp；
-- 跨 session、过期、未知统一返回 not found；
-- 不暴露 owner 是否存在，避免信息泄漏。
-
-调用管线：
-
-```text
-raw result
-→ normalize
-→ serialize original
-→ store original（有 owner）
-→ content-aware truncate
-→ final hard envelope check
-→ attach handle metadata
-```
+- Unicode codepoint offset；
+- 1..32000 limit；
+- schema + runtime clamp；
+- cross-session、expired、unknown 使用统一 not-found；
+- 不泄露其他 session 是否存在 handle。
 
 ### 测试
 
-- 先存后截；
-- 无 structuredContent 仍有 handle；
-- 跨 session 拒绝；
-- 无 owner 无 handle；
-- TTL/FIFO/bytes；
-- fetch limit 无法绕过；
-- stdio owner 稳定到进程生命周期；
-- direct upstream 调用不生成 handle。
+- raw 先存后截；
+- 无 structuredContent 仍有 metadata/handle；
+- direct upstream 不存；
+- Broker 有 owner 才存；
+- cross-session；
+- TTL/FIFO/byte caps；
+- fetch cap；
+- stdio owner；
+- fixed local directory 现在包含五个 Broker 工具。
 
 ### 建议提交
 
 ```text
-feat(broker): add session-scoped result paging
+feat(broker): add session-scoped upstream result paging
 ```
 
 ---
 
-## T09 — Lifecycle 并发、client lease 与 restart/stop 加固
+## T09 — Runtime Close、Client Lease 与多 Runtime 隔离
 
 ### 目标
 
-完成任务书 §2.1 的最终并发语义，消除跨 generation client/tool 混用。
+在“Runtime snapshot 永不动态替换”的前提下，加固 close/call 并发和 Runtime 隔离。
 
 ### 只读取
 
-- `upstream.py`：所有 client class、state replacement、start/stop/close
-- T08 handoff
-- 并发测试文件
-- 不需要重新加载搜索实现细节
+- `upstream.py` 所有 client class、Manager close/call；
+- Runtime close 路径；
+- T08 handoff。
 
 ### 实现
 
-1. state 内 clients 与 tool/catalog/index 同代。
-2. Base client 增加 lifecycle lock + closed 状态。
-3. call_tool_raw 与 close 互斥：
-   - 已进入 call 的请求安全完成；
-   - close 等待；
-   - close 后新 call 返回 retryable error。
-4. restart：
-   - 新 client 在发布前完全 initialize；
-   - 一次 state swap；
-   - 发布后关闭 old client。
-5. stop：
-   - 一次 state swap 移除工具+client；
-   - 再关闭 old client。
-6. Manager close：
-   - 原子发布空 state；
-   - 再关闭全部旧 client。
-7. status 更新不得制造“status initialized 但 state 没工具”的长期状态。
-8. 不在生命周期锁中执行长时间网络 initialize/list_tools；只在发布时加锁。
-9. 索引构建：
-   - 正确性优先；
-   - 记录耗时；
-   - 不声称必然 sub-ms；
-   - 若实测过慢，记录后续 CAS 优化，不在本任务过度设计。
+1. client 增加最小 lifecycle lock/closed 状态；
+2. `call_tool_raw()` 与 `close()` 锁顺序明确；
+3. 已开始调用安全完成，close 等待或采用明确 lease；
+4. close 后新调用 retryable；
+5. Manager close 一次截断后续调用并关闭所有本 Runtime clients；
+6. close 幂等；
+7. 两个 Runtime 不共享：client、HTTP upstream session、catalog、ResultStore owner 数据；
+8. Admin 配置写入不会替换现有 Runtime state；
+9. 不实现 restart/stop manager API；
+10. “重启”测试通过销毁旧 Runtime、构造新 Runtime 表达。
 
-### 允许的竞争结果
+### 允许结果
 
-- 已取得 client lease 的调用完成；
-- 未取得 lease 且与 stop/restart 竞争的调用可返回 retryable；
-- 搜索结果可能在下一次 call 前过期并返回 TOOL_NOT_FOUND；
-- 禁止跨代调用、死锁、损坏结果或进程中途被无保护关闭。
+- 与 close 竞争且尚未取得 lease 的调用可 retryable fail；
+- 已取得 lease 的调用完成；
+- 不允许死锁、半关闭 transport、跨 Runtime client 使用。
 
 ### 测试
 
-- old tool 不会用 new client；
-- stop 不产生 client 已移除但新 state 仍暴露工具的发布状态；
-- 已开始 call 时 stop 等待；
-- close 幂等；
-- 50–100 次并发 restart/call/search 无死锁；
-- generation 单调递增；
-- state mapping 只读。
+- close waits for in-flight call；
+- close idempotent；
+- call-after-close；
+- HTTP/stdio；
+- 两 Runtime session independence；
+- old Runtime 保持旧 catalog；
+- new Runtime 使用更新配置；
+- 50–100 次并发 call/close 无死锁。
 
 ### 建议提交
 
 ```text
-fix(upstream): make client lifecycle generation-safe
+fix(upstream): make frozen runtime client shutdown safe
 ```
 
 ---
 
-## T10 — 配置管理、兼容性、文档与运维报告
+## T10 — Admin Restart-Only 配置、兼容迁移与文档
 
 ### 目标
 
-让新增配置可被管理端安全读写，并明确迁移行为。
+让新增配置安全 round-trip，并准确说明 fixed-catalog 生效边界。
 
 ### 只读取
 
-- upstream/admin config parsing
-- 管理页面或设置模型相关代码
-- README / browser-client docs
-- T09 handoff
-- 附录 A Open Questions
+- Gateway/Admin config parser、revision、persistence；
+- README、browser client、integration contract；
+- T09 handoff。
 
 ### 实现
 
 配置验证：
 
 - expose_mode enum；
-- pinned/include/exclude 只接受字符串数组；
-- tool_policy 只接受 readonly/mutating；
-- custom synonym key/value 限长与数量；
-- tags 规范化；
-- 旧配置缺 expose_mode → direct。
+- pinned/include/exclude 字符串数组；
+- tool_policy readonly/mutating；
+- tags/custom synonyms 数量与长度；
+- credentials/redaction 不变；
+- legacy missing expose_mode=direct。
 
-产品默认：
+Admin：
 
-- 解析旧配置默认 direct；
-- 管理台新建 upstream 默认 broker；
-- direct → broker 保存时提示：
-  - 哪些工具从 tools/list 消失；
-  - 哪些 pinned 保留；
-  - 当前 `listChanged=false`，客户端需要重新连接。
+- validate/persist only；
+- revision conflict 保留；
+- `restart_required=true`；
+- 不触碰现有 Runtime；
+- UI 新建 upstream 默认 broker；
+- direct → broker 预览显示 direct/pinned/broker-only 差异；
+- 提示“新 MCP session/Runtime 或服务重启后生效”；
+- 不声称发送 list_changed。
 
 运维：
 
-- context budget 报告：
-  - upstream direct count/bytes；
-  - catalog/broker-only；
-  - top schemas；
-  - 明确不含 built-in/admin；
-- server_info/status 显示 direct/catalog 统计；
-- 不输出敏感 env/header/token。
+```text
+Upstream direct exposure: count/bytes
+Upstream catalog: total/broker-only
+Largest public definitions
+Excludes built-in/admin definitions
+```
 
 文档：
 
-- Broker 工作流；
-- read-only/mutating；
-- result paging；
-- digest；
-- session 隔离边界；
-- compatibility/migration；
-- Phase 3/4 未实现项。
+- fixed Broker workflow；
+- mutating route 始终可见但带真实风险 annotations；
+- digest 和参数验证；
+- ResultStore 隔离；
+- Runtime freeze/restart-only；
+- legacy tool_profile ignored；
+- Phase 3/4 未实现。
+
+必要时更新 `docs/integration-contract-v0.2.2.md`：
+
+- 只新增 Broker 作为固定目录扩展的兼容决策；
+- 不推翻 legacy profile migration；
+- 不引入 live catalog mutation。
 
 ### 测试
 
-- 配置 round-trip；
-- 旧配置兼容；
-- 非法字段拒绝；
-- admin 输出脱敏；
-- UI/设置默认值正确；
-- 文档示例可解析。
+- config round-trip；
+- old config；
+- invalid config；
+- revision conflict；
+- redaction；
+- old Runtime unchanged/new Runtime changed；
+- WebUI source/build checks；
+- docs contract machine-readable block（若修改）。
 
 ### 建议提交
 
 ```text
-docs(config): document broker exposure and migration
+docs(config): document restart-only upstream broker exposure
 ```
 
 ---
 
-## T11 — 全量验证、性能门槛与发布交接
+## T11 — 全量验证、性能与发布交接
 
 ### 目标
 
-不新增功能，只验证并冻结实施结果。
+不新增功能，冻结 stable-catalog Broker 实施结果。
 
 ### 只读取
 
-- 所有 T00–T10 handoff
-- 测试失败涉及的文件
-- 最终 diff
-- 附录 A 测试清单
+- T00–T10 handoff；
+- 最终 diff；
+- 失败测试涉及文件；
+- 附录算法测试清单。
 
 ### 必做验证
 
-1. 定点测试：
-   - sanitizer；
-   - search；
-   - Broker；
-   - ResultStore；
-   - lifecycle/concurrency；
-   - config compatibility。
-2. 全量测试。
-3. 手工 smoke：
-   - direct upstream；
-   - broker-only Zotero；
-   - readonly profile；
-   - mutating digest；
-   - large result fetch；
-   - start/stop/restart。
-4. Context 对比：
-   - 改造前 direct tools/schema bytes；
-   - broker 后 direct tools/schema bytes；
-   - catalog 总量。
-5. 搜索质量：
-   - 至少 30 个中英文 query fixture；
-   - top-1 / top-5 命中；
-   - 记录失败案例，不临时堆同义词掩盖架构问题。
-6. 性能：
-   - index build；
-   - search p50/p95；
-   - state swap；
-   - ResultStore；
-   - 记录数据，不硬编码不可靠的 sub-ms 声称。
-7. 安全：
-   - raw definition 不进入普通工具输出；
-   - mutating 无 digest 不执行；
-   - cross-session handle 不可读；
-   - unknown annotations=mutating；
-   - final envelope 不超预算。
-8. Git：
-   - clean worktree；
-   - 每任务提交完整；
-   - release notes/handoff。
+1. 定点：sanitizer、search、catalog、Broker calls、ResultStore、close concurrency、Admin config；
+2. authoritative full unittest discovery；
+3. fixed catalog contract tests；
+4. smoke A：legacy direct config 构造 Runtime A；
+5. smoke B：broker config 构造 Runtime B；
+6. 验证 Runtime A 在配置写入后保持不变；
+7. 验证 Runtime B direct definitions 减少、catalog 完整；
+8. search → describe → readonly call；
+9. search → describe → mutating digest call；
+10. large result → fetch；
+11. close old Runtime → new Runtime 读取新配置；
+12. 不执行 live profile 切换；
+13. 不执行 manager start/stop；
+14. `listChanged=false`；
+15. Context 对比 direct count/schema bytes/catalog count；
+16. 至少 30 个中英文 search fixture，记录 top-1/top-5；
+17. index build/search p50/p95；
+18. final envelope <= budget；
+19. raw definition 不泄漏；
+20. cross-session handle 不可读；
+21. Git clean、提交链完整、release handoff。
 
 ### 完成标准
 
 ```text
-Phase 1: complete
-Phase 2: complete
-Phase 3: pending
-Phase 4: pending
+Stable-catalog adaptation: complete
+Phase 1 defensive controls: complete
+Phase 2 Broker: complete
+Dynamic listChanged/profile activation: explicitly not implemented
 ```
 
 ### 建议提交
 
 ```text
-docs(handoff): record upstream broker validation
+docs(handoff): validate stable-catalog upstream broker
 ```
 
 ---
@@ -1105,61 +1117,74 @@ docs(handoff): record upstream broker validation
 
 | 维度 | 必须满足 |
 |---|---|
-| 上下文 | broker-only 工具完整 Schema 不进入 tools/list |
-| 搜索 | >50 工具使用 BM25 字段加权，不返回全部摘要 |
-| Schema | public definition 有递归清洗与硬字节上限 |
-| 风险 | unknown 默认 mutating；local policy 可覆盖 |
-| 只读 | read-only profile 无 mutating direct/call |
-| 写操作 | mutating call 必须有匹配的 public digest |
-| 参数 | Broker 在网关侧验证 public inputSchema |
-| 结果 | 最终 MCP envelope 有硬预算 |
-| 大结果 | session handle + TTL/FIFO + fetch cap |
-| 并发 | tool/catalog/client/index 同 generation |
-| 生命周期 | stop/restart 不跨代，不中途无保护关闭 client |
-| 兼容 | 旧配置缺 expose_mode 仍为 direct |
-| 动态工具 | Phase 2 仍为 listChanged=false |
-| 隔离 | 当前 owner 为 MCP session；不伪称 principal 隔离 |
-| 可观测 | budget 报告不含敏感信息，不误称总上下文 |
+| 固定目录 | 五个 Broker 工具永久存在于本地 TOOL_REGISTRY |
+| legacy profile | 仅迁移输入，不控制目录、路由、搜索或调用 |
+| Runtime | upstream discovery/catalog/clients 构造后冻结 |
+| Admin | 配置写入 restart-only，不修改现有 Runtime |
+| listChanged | 始终 false |
+| 上下文 | broker-only 完整 Schema 不进入 tools/list |
+| 搜索 | >50 工具使用字段加权 BM25，默认只返前 5 |
+| Schema | public definition 递归 containment + 8 KiB 硬上限 |
+| 风险 | unknown=mutating；local policy 可覆盖 |
+| readonly route | 只调用 effective readonly |
+| mutating route | 始终可见、真实 destructive/open-world annotations、digest 必填 |
+| 参数 | 网关验证 public inputSchema |
+| 结果 | final MCP envelope 有硬预算 |
+| 大结果 | session owner + TTL/FIFO + fetch cap |
+| 隔离 | 不同 Runtime 不共享 upstream client/session/catalog store |
+| close | in-flight 安全，close 幂等，call-after-close retryable |
+| 兼容 | 旧配置缺 expose_mode=direct |
 
 ---
 
-## 6. Agent 启动提示模板
+## 6. 禁止实现清单
 
-每次开新 Agent，可使用：
+以下内容出现于代码 diff 即视为任务偏离，除非用户另行批准产品契约变更：
 
 ```text
-定位到 G:\LLM\coding-tools-mcp。
-
-执行《Upstream Tool Broker — v6 分步实施任务书》的 Txx。
-只执行 Txx，不进入下一任务。
-
-开始前：
-1. 确认上一任务 handoff 和 HEAD。
-2. 确认 worktree clean。
-3. 只读取 Txx 指定文件与必要局部代码。
-4. 保持任务书“强制架构约束”。
-
-完成后：
-1. 运行 Txx 定点测试。
-2. 创建一个本地提交。
-3. 输出 Txx Handoff。
-4. 停止，不继续下一任务。
+tool_profile in coding_tools_mcp/upstream.py
+Runtime(... tool_profile=...)
+UpstreamManager.tool_names(tool_profile=...)
+UpstreamManager.start_server(...)
+UpstreamManager.stop_server(...)
+Runtime 内 reload upstream config
+capabilities.tools.listChanged = true
+notifications/tools/list_changed
+根据 profile 隐藏 upstream_tool_call_mutating
+Admin 保存后直接修改现有 Runtime catalog
 ```
+
+允许 legacy `tool_profile` 只存在于设置迁移/警告代码和相应测试中，不得进入 Gateway 运行逻辑。
 
 ---
 
-## 7. 计划状态
+## 7. Agent 启动提示模板
+
+### T01
 
 ```text
-Architecture: approved
-Task decomposition: complete
-Phase 1 implementation: pending
-Phase 2 implementation: pending
-Phase 3 profile: deferred
-Phase 4 listChanged: deferred
+进入 G:\LLM\coding-tools-mcp-broker-v6。
+读取：
+1. docs/upstream-tool-broker-v6-execution-taskbook.md 中 T01；
+2. docs/upstream-broker-handoffs/T00-baseline.md；
+3. docs/upstream-broker-handoffs/T00R-taskbook-adaptation.md；
+4. coding_tools_mcp/upstream.py 的 client/manager 部分；
+5. tests/compliance/test_upstream_gateway.py。
+
+只执行 T01：固定 Registry 快照迁移，行为不变。
+禁止引入 tool_profile、start_server、stop_server、reload 或 listChanged。
+完成定点测试、提交和 T01 handoff 后停止，不进入 T02。
 ```
 
----
+### 通用 Txx
+
+```text
+进入 G:\LLM\coding-tools-mcp-broker-v6。
+确认分支 feat/upstream-tool-broker-v6、工作树 clean。
+只读取任务书 Txx、上一 handoff 和任务卡指定文件。
+只执行 Txx；测试、提交、写 handoff 后停止。
+不得恢复 tool_profile，不得增加动态 upstream lifecycle，不得改变 listChanged=false。
+```
 
 ---
 
