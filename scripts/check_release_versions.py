@@ -39,7 +39,15 @@ def validate_release(root: Path, tag: str) -> tuple[str, str]:
 
     npm_package = json.loads((root / "npm" / "coding-tools-mcp" / "package.json").read_text(encoding="utf-8"))
     npm_version = npm_package["version"]
-    if re.search(r"(?:^|[-.])(alpha|beta|rc|dev|next)(?:[-.]|$)", npm_version, re.IGNORECASE):
+    dev_match = re.fullmatch(r"(\d+\.\d+\.\d+)\.dev(\d+)", project_version)
+    if dev_match:
+        expected_npm = f"{dev_match.group(1)}-dev.{dev_match.group(2)}"
+        if npm_version != expected_npm:
+            raise SystemExit(
+                f"Python development version {project_version!r} requires npm launcher "
+                f"version {expected_npm!r}, got {npm_version!r}"
+            )
+    elif re.search(r"(?:^|[-.])(alpha|beta|rc|dev|next)(?:[-.]|$)", npm_version, re.IGNORECASE):
         raise SystemExit(f"npm launcher version {npm_version!r} is not stable")
 
     return project_version, npm_version

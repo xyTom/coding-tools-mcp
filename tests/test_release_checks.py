@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 from urllib.parse import parse_qs, urlparse
 
@@ -42,6 +43,34 @@ class ReleaseMetadataTests(unittest.TestCase):
             self._write_release_tree(root)
             self.assertEqual(validate_release(root, "v0.2.0"), ("0.2.0", "0.1.0"))
 
+    def test_release_metadata_accepts_matching_development_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_release_tree(
+                root,
+                project_version="0.3.0.dev0",
+                module_version="0.3.0.dev0",
+                npm_version="0.3.0-dev.0",
+                changelog="# Changelog\n\n## 0.3.0.dev0 - 2026-07-31\n",
+            )
+            self.assertEqual(
+                validate_release(root, "v0.3.0.dev0"),
+                ("0.3.0.dev0", "0.3.0-dev.0"),
+            )
+
+    def test_release_metadata_rejects_mismatched_development_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_release_tree(
+                root,
+                project_version="0.3.0.dev0",
+                module_version="0.3.0.dev0",
+                npm_version="0.3.0-dev.1",
+                changelog="# Changelog\n\n## 0.3.0.dev0 - 2026-07-31\n",
+            )
+            with self.assertRaisesRegex(SystemExit, "requires npm launcher"):
+                validate_release(root, "v0.3.0.dev0")
+
     def test_release_metadata_rejects_unreleased_section(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -59,9 +88,23 @@ class ReleaseMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "not stable"):
                 validate_release(root, "v0.2.0")
 
-    def test_current_integration_tree_requires_release_preparation(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "Unreleased"):
-            validate_release(ROOT, "v0.2.2")
+    def test_current_integration_tree_is_versioned_development_candidate(self) -> None:
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        package_init = (ROOT / "coding_tools_mcp" / "__init__.py").read_text(encoding="utf-8")
+        npm_package = json.loads(
+            (ROOT / "npm" / "coding-tools-mcp" / "package.json").read_text(encoding="utf-8")
+        )
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+        self.assertEqual(pyproject["project"]["version"], "0.3.0.dev0")
+        self.assertIn('__version__ = "0.3.0.dev0"', package_init)
+        self.assertEqual(npm_package["version"], "0.3.0-dev.0")
+        self.assertIn("## 0.3.0.dev0 - 2026-07-31", changelog)
+        self.assertNotIn("## Unreleased", changelog)
+        self.assertEqual(
+            validate_release(ROOT, "v0.3.0.dev0"),
+            ("0.3.0.dev0", "0.3.0-dev.0"),
+        )
 
 
 class FinalAuditTests(unittest.TestCase):

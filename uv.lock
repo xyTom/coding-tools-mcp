@@ -48,7 +48,7 @@ wheels = [
 
 [[package]]
 name = "coding-tools-mcp"
-version = "0.2.2"
+version = "0.3.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "pyjwt" },

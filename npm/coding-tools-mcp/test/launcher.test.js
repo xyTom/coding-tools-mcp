@@ -94,7 +94,7 @@ test("uvx receives the pinned Python package and forwarded arguments", async (t)
   ]);
 });
 
-test("pipx is used when uvx is unavailable", async (t) => {
+test("pipx uses the packaged development Python version when uvx is unavailable", async (t) => {
   const directory = await createFixtureDirectory(t, "pipx-");
   const output = path.join(directory, "args.txt");
   const runnerEnv = await writeExecutable(directory, "pipx", { captureArgs: true });
@@ -109,8 +109,25 @@ test("pipx is used when uvx is unavailable", async (t) => {
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(await readCapturedArgs(output), [
     "run",
-    "coding-tools-mcp",
+    "coding-tools-mcp==0.3.0.dev0",
     "--help",
+  ]);
+});
+
+test("the packaged development version is used by default", async (t) => {
+  const directory = await createFixtureDirectory(t, "default-dev-");
+  const output = path.join(directory, "args.txt");
+  const runnerEnv = await writeExecutable(directory, "uvx", { captureArgs: true });
+
+  const result = runLauncher(directory, ["--stdio"], {
+    ...runnerEnv,
+    RESULT_FILE: output,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(await readCapturedArgs(output), [
+    "coding-tools-mcp==0.3.0.dev0",
+    "--stdio",
   ]);
 });
 

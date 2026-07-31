@@ -72,6 +72,10 @@ explicit `2025-06-18` compatibility.
 
 ## Integrated v0.2.2 architecture
 
+The current fork development release is Python `0.3.0.dev0`, with npm launcher
+version `0.3.0-dev.0`. It preserves the upstream v0.2.2 telemetry default and
+privacy schema.
+
 ### Sessions and Workspaces
 
 Every successful HTTP `initialize` creates an independent Runtime with its own

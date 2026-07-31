@@ -40,6 +40,17 @@ class Phase11PackagingTests(unittest.TestCase):
         self.assertIn("mypy>=2.1,<2.2", extras["dev"])
         self.assertIn("Pillow>=10.0", extras["image"])
 
+    def test_release_workflow_routes_prereleases_away_from_latest(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("npm_dist_tag: ${{ steps.npm.outputs.dist_tag }}", workflow)
+        self.assertIn("*-*) dist_tag=next", workflow)
+        self.assertIn("*) dist_tag=latest", workflow)
+        self.assertIn("needs: [pack-npm, validate]", workflow)
+        self.assertIn('--tag "${{ needs.validate.outputs.npm_dist_tag }}"', workflow)
+        self.assertIn("*.dev*) prerelease=(--prerelease)", workflow)
+
     def test_compliance_ci_allows_setup_node_toolchain_under_landlock(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "compliance.yml").read_text(
             encoding="utf-8"

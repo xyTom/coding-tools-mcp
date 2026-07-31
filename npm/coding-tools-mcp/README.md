@@ -6,10 +6,10 @@ npm launcher for [coding-tools-mcp](https://github.com/xyTom/coding-tools-mcp), 
 npx coding-tools-mcp --stdio --workspace /path/to/repo
 ```
 
-Requires `uv` or `pipx` on PATH. The launcher runs the latest PyPI release; pin a specific server version with:
+Requires `uv` or `pipx` on PATH. Stable launchers run the latest PyPI release; development launchers pin the matching Python development build. Override either behavior with:
 
 ```bash
-CODING_TOOLS_MCP_VERSION=0.2.0 npx coding-tools-mcp --stdio --workspace /path/to/repo
+CODING_TOOLS_MCP_VERSION=0.3.0.dev0 npx coding-tools-mcp --stdio --workspace /path/to/repo
 ```
 
-The launcher's own version is independent of the server version. Documentation, configuration, and issues live in the [main repository](https://github.com/xyTom/coding-tools-mcp).
+For the current fork development release, launcher SemVer `0.3.0-dev.0` automatically pins Python `0.3.0.dev0`; `CODING_TOOLS_MCP_VERSION` can still override it. Stable launchers remain unpinned unless the environment variable is set, so later server-only releases can be discovered. Documentation, configuration, and issues live in the [main repository](https://github.com/xyTom/coding-tools-mcp).

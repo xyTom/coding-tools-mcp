@@ -14,8 +14,9 @@ changing upstream product behavior in Phase 02.
 - Negotiation continues to accept only the versions listed by
   `coding_tools_mcp.protocol.SUPPORTED_PROTOCOL_VERSIONS`; dates are not
   compared lexicographically.
-- The package version remains `0.2.2` during integration. A fork release version
-  is a release-phase decision.
+- The integration baseline remains upstream `0.2.2`. Phase 14 assigns the fork
+  development release `0.3.0.dev0`; the npm launcher uses the corresponding
+  SemVer `0.3.0-dev.0`.
 
 ## Fixed tool catalog
 
@@ -211,7 +212,9 @@ The following block is consumed by the Phase 02 contract tests.
     ]
   },
   "version": {
-    "integration": "0.2.2"
+    "integration": "0.2.2",
+    "fork_release": "0.3.0.dev0",
+    "npm_launcher": "0.3.0-dev.0"
   },
   "tool_catalog": {
     "strategy": "fixed",

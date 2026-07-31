@@ -1,4 +1,4 @@
-# Upgrade and rollback: v0.1 / upstream v0.2.2 to the integrated v0.2.2 runtime
+# Upgrade and rollback: v0.1 / upstream v0.2.2 to fork 0.3.0.dev0
 
 This guide describes the implemented migration boundary. It intentionally does
 not restore `docs/profile-v0.1.md` as a current contract. Historical profile

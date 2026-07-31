@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       npm_version: ${{ steps.npm.outputs.version }}
+      npm_dist_tag: ${{ steps.npm.outputs.dist_tag }}
       npm_already_published: ${{ steps.npm.outputs.already_published }}
     steps:
       - name: Check out repository
@@ -44,7 +45,12 @@ jobs:
           else
             already=false
           fi
+          case "$version" in
+            *-*) dist_tag=next ;;
+            *) dist_tag=latest ;;
+          esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
           echo "already_published=$already" >> "$GITHUB_OUTPUT"
 
   compliance:
@@ -188,7 +194,7 @@ jobs:
 
   publish-npm:
     name: Publish npm launcher
-    needs: pack-npm
+    needs: [pack-npm, validate]
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -216,7 +222,9 @@ jobs:
       - name: Publish launcher with provenance
         # The ./ prefix is load-bearing: without it npm parses the argument as
         # a GitHub owner/repo shorthand instead of a local tarball path.
-        run: npm publish ./dist/*.tgz --access public --provenance
+        run: >-
+          npm publish ./dist/*.tgz --access public --provenance
+          --tag "${{ needs.validate.outputs.npm_dist_tag }}"
 
   github-release:
     name: Publish GitHub Release
@@ -238,8 +246,13 @@ jobs:
             echo "CHANGELOG.md has no section for $version" >&2
             exit 1
           fi
+          prerelease=()
+          case "$version" in
+            *.dev*) prerelease=(--prerelease) ;;
+          esac
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "release $GITHUB_REF_NAME already exists; leaving it unchanged"
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md "${prerelease[@]}"
           fi

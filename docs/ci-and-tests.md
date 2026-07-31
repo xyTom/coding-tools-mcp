@@ -35,11 +35,14 @@ ref choices: evidence and publishes are jobs of one workflow run, so the
 same-release-commit property holds by construction, and a failed evidence job
 blocks both registries.
 
-The npm launcher keeps its own version. The pipeline publishes it only when
-`npm/coding-tools-mcp/package.json` names a version that is not yet on the
-registry, so server-only releases skip the npm jobs automatically; bump the
-launcher version whenever its source changes (npm versions cannot be
-overwritten).
+The npm launcher keeps its own SemVer version. The fork development release
+maps Python `0.3.0.dev0` to npm `0.3.0-dev.0`; that prerelease launcher
+pins the matching Python development build by default. Prerelease launchers
+publish under the npm `next` dist-tag and GitHub marks `.devN` releases as
+prereleases. Stable launchers use `latest` and remain unpinned by default. The
+pipeline publishes the launcher only when the exact
+npm version is not yet on the registry, so server-only releases can skip the npm
+jobs automatically; npm versions cannot be overwritten.
 
 PyPI and npm trusted publishing must both be configured with workflow filename
 `release.yml` and the `pypi` / `npm` environments. The `final-audit` workflow

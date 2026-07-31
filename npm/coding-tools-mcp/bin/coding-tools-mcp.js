@@ -4,9 +4,20 @@
 // arguments and stdio, so MCP clients configured with the npm name work
 // unchanged. Pin a server version with CODING_TOOLS_MCP_VERSION=x.y.z.
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+
+const packageMetadata = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+);
+const developmentMatch = /^(\d+\.\d+\.\d+)-dev\.(\d+)$/.exec(
+  packageMetadata.version,
+);
+const packagedPythonVersion = developmentMatch
+  ? `${developmentMatch[1]}.dev${developmentMatch[2]}`
+  : undefined;
 
 const args = process.argv.slice(2);
-const version = process.env.CODING_TOOLS_MCP_VERSION;
+const version = process.env.CODING_TOOLS_MCP_VERSION || packagedPythonVersion;
 const spec = version ? `coding-tools-mcp==${version}` : "coding-tools-mcp";
 const candidates = [
   { command: "uvx", args: [spec, ...args] },

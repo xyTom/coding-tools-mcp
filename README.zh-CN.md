@@ -63,6 +63,9 @@ npx coding-tools-mcp --stdio --workspace /path/to/repo
 
 ## 集成后的 v0.2.2 架构
 
+当前 fork 开发版本为 Python `0.3.0.dev0`，对应 npm launcher
+`0.3.0-dev.0`。Telemetry 保持上游 v0.2.2 的默认策略和隐私边界。
+
 ### Session 与 Workspace
 
 每次成功的 HTTP `initialize` 都会创建独立 Runtime，拥有独立 Workspace、cwd、

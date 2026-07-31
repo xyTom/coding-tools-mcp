@@ -67,7 +67,14 @@ class IntegrationContractTests(unittest.TestCase):
             [protocol["target"], *protocol["compatible"]],
             list(SUPPORTED_PROTOCOL_VERSIONS),
         )
-        self.assertEqual(self.contract["version"], {"integration": "0.2.2"})
+        self.assertEqual(
+            self.contract["version"],
+            {
+                "integration": "0.2.2",
+                "fork_release": "0.3.0.dev0",
+                "npm_launcher": "0.3.0-dev.0",
+            },
+        )
 
     def test_catalog_is_fixed_and_legacy_profiles_are_migration_only(self) -> None:
         catalog = self.contract["tool_catalog"]

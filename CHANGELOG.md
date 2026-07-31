@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0.dev0 - 2026-07-31
 
 ### Added
 
