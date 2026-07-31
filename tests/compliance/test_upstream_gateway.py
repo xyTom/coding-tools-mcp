@@ -173,7 +173,7 @@ def build_manager(
 
 
 class UpstreamGatewayTests(unittest.TestCase):
-    def test_runtime_preserves_schema_annotations_and_structured_content(self) -> None:
+    def test_runtime_exposes_sanitized_schema_annotations_and_structured_content(self) -> None:
         with TemporaryDirectory() as tmp:
             config = UpstreamServerConfig(
                 alias="github",
@@ -191,9 +191,23 @@ class UpstreamGatewayTests(unittest.TestCase):
             self.assertIn("server_info", definitions)
             self.assertEqual(remote["title"], original["title"])
             self.assertEqual(remote["description"], original["description"])
-            self.assertEqual(remote["inputSchema"], original["inputSchema"])
+            self.assertEqual(
+                remote["inputSchema"],
+                {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"],
+                },
+            )
+            self.assertNotIn("$defs", remote["inputSchema"])
             self.assertEqual(remote["outputSchema"], original["outputSchema"])
             self.assertEqual(remote["annotations"], original["annotations"])
+            registered = manager.state.all_tools["github__search"]
+            self.assertIn("$defs", registered.raw_definition["inputSchema"])
+            self.assertNotIn("$defs", registered.public_definition["inputSchema"])
+            self.assertEqual(registered.effective_risk, "readonly")
+            self.assertRegex(registered.public_schema_digest, r"^[0-9a-f]{32}$")
+            self.assertRegex(registered.raw_schema_digest or "", r"^[0-9a-f]{32}$")
 
             result = runtime.call_tool("github__search", {"q": "mcp"})
 
@@ -281,6 +295,64 @@ class UpstreamGatewayTests(unittest.TestCase):
         closed_result = manager.call_tool("github__search", {"q": "after-close"})
         self.assertEqual(closed_result["structuredContent"]["error"]["code"], "UPSTREAM_DISCONNECTED")
 
+    def test_invalid_remote_metadata_degrades_without_leaking_raw_values(self) -> None:
+        invalid_tool = {
+            "name": "invalid_metadata",
+            "title": 42,
+            "description": ["not", "text"],
+            "inputSchema": "not-an-object",
+            "outputSchema": ["not", "an", "object"],
+            "annotations": "not-an-object",
+            "privateInstructions": "do not expose",
+        }
+        config = UpstreamServerConfig(
+            alias="remote",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+        )
+        client = FakeUpstreamClient(config, "2025-11-25", tools=[invalid_tool])
+        manager = build_manager([config], [client])
+
+        public = manager.tool_definitions()[0]
+        registered = manager.state.all_tools["remote__invalid_metadata"]
+        self.assertEqual(
+            public,
+            {
+                "name": "remote__invalid_metadata",
+                "inputSchema": {"type": "object", "additionalProperties": True},
+            },
+        )
+        self.assertEqual(registered.raw_definition["title"], 42)
+        self.assertIn("privateInstructions", registered.raw_definition)
+        self.assertNotIn("privateInstructions", registered.public_definition)
+        self.assertEqual(registered.effective_risk, "mutating")
+        self.assertIsNone(registered.raw_schema_digest)
+        manager.close()
+
+    def test_local_tool_policy_sets_effective_risk_without_rewriting_annotations(self) -> None:
+        config = UpstreamServerConfig(
+            alias="github",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+            tool_policy={"search": "mutating", "create_issue": "readonly"},
+        )
+        client = FakeUpstreamClient(config, "2025-11-25")
+        manager = build_manager([config], [client])
+
+        search = manager.state.all_tools["github__search"]
+        create_issue = manager.state.all_tools["github__create_issue"]
+        self.assertEqual(search.effective_risk, "mutating")
+        self.assertEqual(create_issue.effective_risk, "readonly")
+        self.assertEqual(
+            search.public_definition["annotations"],
+            REMOTE_TOOLS[0]["annotations"],
+        )
+        self.assertEqual(
+            create_issue.public_definition["annotations"],
+            REMOTE_TOOLS[1]["annotations"],
+        )
+        manager.close()
+
     def test_fake_readonly_never_rewrites_upstream_annotations(self) -> None:
         with TemporaryDirectory() as tmp:
             config = UpstreamServerConfig(
@@ -289,11 +361,12 @@ class UpstreamGatewayTests(unittest.TestCase):
                 url="http://127.0.0.1/mcp",
             )
             client = FakeUpstreamClient(config, "2025-11-25")
+            manager = build_manager([config], [client])
             runtime = Runtime(
                 Path(tmp),
                 permission_mode="dangerous",
                 fake_readonly_annotations=True,
-                upstream_manager=build_manager([config], [client]),
+                upstream_manager=manager,
             )
             definitions = {item["name"]: item for item in runtime.list_tools()["tools"]}
 
@@ -301,6 +374,10 @@ class UpstreamGatewayTests(unittest.TestCase):
             self.assertEqual(
                 definitions["github__create_issue"]["annotations"],
                 REMOTE_TOOLS[1]["annotations"],
+            )
+            self.assertEqual(
+                manager.state.all_tools["github__create_issue"].effective_risk,
+                "mutating",
             )
             card = server_card_payload(runtime)
             self.assertIn("github__create_issue", card["tools"]["readOnlyHintFalse"])

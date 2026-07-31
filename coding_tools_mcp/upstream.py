@@ -22,6 +22,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .upstream_sanitize import raw_schema_digest, sanitize_definition, schema_digest
+
 
 DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 DEFAULT_TIMEOUT_MS = 30_000
@@ -100,6 +102,7 @@ class UpstreamServerConfig:
     authorization_env: str | None = None
     include_tools: tuple[str, ...] = ()
     exclude_tools: tuple[str, ...] = ()
+    tool_policy: dict[str, str] = field(default_factory=dict)
     timeout_ms: int = DEFAULT_TIMEOUT_MS
 
 
@@ -119,7 +122,11 @@ class UpstreamConfigSnapshot:
 class UpstreamTool:
     public_name: str
     remote_name: str
-    definition: dict[str, Any]
+    raw_definition: dict[str, Any]
+    public_definition: dict[str, Any]
+    effective_risk: str
+    public_schema_digest: str
+    raw_schema_digest: str | None
 
 
 @dataclass(frozen=True)
@@ -611,7 +618,10 @@ class UpstreamManager:
 
     def tool_definitions(self) -> list[dict[str, Any]]:
         state = self._state
-        return [copy.deepcopy(state.all_tools[name].definition) for name in state.direct_tool_names]
+        return [
+            copy.deepcopy(state.all_tools[name].public_definition)
+            for name in state.direct_tool_names
+        ]
 
     def tool_names(self) -> list[str]:
         state = self._state
@@ -730,11 +740,19 @@ class UpstreamManager:
                                 f"Upstream tool namespace collision: {public_name!r}."
                             )
                         seen_public_names.add(public_name)
+                        raw_definition = namespaced_tool_definition(public_name, raw_tool)
+                        public_definition = sanitize_definition(raw_definition)
                         registered.append(
                             UpstreamTool(
                                 public_name=public_name,
                                 remote_name=remote_name,
-                                definition=namespaced_tool_definition(public_name, raw_tool),
+                                raw_definition=raw_definition,
+                                public_definition=public_definition,
+                                effective_risk=classify_risk(
+                                    raw_tool, config.tool_policy, remote_name
+                                ),
+                                public_schema_digest=schema_digest(public_definition),
+                                raw_schema_digest=raw_schema_digest(raw_definition),
                             )
                         )
                     next_clients[config.alias] = client
@@ -919,30 +937,27 @@ def namespaced_tool_name(alias: str, remote_name: str) -> str:
 def namespaced_tool_definition(
     public_name: str, tool: dict[str, Any]
 ) -> dict[str, Any]:
-    input_schema = tool.get("inputSchema")
-    if not isinstance(input_schema, dict):
-        raise UpstreamError(
-            "UPSTREAM_PROTOCOL_ERROR",
-            "Upstream tool definition did not contain an object inputSchema.",
-            category="protocol",
-        )
-    annotations = tool.get("annotations")
-    if annotations is not None and not isinstance(annotations, dict):
-        raise UpstreamError(
-            "UPSTREAM_PROTOCOL_ERROR",
-            "Upstream tool annotations were not an object.",
-            category="protocol",
-        )
-    output_schema = tool.get("outputSchema")
-    if output_schema is not None and not isinstance(output_schema, dict):
-        raise UpstreamError(
-            "UPSTREAM_PROTOCOL_ERROR",
-            "Upstream tool outputSchema was not an object.",
-            category="protocol",
-        )
     definition = copy.deepcopy(tool)
     definition["name"] = public_name
     return definition
+
+
+def classify_risk(
+    raw_tool: dict[str, Any],
+    tool_policy: Mapping[str, str],
+    remote_name: str,
+) -> str:
+    policy = tool_policy.get(remote_name)
+    if policy in {"readonly", "mutating"}:
+        return policy
+    annotations = raw_tool.get("annotations")
+    if isinstance(annotations, dict):
+        if (
+            annotations.get("readOnlyHint") is True
+            and annotations.get("destructiveHint") is not True
+        ):
+            return "readonly"
+    return "mutating"
 
 
 def normalize_tool_result(result: dict[str, Any]) -> dict[str, Any]:
