@@ -1,0 +1,361 @@
+{
+  "dynamic_list_changed_profile_activation": "not_implemented",
+  "phase_1_defensive_controls": "complete",
+  "phase_2_broker": "complete",
+  "runtime_smoke": {
+    "broker_runtime": {
+      "broker_only_count": 2,
+      "catalog_count": 3,
+      "tools_list_count": 26,
+      "upstream_direct_count": 1,
+      "upstream_direct_definition_bytes": 308
+    },
+    "cross_session_fetch_error": "UPSTREAM_RESULT_NOT_FOUND",
+    "direct_runtime": {
+      "broker_only_count": 0,
+      "catalog_count": 3,
+      "tools_list_count": 28,
+      "upstream_direct_count": 3,
+      "upstream_direct_definition_bytes": 844
+    },
+    "dynamic_manager_lifecycle": false,
+    "fixed_broker_tools": [
+      "upstream_result_fetch",
+      "upstream_tool_call",
+      "upstream_tool_call_mutating",
+      "upstream_tool_describe",
+      "upstream_tool_search"
+    ],
+    "fixed_local_tool_count": 25,
+    "large_result": {
+      "budget_bytes": 128000,
+      "fetch_codepoints": 32000,
+      "fetch_eof": false,
+      "final_envelope_bytes": 8487,
+      "handle_present": true,
+      "tool": "release__export_archive"
+    },
+    "list_changed": false,
+    "mutating_call": "release__create_issue",
+    "old_runtime_unchanged_after_write": true,
+    "raw_definition_leak": false,
+    "readonly_call": "release__search_repositories"
+  },
+  "schema_version": 1,
+  "search_validation": {
+    "fixture_count": 30,
+    "fixtures": [
+      {
+        "expected": "fixture__repo_search",
+        "query": "repository search",
+        "top1": "fixture__repo_search",
+        "top5": [
+          "fixture__repo_search",
+          "fixture__database_query",
+          "fixture__record_fetch",
+          "fixture__annotation_search",
+          "fixture__literature_search"
+        ]
+      },
+      {
+        "expected": "fixture__issue_create",
+        "query": "创建问题",
+        "top1": "fixture__issue_create",
+        "top5": [
+          "fixture__issue_create",
+          "fixture__record_create"
+        ]
+      },
+      {
+        "expected": "fixture__branch_list",
+        "query": "branch listing",
+        "top1": "fixture__branch_list",
+        "top5": [
+          "fixture__branch_list",
+          "fixture__git_checkout",
+          "fixture__collection_list",
+          "fixture__directory_list"
+        ]
+      },
+      {
+        "expected": "fixture__pull_request_merge",
+        "query": "合并请求",
+        "top1": "fixture__pull_request_merge",
+        "top5": [
+          "fixture__pull_request_merge"
+        ]
+      },
+      {
+        "expected": "fixture__file_read",
+        "query": "file reading",
+        "top1": "fixture__file_read",
+        "top5": [
+          "fixture__file_read",
+          "fixture__file_delete",
+          "fixture__file_write"
+        ]
+      },
+      {
+        "expected": "fixture__file_write",
+        "query": "写入文件",
+        "top1": "fixture__file_write",
+        "top5": [
+          "fixture__file_write",
+          "fixture__file_delete",
+          "fixture__file_read"
+        ]
+      },
+      {
+        "expected": "fixture__file_delete",
+        "query": "file deletion",
+        "top1": "fixture__file_delete",
+        "top5": [
+          "fixture__file_delete",
+          "fixture__file_read",
+          "fixture__file_write"
+        ]
+      },
+      {
+        "expected": "fixture__directory_list",
+        "query": "列出目录",
+        "top1": "fixture__directory_list",
+        "top5": [
+          "fixture__directory_list",
+          "fixture__branch_list",
+          "fixture__collection_list"
+        ]
+      },
+      {
+        "expected": "fixture__database_query",
+        "query": "database query",
+        "top1": "fixture__database_query",
+        "top5": [
+          "fixture__database_query",
+          "fixture__annotation_search",
+          "fixture__literature_search",
+          "fixture__repo_search",
+          "fixture__table_schema"
+        ]
+      },
+      {
+        "expected": "fixture__service_deploy",
+        "query": "部署服务",
+        "top1": "fixture__service_deploy",
+        "top5": [
+          "fixture__service_deploy",
+          "fixture__annotation_search",
+          "fixture__artifact_download",
+          "fixture__branch_list",
+          "fixture__browser_navigate"
+        ]
+      },
+      {
+        "expected": "fixture__container_logs",
+        "query": "container logs",
+        "top1": "fixture__container_logs",
+        "top5": [
+          "fixture__container_logs"
+        ]
+      },
+      {
+        "expected": "fixture__page_screenshot",
+        "query": "网页截图",
+        "top1": "fixture__page_screenshot",
+        "top5": [
+          "fixture__page_screenshot",
+          "fixture__browser_navigate",
+          "fixture__element_click"
+        ]
+      },
+      {
+        "expected": "fixture__browser_navigate",
+        "query": "browser navigation",
+        "top1": "fixture__browser_navigate",
+        "top5": [
+          "fixture__browser_navigate",
+          "fixture__page_screenshot",
+          "fixture__element_click"
+        ]
+      },
+      {
+        "expected": "fixture__element_click",
+        "query": "点击元素",
+        "top1": "fixture__element_click",
+        "top5": [
+          "fixture__element_click"
+        ]
+      },
+      {
+        "expected": "fixture__literature_search",
+        "query": "literature search",
+        "top1": "fixture__literature_search",
+        "top5": [
+          "fixture__literature_search",
+          "fixture__database_query",
+          "fixture__record_fetch",
+          "fixture__annotation_search",
+          "fixture__repo_search"
+        ]
+      },
+      {
+        "expected": "fixture__citation_export",
+        "query": "导出引用",
+        "top1": "fixture__citation_export",
+        "top5": [
+          "fixture__citation_export"
+        ]
+      },
+      {
+        "expected": "fixture__collection_list",
+        "query": "collection listing",
+        "top1": "fixture__collection_list",
+        "top5": [
+          "fixture__collection_list",
+          "fixture__branch_list",
+          "fixture__directory_list"
+        ]
+      },
+      {
+        "expected": "fixture__annotation_search",
+        "query": "搜索批注",
+        "top1": "fixture__annotation_search",
+        "top5": [
+          "fixture__annotation_search",
+          "fixture__repo_search",
+          "fixture__database_query",
+          "fixture__literature_search",
+          "fixture__artifact_download"
+        ]
+      },
+      {
+        "expected": "fixture__nmr_analyze",
+        "query": "nmr analysis",
+        "top1": "fixture__nmr_analyze",
+        "top5": [
+          "fixture__nmr_analyze"
+        ]
+      },
+      {
+        "expected": "fixture__spectrum_integrate",
+        "query": "谱图积分",
+        "top1": "fixture__spectrum_integrate",
+        "top5": [
+          "fixture__spectrum_integrate"
+        ]
+      },
+      {
+        "expected": "fixture__artifact_download",
+        "query": "artifact download",
+        "top1": "fixture__artifact_download",
+        "top5": [
+          "fixture__artifact_download",
+          "fixture__record_fetch"
+        ]
+      },
+      {
+        "expected": "fixture__server_status",
+        "query": "服务器状态",
+        "top1": "fixture__server_status",
+        "top5": [
+          "fixture__server_status"
+        ]
+      },
+      {
+        "expected": "fixture__table_schema",
+        "query": "table schema",
+        "top1": "fixture__table_schema",
+        "top5": [
+          "fixture__table_schema"
+        ]
+      },
+      {
+        "expected": "fixture__record_fetch",
+        "query": "获取记录",
+        "top1": "fixture__record_fetch",
+        "top5": [
+          "fixture__record_fetch",
+          "fixture__record_create",
+          "fixture__record_remove",
+          "fixture__record_update"
+        ]
+      },
+      {
+        "expected": "fixture__record_update",
+        "query": "record update",
+        "top1": "fixture__record_update",
+        "top5": [
+          "fixture__record_update",
+          "fixture__record_create",
+          "fixture__record_fetch",
+          "fixture__record_remove"
+        ]
+      },
+      {
+        "expected": "fixture__record_create",
+        "query": "创建记录",
+        "top1": "fixture__record_create",
+        "top5": [
+          "fixture__record_create",
+          "fixture__record_fetch",
+          "fixture__record_remove",
+          "fixture__record_update",
+          "fixture__issue_create"
+        ]
+      },
+      {
+        "expected": "fixture__record_remove",
+        "query": "record removal",
+        "top1": "fixture__record_remove",
+        "top5": [
+          "fixture__record_remove",
+          "fixture__record_create",
+          "fixture__record_fetch",
+          "fixture__record_update"
+        ]
+      },
+      {
+        "expected": "fixture__git_commit",
+        "query": "提交代码",
+        "top1": "fixture__git_commit",
+        "top5": [
+          "fixture__git_commit",
+          "fixture__git_push"
+        ]
+      },
+      {
+        "expected": "fixture__git_push",
+        "query": "git push",
+        "top1": "fixture__git_push",
+        "top5": [
+          "fixture__git_push",
+          "fixture__git_commit",
+          "fixture__git_checkout"
+        ]
+      },
+      {
+        "expected": "fixture__git_checkout",
+        "query": "切换分支",
+        "top1": "fixture__git_checkout",
+        "top5": [
+          "fixture__git_checkout",
+          "fixture__branch_list"
+        ]
+      }
+    ],
+    "performance": {
+      "build_iterations": 25,
+      "build_ms_p50": 85.8537,
+      "build_ms_p95": 93.2954,
+      "catalog_size": 500,
+      "search_iterations": 600,
+      "search_ms_p50": 14.3123,
+      "search_ms_p95": 20.2941
+    },
+    "top1_hits": 30,
+    "top1_rate": 1.0,
+    "top5_hits": 30,
+    "top5_rate": 1.0
+  },
+  "stable_catalog_adaptation": "complete",
+  "status": "pass"
+}
