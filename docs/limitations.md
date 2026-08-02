@@ -6,6 +6,11 @@
 - Non-Linux platforms or Linux kernels without Landlock are not production targets for `exec_command` without an external sandbox.
 - This build uses real POSIX PTYs but does not implement Windows ConPTY;
   `tty=true` returns `TTY_UNSUPPORTED` on Windows.
+- Windows string commands require PowerShell 7 (`pwsh`) and run with
+  `-NoLogo -NoProfile -NonInteractive`. Operators may pin an absolute trusted
+  executable with `CODING_TOOLS_MCP_PWSH_PATH`; otherwise the server searches
+  absolute entries on its own process `PATH` while excluding the current
+  directory tree. There is no `cmd.exe` fallback.
 - Portable filesystems do not provide a transaction across unrelated
   directories. `apply_patch` keeps same-directory backups and rolls back the
   full staged set, but a storage failure that also prevents rollback is surfaced
