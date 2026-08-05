@@ -17,7 +17,7 @@ command execution, interactive process sessions, Git inspection, optional
 upstream MCP composition, persistent OAuth, Workspace-bound HTTP sessions, and
 an authenticated Admin WebUI.
 
-The default local catalog contains 20 stable, truthfully annotated tools. Permission
+The default local catalog contains 25 stable, truthfully annotated tools. Permission
 modes change command policy, never `tools/list`. Optional upstream tools are
 snapshotted at Runtime initialization and exposed under stable namespaces; their
 remote capabilities remain governed by the upstream server, not by this

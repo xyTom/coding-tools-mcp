@@ -100,13 +100,24 @@ class MCPContractTests(ComplianceTestCase):
                 self.assertIsInstance(tool.get("description"), str)
                 schema = tool.get("inputSchema")
                 self.assert_schema_object(schema)
-                output_schema = tool.get("outputSchema")
-                self.assert_schema_object(output_schema)
-                self.assertIn("ok", output_schema.get("required", []))
+                if tool["name"] in {
+                    "upstream_tool_call",
+                    "upstream_tool_call_mutating",
+                }:
+                    self.assertNotIn("outputSchema", tool)
+                else:
+                    output_schema = tool.get("outputSchema")
+                    self.assert_schema_object(output_schema)
+                    self.assertIn("ok", output_schema.get("required", []))
 
     def test_tool_annotations_match_mcp_sdk_hint_shape(self) -> None:
         expected = {
             "server_info": (True, False, True, False),
+            "upstream_tool_search": (True, False, True, False),
+            "upstream_tool_describe": (True, False, True, False),
+            "upstream_tool_call": (True, False, False, True),
+            "upstream_tool_call_mutating": (False, True, False, True),
+            "upstream_result_fetch": (True, False, True, False),
             "check_exec_environment": (True, False, True, False),
             "get_default_cwd": (True, False, True, False),
             "set_default_cwd": (False, False, True, False),

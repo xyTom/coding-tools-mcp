@@ -90,6 +90,14 @@ class ToolTokenizerTests(unittest.TestCase):
         self.assertNotIn("核磁", second.known_phrases)
         self.assertIn("nmr", first.expand_query(first.tokenize("核磁")))
         self.assertNotIn("nmr", second.expand_query(second.tokenize("核磁")))
+        before = first.expand_query(first.tokenize("核磁"))
+        with self.assertRaises(AttributeError):
+            first.known_phrases = frozenset()  # type: ignore[misc]
+        with self.assertRaises(AttributeError):
+            first._known_phrases = frozenset()  # type: ignore[attr-defined]
+        with self.assertRaises(AttributeError):
+            object.__setattr__(first, "_known_phrases", frozenset())
+        self.assertEqual(first.expand_query(first.tokenize("核磁")), before)
 
     def test_merge_synonyms_deduplicates_and_caps_each_term(self) -> None:
         merged = merge_synonyms(
@@ -168,6 +176,17 @@ class CatalogSearchIndexTests(unittest.TestCase):
     def test_implements_search_backend_protocol(self) -> None:
         self.assertIsInstance(self.index, SearchBackend)
 
+    def test_built_index_snapshot_cannot_be_rebuilt(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "cannot be rebuilt"):
+            self.index.build(self.entries)
+
+    def test_published_tokenizer_synonyms_cannot_change_search_results(self) -> None:
+        query = "snapshotmutationprobe"
+        self.assertEqual(self.index.search(query), [])
+        with self.assertRaises(TypeError):
+            self.index.tokenizer.synonyms[query] = ("search",)  # type: ignore[index]
+        self.assertEqual(self.index.search(query), [])
+
     def test_exact_public_alias_remote_unique_remote_and_unique_prefix(self) -> None:
         self.assertEqual(
             self.index.search("zotero__get_item")[0].tool_id,
@@ -241,6 +260,20 @@ class CatalogSearchIndexTests(unittest.TestCase):
     def test_chinese_search_literature_matches_english_tool(self) -> None:
         results = self.index.search("搜索文献", ToolSearchFilters(limit=10))
         self.assertEqual(results[0].tool_id, "zotero__search_library")
+
+    def test_english_query_matches_pure_chinese_metadata(self) -> None:
+        index = build_index(
+            {
+                "research__wenxian": entry(
+                    "research__wenxian",
+                    title="文献检索",
+                    description="搜索论文与参考资料。",
+                    risk="readonly",
+                )
+            }
+        )
+        results = index.search("literature search", ToolSearchFilters(limit=5))
+        self.assertEqual(results[0].tool_id, "research__wenxian")
 
     def test_custom_chinese_synonym_matches_nmr_metadata(self) -> None:
         index = build_index(

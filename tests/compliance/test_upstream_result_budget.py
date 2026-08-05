@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import sys
 import unittest
+from unittest.mock import patch
 
+from coding_tools_mcp.json_utils import strict_json_loads
 from coding_tools_mcp.upstream import (
     BaseUpstreamClient,
     UpstreamServerConfig,
     normalize_tool_result,
 )
+from tests.compliance.test_upstream_gateway import FakeUpstreamClient, build_manager
 from coding_tools_mcp.upstream_result import (
     RESULT_INLINE_MAX,
     budget_tool_result,
@@ -31,6 +35,62 @@ class RequestBackedClient(BaseUpstreamClient):
 
 
 class UpstreamResultBudgetTests(unittest.TestCase):
+    def test_result_json_bytes_ignores_lower_python_integer_string_limit(self) -> None:
+        original_limit = sys.get_int_max_str_digits()
+        try:
+            sys.set_int_max_str_digits(1_000)
+            value = 10**1_000 + 7
+            encoded = result_json_bytes(
+                {
+                    "content": [],
+                    "structuredContent": {"value": value},
+                    "isError": False,
+                }
+            )
+            reparsed = strict_json_loads(encoded)
+            self.assertEqual(reparsed["structuredContent"]["value"], value)
+        finally:
+            sys.set_int_max_str_digits(original_limit)
+
+    def test_unpaired_surrogates_are_preserved_as_json_escapes(self) -> None:
+        result = {
+            "content": [{"type": "text", "text": "high:\ud800 low:\udc00 emoji:😀"}],
+            "structuredContent": {"high": "\ud800", "low": "\udc00"},
+            "isError": False,
+        }
+
+        encoded = result_json_bytes(result)
+        decoded = encoded.decode("utf-8")
+        reparsed = json.loads(decoded)
+
+        self.assertIn(b"\\ud800", encoded)
+        self.assertIn(b"\\udc00", encoded)
+        self.assertEqual(reparsed, result)
+        self.assertEqual(budget_tool_result(result), result)
+
+    def test_manager_preserves_surrogate_result_instead_of_protocol_error(self) -> None:
+        config = UpstreamServerConfig(
+            alias="remote",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+        )
+        client = FakeUpstreamClient(config, "2025-11-25")
+        manager = build_manager([config], [client])
+        result = {
+            "content": [{"type": "text", "text": "value:\ud800"}],
+            "structuredContent": {"value": "\udc00"},
+            "isError": False,
+        }
+        try:
+            with patch.object(client, "call_tool_raw", return_value=result):
+                returned = manager.call_tool("remote__search", {"q": "surrogate"})
+            self.assertEqual(returned, result)
+            self.assertFalse(returned["isError"])
+            self.assertIn(b"\\ud800", result_json_bytes(returned))
+            self.assertIn(b"\\udc00", result_json_bytes(returned))
+        finally:
+            manager.close()
+
     def test_small_result_is_returned_without_shape_changes(self) -> None:
         result = {
             "content": [
@@ -191,6 +251,58 @@ class UpstreamResultBudgetTests(unittest.TestCase):
         self.assertTrue(budgeted["structuredContent"]["_truncated"])
         self.assertGreater(budgeted["structuredContent"]["_original_bytes"], RESULT_INLINE_MAX)
         self.assertNotIn("_result_handle", json.dumps(budgeted))
+
+    def test_result_handle_is_budgeted_inside_the_final_manager_envelope(self) -> None:
+        config = UpstreamServerConfig(
+            alias="remote",
+            transport="streamable_http",
+            url="http://127.0.0.1/mcp",
+        )
+        client = FakeUpstreamClient(
+            config,
+            "2025-11-25",
+            tools=[
+                {
+                    "name": "near_limit",
+                    "inputSchema": {"type": "object"},
+                    "annotations": {"readOnlyHint": True},
+                }
+            ],
+        )
+        manager = build_manager([config], [client])
+        raw = {
+            "content": [
+                {"type": "vendor_extension", "payload": "x" * 3_952}
+                for _ in range(27)
+            ]
+            + [
+                {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "data": "z" * 30_000,
+                }
+            ],
+            "structuredContent": {},
+            "isError": False,
+        }
+        self.assertGreater(len(result_json_bytes(raw)), RESULT_INLINE_MAX)
+        try:
+            with patch.object(client, "call_tool_raw", return_value=raw):
+                budgeted = manager.call_tool(
+                    "remote__near_limit",
+                    {},
+                    result_owner="owner",
+                    store_overflow=True,
+                )
+            structured = budgeted["structuredContent"]
+            self.assertLessEqual(len(result_json_bytes(budgeted)), RESULT_INLINE_MAX)
+            self.assertIsInstance(structured.get("_result_handle"), str)
+            self.assertEqual(
+                structured.get("_result_fetch_tool"),
+                "upstream_result_fetch",
+            )
+        finally:
+            manager.close()
 
     def test_oversized_result_without_structured_content_gets_only_phase_one_metadata(self) -> None:
         result = {

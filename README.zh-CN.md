@@ -14,7 +14,7 @@ Coding Tools MCP 是一个模型无关的编程运行时，通过 Model Context 
 可选上游 MCP 组合、持久化 OAuth、Workspace 绑定的 HTTP Session，以及需要
 专用认证的 Admin WebUI。
 
-默认本地目录包含 20 个真实标注的工具。权限模式只改变命令策略，不改变
+默认本地目录包含 25 个真实标注的工具。权限模式只改变命令策略，不改变
 `tools/list`。可选上游工具在 Runtime 初始化时形成不可变快照，并通过稳定
 namespace 暴露；远端能力由上游服务器自己的安全边界控制，不应误认为受本地
 Workspace 文件边界保护。

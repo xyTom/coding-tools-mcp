@@ -107,11 +107,20 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIs(fake_policy["security_boundary"], False)
         self.assertIs(fake_policy["changes_catalog"], False)
         self.assertIs(fake_policy["changes_handlers"], False)
+        self.assertEqual(
+            fake_policy["exempt_tools"],
+            ["upstream_tool_call_mutating"],
+        )
         for tool in compatibility_tools:
             annotations = tool["annotations"]
-            self.assertIs(annotations["readOnlyHint"], True)
-            self.assertIs(annotations["destructiveHint"], False)
-            self.assertIs(annotations["openWorldHint"], False)
+            if tool["name"] == "upstream_tool_call_mutating":
+                self.assertIs(annotations["readOnlyHint"], False)
+                self.assertIs(annotations["destructiveHint"], True)
+                self.assertIs(annotations["openWorldHint"], True)
+            else:
+                self.assertIs(annotations["readOnlyHint"], True)
+                self.assertIs(annotations["destructiveHint"], False)
+                self.assertIs(annotations["openWorldHint"], False)
 
     def test_legacy_tool_profile_migration_inputs_and_outputs_are_explicit(self) -> None:
         migration = self.contract["legacy_tool_profile_migration"]
@@ -210,6 +219,11 @@ class IntegrationContractTests(unittest.TestCase):
         )
         self.assertEqual(webui["gateway_change"], "persist_and_restart_only")
         self.assertIs(webui["gateway_dynamic_reload"], False)
+        self.assertEqual(webui["gateway_exposure_report"], "aggregate_counts_only")
+        self.assertEqual(
+            webui["gateway_exposure_preview"],
+            "active_aggregate_counts_plus_draft_configuration",
+        )
         self.assertIs(webui["secret_material_displayed"], False)
         self.assertEqual(webui["conversation_list"], "summary_only")
         self.assertEqual(webui["conversation_detail"], "explicit_paginated")
@@ -307,9 +321,149 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIs(gateway["immutable_per_runtime"], True)
         self.assertIs(gateway["list_changed"], False)
         self.assertIs(gateway["config_before_initialize"], True)
-        self.assertEqual(gateway["schema"], "preserve_except_public_name")
+        self.assertEqual(gateway["schema"], "sanitized_public_definition")
+        self.assertEqual(gateway["schema_containment_budget"], "widen_only")
+        self.assertEqual(gateway["raw_schema_storage"], "server_side_only")
         self.assertEqual(gateway["annotations"], "preserve_real")
         self.assertEqual(gateway["structured_content"], "preserve")
+        self.assertEqual(
+            gateway["broker_call_output_schema"],
+            "omitted_for_passthrough",
+        )
+        self.assertEqual(
+            gateway["result_handle_budgeting"],
+            "reserved_before_final_size_check",
+        )
+        self.assertEqual(
+            gateway["upstream_result_unicode"],
+            "utf8_with_surrogate_escape_fallback",
+        )
+        self.assertEqual(
+            gateway["upstream_call_after_close_error"],
+            "UPSTREAM_NOT_AVAILABLE",
+        )
+        self.assertEqual(
+            gateway["catalog_search_index_snapshot"],
+            "single_build_immutable",
+        )
+        self.assertEqual(
+            gateway["catalog_tokenizer_snapshot"],
+            "sealed_immutable_synonym_reverse_and_phrase_maps",
+        )
+        self.assertEqual(
+            gateway["upstream_definition_snapshot"],
+            "immutable_mapping_sequence_wrappers_with_iterative_mutable_deepcopy_export",
+        )
+        self.assertEqual(
+            gateway["schema_assertion_projection"],
+            "bounded_by_schema_containment_depth",
+        )
+        self.assertEqual(
+            gateway["upstream_discovery_schema_snapshot"],
+            "sanitize_then_iterative_freeze_without_recursive_copy",
+        )
+        self.assertEqual(
+            gateway["upstream_structured_content"],
+            "object_when_present",
+        )
+        self.assertEqual(
+            gateway["json_container_depth_semantics"],
+            "root_container_is_level_1_scalar_adds_no_level",
+        )
+        self.assertEqual(gateway["upstream_result_structure_depth"], 64)
+        self.assertEqual(
+            gateway["upstream_result_nesting_error"],
+            "UPSTREAM_PROTOCOL_ERROR",
+        )
+        self.assertEqual(
+            gateway["upstream_rpc_response_id"],
+            "exact_integer_request_id_not_boolean_float_or_string",
+        )
+        self.assertEqual(
+            gateway["upstream_rpc_error_code"],
+            "required_exact_integer",
+        )
+        self.assertEqual(gateway["upstream_error_details_depth"], 64)
+        self.assertEqual(
+            gateway["upstream_error_details_depth_scope"],
+            "per_untrusted_detail_value_excluding_gateway_and_status_wrappers",
+        )
+        self.assertEqual(
+            gateway["upstream_error_details_json"],
+            "strict_json_or_bounded_omission",
+        )
+        self.assertEqual(
+            gateway["upstream_error_details_overflow"],
+            "rpc_protocol_error_or_bounded_omission",
+        )
+        self.assertEqual(
+            gateway["upstream_status_error_mapping"],
+            "preserve_safe_envelope_bound_details_only",
+        )
+        self.assertEqual(
+            gateway["upstream_error_details_shared_container_scope"],
+            "cycles_or_shared_within_single_value_omitted_cross_top_level_identity_normalized_independently",
+        )
+        self.assertEqual(gateway["upstream_stdio_response_limit_bytes"], 1_048_576)
+        self.assertEqual(
+            gateway["upstream_stdio_oversize_error"],
+            "UPSTREAM_RESPONSE_TOO_LARGE",
+        )
+        self.assertEqual(
+            gateway["broker_mutating_digest_source"],
+            "search_or_describe_not_session_proof",
+        )
+        self.assertEqual(
+            gateway["json_schema_equality"],
+            "exact_typed_json_value_semantics",
+        )
+        self.assertEqual(
+            gateway["unique_items_validation"],
+            "canonical_fingerprint_expected_linear",
+        )
+        self.assertEqual(
+            gateway["strict_json_input"],
+            "utf8_bounded_integer_finite_float_structural_errors_normalized",
+        )
+        self.assertEqual(
+            gateway["strict_json_output"],
+            "bounded_integer_finite_float_surrogate_escape_fallback",
+        )
+        self.assertEqual(gateway["json_encoding"], "utf-8_only")
+        self.assertEqual(gateway["mcp_stdio_encoding"], "raw_pipe_utf8")
+        self.assertEqual(
+            gateway["mcp_stdio_output_unicode"],
+            "utf8_with_surrogate_escape_fallback",
+        )
+        self.assertEqual(
+            gateway["upstream_stdio_output_unicode"],
+            "utf8_with_surrogate_escape_fallback",
+        )
+        self.assertEqual(gateway["json_integer_digit_limit"], 4300)
+        self.assertEqual(
+            gateway["json_integer_limit_source"],
+            "project_fixed_independent_of_python_global",
+        )
+        self.assertEqual(
+            gateway["json_integer_lifecycle"],
+            "input_schema_result_and_transport",
+        )
+        self.assertEqual(
+            gateway["json_nesting_failure"],
+            "parse_or_protocol_error",
+        )
+        self.assertEqual(
+            gateway["strict_json_boundaries"],
+            [
+                "mcp_stdio",
+                "mcp_http",
+                "admin_http",
+                "oauth_dcr",
+                "upstream_stdio",
+                "upstream_http",
+                "upstream_sse",
+            ],
+        )
         self.assertIs(gateway["remote_workspace_boundary_claim"], False)
         self.assertIs(gateway["session_identity_mutation"], False)
         self.assertIs(gateway["tool_profile_controls"], False)

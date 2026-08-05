@@ -17,7 +17,7 @@ no dynamic `tools/list_changed`, and no required `open_workspace` call.
 `apply_patch` is the only direct file-write tool. `safe`, `trusted`, and
 `dangerous` are command permission policies and never alter `tools/list`.
 
-The default catalog contains 20 tools:
+The default catalog contains 25 tools:
 
 - runtime/context: `server_info`, `check_exec_environment`, `get_default_cwd`,
   `set_default_cwd`
@@ -26,6 +26,8 @@ The default catalog contains 20 tools:
 - processes: `exec_command`, `write_stdin`, `read_output`, `kill_session`
 - Git: `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame`
 - policy/image: `request_permissions`, `view_image`
+- upstream Broker: `upstream_tool_search`, `upstream_tool_describe`,
+  `upstream_tool_call`, `upstream_tool_call_mutating`, `upstream_result_fetch`
 
 `view_image` can be disabled as an installation capability. All other tools are
 fixed.
@@ -34,6 +36,29 @@ fixed.
 
 - MCP `2025-11-25` is current; `2025-06-18` is explicitly supported.
 - Streamable HTTP uses `/mcp`; stdio uses newline-delimited JSON-RPC.
+- Transport JSON uses a shared strict decoder: byte input is UTF-8 only, integers
+  are bounded to 4,300 digits independently of Python process-global limits,
+  floating-point overflow is rejected, and excessive nesting becomes a stable
+  parse/protocol error rather than escaping the transport loop.
+- MCP stdio reads and writes raw pipe bytes as UTF-8 with LF framing; it does not
+  use the platform console code page for protocol input or output. Ordinary
+  Unicode is emitted as real UTF-8; responses containing an unpaired surrogate
+  fall back to ASCII JSON escapes instead of terminating the transport.
+- Upstream stdio response frames have a 1 MiB raw-byte limit. Oversized frames
+  return `UPSTREAM_RESPONSE_TOO_LARGE`, are drained in bounded chunks, and do
+  not corrupt the next LF-delimited frame.
+- Upstream discovery sanitizes Schema metadata before iterative immutable
+  snapshot construction; raw/public snapshots use iterative thaw for mutable
+  `deepcopy()` export. JSON container depth is uniform: a root dict/list is
+  level 1, every child dict/list adds one level, scalars add no level, 64 levels
+  are accepted, and level 65 is rejected. Upstream results, `structuredContent`,
+  JSON-RPC error trees, and error details all use this definition. Response IDs
+  and JSON-RPC error codes must be exact integers; booleans, floats, strings, and
+  missing values are rejected. Error details are bounded per untrusted top-level
+  value without charging Gateway or status wrappers. Status export preserves
+  safe code/message/category/retryable fields and bounds only details. Cycles or
+  shared containers inside one detail value are omitted; identity sharing across
+  separate top-level detail values is normalized independently by JSON value.
 - Every HTTP `Mcp-Session-Id` owns an independent `Runtime`.
 - JSON-RPC batches are rejected, cancellation follows `requestId`, and
   unimplemented logging is not advertised.

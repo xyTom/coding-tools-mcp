@@ -65,10 +65,8 @@ class UpstreamAdminObservabilityTests(unittest.TestCase):
             self.assertEqual(report["servers"][0]["alias"], "remote")
             self.assertEqual(report["servers"][0]["direct_count"], 1)
             self.assertEqual(report["servers"][0]["broker_only_count"], 1)
-            self.assertEqual(
-                {item["remote_name"] for item in report["servers"][0]["tools"]},
-                {"search", "create_issue"},
-            )
+            self.assertGreater(report["servers"][0]["definition_bytes"], 0)
+            self.assertNotIn("tools", report["servers"][0])
             self.assertNotIn("server_info", repr(report))
             largest = report["largest_public_definitions"]
             self.assertTrue(largest)

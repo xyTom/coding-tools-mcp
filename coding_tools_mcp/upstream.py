@@ -15,13 +15,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from http.client import RemoteDisconnected
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, NoReturn
 
+from .json_utils import strict_json_bytes, strict_json_loads
 from .upstream_result import RESULT_INLINE_MAX, budget_tool_result, result_json_bytes
 from .upstream_result_store import ResultStore
 from .upstream_sanitize import raw_schema_digest, sanitize_definition, schema_digest
@@ -37,6 +38,7 @@ from .upstream_search import (
 DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 DEFAULT_TIMEOUT_MS = 30_000
 MAX_RESPONSE_BYTES = 1_048_576
+MAX_UPSTREAM_RESULT_DEPTH = 64
 MAX_TOOL_NAME_CHARS = 512
 MAX_TOOL_FILTER_ITEMS = 256
 MAX_TAG_ITEMS = 32
@@ -102,6 +104,383 @@ class UpstreamError(Exception):
         self.details = details or {}
 
 
+class _FrozenJsonDict(Mapping[str, Any]):
+    """Read-only Mapping wrapper with no mutable dict base-class escape hatch."""
+
+    __slots__ = ("_data",)
+    _data: Mapping[str, Any]
+
+    def __init__(self, value: Mapping[str, Any]) -> None:
+        object.__setattr__(self, "_data", MappingProxyType(dict(value)))
+
+    @staticmethod
+    def _raise_immutable() -> NoReturn:
+        raise TypeError("Upstream definition snapshots are immutable.")
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        del name, value
+        self._raise_immutable()
+
+    def __repr__(self) -> str:
+        return repr(dict(self._data))
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            return dict(self.items()) == dict(other.items())
+        return False
+
+    def __copy__(self) -> "_FrozenJsonDict":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> dict[str, Any]:
+        copied = _thaw_frozen_json(self, memo)
+        if not isinstance(copied, dict):
+            raise TypeError("Frozen JSON object did not thaw to a dict.")
+        return copied
+
+
+class _FrozenJsonList(Sequence[Any]):
+    """Read-only Sequence wrapper with no mutable list base-class escape hatch."""
+
+    __slots__ = ("_items",)
+    _items: tuple[Any, ...]
+
+    def __init__(self, values: Iterable[Any]) -> None:
+        object.__setattr__(self, "_items", tuple(values))
+
+    @staticmethod
+    def _raise_immutable() -> NoReturn:
+        raise TypeError("Upstream definition snapshots are immutable.")
+
+    def __getitem__(self, index: int | slice) -> Any:
+        return self._items[index]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._items)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        del name, value
+        self._raise_immutable()
+
+    def __repr__(self) -> str:
+        return repr(list(self._items))
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Sequence) and not isinstance(
+            other,
+            (str, bytes, bytearray),
+        ):
+            return tuple(self._items) == tuple(other)
+        return False
+
+    def append(self, value: Any) -> None:
+        del value
+        self._raise_immutable()
+
+    def clear(self) -> None:
+        self._raise_immutable()
+
+    def extend(self, values: Iterable[Any]) -> None:
+        del values
+        self._raise_immutable()
+
+    def insert(self, index: int, value: Any) -> None:
+        del index, value
+        self._raise_immutable()
+
+    def pop(self, index: int = -1) -> Any:
+        del index
+        self._raise_immutable()
+
+    def remove(self, value: Any) -> None:
+        del value
+        self._raise_immutable()
+
+    def reverse(self) -> None:
+        self._raise_immutable()
+
+    def sort(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+        del args, kwargs
+        self._raise_immutable()
+
+    def __copy__(self) -> "_FrozenJsonList":
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> list[Any]:
+        copied = _thaw_frozen_json(self, memo)
+        if not isinstance(copied, list):
+            raise TypeError("Frozen JSON array did not thaw to a list.")
+        return copied
+
+
+def _is_json_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (bool, int, float, str))
+
+
+def _clone_json_tree(value: Any, *, max_depth: int) -> Any:
+    """Clone an untrusted JSON tree without recursive Python calls.
+
+    Parsed JSON cannot contain cycles or shared container identities. Rejecting
+    either shape also keeps fabricated in-process clients inside the same
+    protocol boundary as real stdio/HTTP clients.
+    """
+
+    if _is_json_scalar(value):
+        return value
+    if not isinstance(value, (dict, list)):
+        raise TypeError("Value was not JSON-compatible.")
+
+    # Container depth is counted uniformly across all upstream JSON contracts:
+    # the root dict/list is level 1, each child dict/list adds one level, and
+    # scalars add no level. Therefore max_depth=64 rejects the 65th container.
+    completed: dict[int, Any] = {}
+    active: set[int] = set()
+    stack: list[tuple[Any, int, bool]] = [(value, 1, False)]
+    while stack:
+        current, depth, expanded = stack.pop()
+        if depth > max_depth:
+            raise ValueError("JSON nesting exceeded the supported upstream depth.")
+        if _is_json_scalar(current):
+            continue
+        if not isinstance(current, (dict, list)):
+            raise TypeError("Value was not JSON-compatible.")
+
+        identity = id(current)
+        if expanded:
+            active.remove(identity)
+            if isinstance(current, dict):
+                cloned: dict[str, Any] = {}
+                for key, item in current.items():
+                    if not isinstance(key, str):
+                        raise TypeError("JSON object key was not a string.")
+                    cloned[key] = item if _is_json_scalar(item) else completed[id(item)]
+                completed[identity] = cloned
+            else:
+                completed[identity] = [
+                    item if _is_json_scalar(item) else completed[id(item)]
+                    for item in current
+                ]
+            continue
+
+        if identity in active or identity in completed:
+            raise ValueError("JSON tree contained a cycle or shared container.")
+        active.add(identity)
+        stack.append((current, depth, True))
+        children = list(current.values()) if isinstance(current, dict) else list(current)
+        for child in reversed(children):
+            if _is_json_scalar(child):
+                continue
+            if not isinstance(child, (dict, list)):
+                raise TypeError("Value was not JSON-compatible.")
+            stack.append((child, depth + 1, False))
+
+    return completed[id(value)]
+
+
+def _thaw_frozen_json(value: Any, memo: dict[int, Any]) -> Any:
+    """Export a frozen JSON snapshot without recursive Python calls."""
+
+    if _is_json_scalar(value):
+        return value
+    if not isinstance(value, (_FrozenJsonDict, _FrozenJsonList)):
+        raise TypeError("Value was not a frozen JSON snapshot.")
+    existing = memo.get(id(value))
+    if existing is not None:
+        return existing
+
+    completed: dict[int, Any] = {}
+    active: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(value, False)]
+    while stack:
+        current, expanded = stack.pop()
+        if _is_json_scalar(current):
+            continue
+        if not isinstance(current, (_FrozenJsonDict, _FrozenJsonList)):
+            raise TypeError("Frozen snapshot contained a non-JSON value.")
+
+        identity = id(current)
+        if identity in memo:
+            completed[identity] = memo[identity]
+            continue
+        if expanded:
+            active.remove(identity)
+            if isinstance(current, _FrozenJsonDict):
+                thawed: dict[str, Any] = {}
+                for key, item in current.items():
+                    thawed[key] = (
+                        item if _is_json_scalar(item) else completed[id(item)]
+                    )
+                completed[identity] = thawed
+            else:
+                completed[identity] = [
+                    item if _is_json_scalar(item) else completed[id(item)]
+                    for item in current
+                ]
+            memo[identity] = completed[identity]
+            continue
+
+        if identity in active or identity in completed:
+            raise ValueError("Frozen JSON snapshot contained a cycle or shared container.")
+        active.add(identity)
+        stack.append((current, True))
+        children = (
+            list(current.values())
+            if isinstance(current, _FrozenJsonDict)
+            else list(current)
+        )
+        for child in reversed(children):
+            if _is_json_scalar(child):
+                continue
+            if not isinstance(child, (_FrozenJsonDict, _FrozenJsonList)):
+                raise TypeError("Frozen snapshot contained a non-JSON value.")
+            if id(child) in memo:
+                completed[id(child)] = memo[id(child)]
+                continue
+            stack.append((child, False))
+
+    return completed[id(value)]
+
+
+def _bounded_error_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize each untrusted top-level detail value independently.
+
+    A container value may contain at most 64 container levels, counting its
+    root container as level 1. Cycles or shared containers inside one detail
+    value are omitted. Identity sharing between different top-level detail
+    values is normalized independently, matching the value semantics of JSON.
+    """
+
+    try:
+        source = {} if details is None else details
+        if not isinstance(source, dict):
+            raise TypeError("Error details were not an object.")
+        cloned: dict[str, Any] = {}
+        for key, value in source.items():
+            if not isinstance(key, str):
+                raise TypeError("Error detail key was not a string.")
+            cloned[key] = (
+                value
+                if _is_json_scalar(value)
+                else _clone_json_tree(
+                    value,
+                    max_depth=MAX_UPSTREAM_RESULT_DEPTH,
+                )
+            )
+        # Structural cloning alone is insufficient for fabricated in-process
+        # clients: NaN/Infinity and over-limit integers are Python scalars but
+        # are not legal under the Gateway's strict JSON output contract.
+        strict_json_bytes(cloned)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return {
+            "_omitted": True,
+            "_reason": "invalid_or_excessive_nesting",
+        }
+    return cloned
+
+
+def _bounded_status_error(error: dict[str, Any]) -> dict[str, Any]:
+    """Export a status error envelope while bounding only its details field."""
+
+    fallback = {
+        "code": "UPSTREAM_PROTOCOL_ERROR",
+        "message": "Upstream status error payload was invalid.",
+        "category": "protocol",
+        "retryable": False,
+        "details": {
+            "_omitted": True,
+            "_reason": "invalid_or_excessive_nesting",
+        },
+    }
+    try:
+        code = error["code"]
+        message = error["message"]
+        category = error["category"]
+        retryable = error["retryable"]
+        if (
+            not isinstance(code, str)
+            or not isinstance(message, str)
+            or not isinstance(category, str)
+            or type(retryable) is not bool
+        ):
+            raise TypeError("Status error envelope fields were invalid.")
+        exported: dict[str, Any] = {
+            "code": code,
+            "message": message,
+            "category": category,
+            "retryable": retryable,
+        }
+        if "details" in error:
+            exported["details"] = _bounded_error_details(error["details"])
+        strict_json_bytes(exported)
+    except (KeyError, TypeError, ValueError, OverflowError, RecursionError):
+        return fallback
+    return exported
+
+
+def _freeze_json(value: Any) -> Any:
+    """Freeze an arbitrary-depth JSON tree without recursive Python calls."""
+
+    if _is_json_scalar(value):
+        return value
+    if not isinstance(value, (dict, list)):
+        raise TypeError("Value was not JSON-compatible.")
+
+    completed: dict[int, Any] = {}
+    active: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(value, False)]
+    while stack:
+        current, expanded = stack.pop()
+        if _is_json_scalar(current):
+            continue
+        if not isinstance(current, (dict, list)):
+            raise TypeError("Value was not JSON-compatible.")
+
+        identity = id(current)
+        if expanded:
+            active.remove(identity)
+            if isinstance(current, dict):
+                frozen_items: dict[str, Any] = {}
+                for key, item in current.items():
+                    if not isinstance(key, str):
+                        raise TypeError("JSON object key was not a string.")
+                    frozen_items[key] = (
+                        item if _is_json_scalar(item) else completed[id(item)]
+                    )
+                completed[identity] = _FrozenJsonDict(frozen_items)
+            else:
+                completed[identity] = _FrozenJsonList(
+                    item if _is_json_scalar(item) else completed[id(item)]
+                    for item in current
+                )
+            continue
+
+        if identity in active or identity in completed:
+            raise ValueError("JSON tree contained a cycle or shared container.")
+        active.add(identity)
+        stack.append((current, True))
+        children = list(current.values()) if isinstance(current, dict) else list(current)
+        for child in reversed(children):
+            if _is_json_scalar(child):
+                continue
+            if not isinstance(child, (dict, list)):
+                raise TypeError("Value was not JSON-compatible.")
+            stack.append((child, False))
+
+    return completed[id(value)]
+
+
 @dataclass(frozen=True)
 class UpstreamServerConfig:
     alias: str
@@ -139,8 +518,8 @@ class UpstreamConfigSnapshot:
 class UpstreamTool:
     public_name: str
     remote_name: str
-    raw_definition: dict[str, Any]
-    public_definition: dict[str, Any]
+    raw_definition: Mapping[str, Any]
+    public_definition: Mapping[str, Any]
     effective_risk: str
     public_schema_digest: str
     raw_schema_digest: str | None
@@ -178,7 +557,7 @@ class UpstreamStatus:
         if self.target is not None:
             result["target"] = self.target
         if self.error is not None:
-            result["error"] = copy.deepcopy(self.error)
+            result["error"] = _bounded_status_error(self.error)
         return result
 
 
@@ -224,7 +603,10 @@ class BaseUpstreamClient:
                 "Upstream tools/list contained a non-object tool definition.",
                 category="protocol",
             )
-        return [copy.deepcopy(tool) for tool in tools]
+        # The response was freshly decoded for this request. Keep the list
+        # container independent without recursively traversing untrusted Schema
+        # trees before the sanitizer and iterative snapshot freezer run.
+        return list(tools)
 
     def call_tool_raw(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self._acquire_call_lease()
@@ -271,7 +653,7 @@ class BaseUpstreamClient:
         with self._lifecycle_condition:
             if self._lifecycle_closed:
                 raise UpstreamError(
-                    "UPSTREAM_DISCONNECTED",
+                    "UPSTREAM_NOT_AVAILABLE",
                     "Upstream MCP client is closed.",
                     retryable=True,
                 )
@@ -305,7 +687,8 @@ def _rpc_result(response: Any, request_id: int, method: str) -> dict[str, Any]:
             category="protocol",
             details={"method": method},
         )
-    if response.get("id") != request_id:
+    response_id = response.get("id")
+    if type(response_id) is not int or response_id != request_id:
         raise UpstreamError(
             "UPSTREAM_PROTOCOL_ERROR",
             "Upstream response id did not match the request id.",
@@ -323,7 +706,30 @@ def _rpc_result(response: Any, request_id: int, method: str) -> dict[str, Any]:
         )
     if has_error:
         error = response.get("error")
-        if not isinstance(error, dict) or not isinstance(error.get("message"), str):
+        if (
+            not isinstance(error, dict)
+            or type(error.get("code")) is not int
+            or not isinstance(error.get("message"), str)
+        ):
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream JSON-RPC error envelope was invalid.",
+                category="protocol",
+                details={"method": method},
+            )
+        try:
+            rpc_error = _clone_json_tree(
+                error,
+                max_depth=MAX_UPSTREAM_RESULT_DEPTH,
+            )
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream JSON-RPC error exceeded the supported structure.",
+                category="protocol",
+                details={"method": method},
+            ) from exc
+        if not isinstance(rpc_error, dict):
             raise UpstreamError(
                 "UPSTREAM_PROTOCOL_ERROR",
                 "Upstream JSON-RPC error envelope was invalid.",
@@ -334,7 +740,7 @@ def _rpc_result(response: Any, request_id: int, method: str) -> dict[str, Any]:
             "UPSTREAM_RPC_ERROR",
             error["message"],
             category="upstream",
-            details={"method": method, "rpc_error": copy.deepcopy(error)},
+            details={"method": method, "rpc_error": rpc_error},
         )
     result = response.get("result")
     if not isinstance(result, dict):
@@ -381,7 +787,18 @@ class HttpUpstreamClient(BaseUpstreamClient):
         self._send(payload, expect_response=False)
 
     def _send(self, payload: dict[str, Any], *, expect_response: bool) -> dict[str, Any] | None:
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        try:
+            data = strict_json_bytes(
+                payload,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream request was not valid standard JSON.",
+                category="protocol",
+            ) from exc
         headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
@@ -389,6 +806,7 @@ class HttpUpstreamClient(BaseUpstreamClient):
         }
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
+            headers["MCP-Protocol-Version"] = self.protocol_version
         token = os.environ.get(self.config.authorization_env) if self.config.authorization_env else None
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -406,7 +824,7 @@ class HttpUpstreamClient(BaseUpstreamClient):
                 return decode_http_rpc_response(
                     raw,
                     response.headers.get("Content-Type", ""),
-                    expected_id=expected_id if isinstance(expected_id, int) else None,
+                    expected_id=expected_id if type(expected_id) is int else None,
                 )
         except urllib.error.HTTPError as exc:
             raw = exc.read(MAX_RESPONSE_BYTES + 1)
@@ -415,9 +833,13 @@ class HttpUpstreamClient(BaseUpstreamClient):
                     return decode_http_rpc_response(
                         raw,
                         exc.headers.get("Content-Type", ""),
-                        expected_id=payload.get("id") if isinstance(payload.get("id"), int) else None,
+                        expected_id=(
+                            payload.get("id")
+                            if type(payload.get("id")) is int
+                            else None
+                        ),
                     )
-                except (UpstreamError, UnicodeDecodeError, json.JSONDecodeError):
+                except (UpstreamError, UnicodeDecodeError, ValueError):
                     pass
             raise UpstreamError(
                 "UPSTREAM_HTTP_ERROR",
@@ -560,9 +982,28 @@ class StdioUpstreamClient(BaseUpstreamClient):
                 retryable=True,
             )
         try:
-            self.process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
-            self.process.stdin.flush()
-        except OSError as exc:
+            encoded = strict_json_bytes(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ) + b"\n"
+        except (TypeError, ValueError) as exc:
+            raise UpstreamError(
+                "UPSTREAM_PROTOCOL_ERROR",
+                "Upstream request was not valid standard JSON.",
+                category="protocol",
+            ) from exc
+
+        try:
+            binary_stdin = getattr(self.process.stdin, "buffer", None)
+            if binary_stdin is not None:
+                binary_stdin.write(encoded)
+                binary_stdin.flush()
+            else:
+                self.process.stdin.write(encoded.decode("utf-8"))
+                self.process.stdin.flush()
+        except (OSError, ValueError) as exc:
             raise UpstreamError(
                 "UPSTREAM_DISCONNECTED",
                 "Upstream MCP stdio process disconnected.",
@@ -572,34 +1013,75 @@ class StdioUpstreamClient(BaseUpstreamClient):
     def _read_stdout(self) -> None:
         if self.process.stdout is None:
             return
+        binary_stdout = getattr(self.process.stdout, "buffer", None)
+        if binary_stdout is not None:
+            self._read_stdout_binary(binary_stdout)
+            return
+        self._read_stdout_text(self.process.stdout)
+
+    def _read_stdout_binary(self, stream: Any) -> None:
         try:
-            for raw_line in self.process.stdout:
-                line = raw_line.strip()
-                if not line:
+            while True:
+                raw_line = stream.readline(MAX_RESPONSE_BYTES + 3)
+                if not raw_line:
+                    return
+                has_newline = raw_line.endswith(b"\n")
+                payload = raw_line[:-1] if has_newline else raw_line
+                if payload.endswith(b"\r"):
+                    payload = payload[:-1]
+                if len(payload) > MAX_RESPONSE_BYTES:
+                    if not has_newline:
+                        self._drain_binary_line(stream)
+                    self._responses.put(
+                        UpstreamError(
+                            "UPSTREAM_RESPONSE_TOO_LARGE",
+                            "Upstream response exceeded the maximum supported size.",
+                            category="protocol",
+                        )
+                    )
                     continue
+                self._queue_stdio_response(payload)
+        except (OSError, ValueError):
+            self._responses.put(
+                UpstreamError(
+                    "UPSTREAM_DISCONNECTED",
+                    "Upstream MCP stdio process disconnected.",
+                    retryable=True,
+                )
+            )
+
+    @staticmethod
+    def _drain_binary_line(stream: Any) -> None:
+        while True:
+            chunk = stream.readline(65_536)
+            if not chunk or chunk.endswith(b"\n"):
+                return
+
+    def _read_stdout_text(self, stream: Any) -> None:
+        try:
+            for raw_line in stream:
+                line = raw_line.rstrip("\r\n")
                 try:
-                    parsed = json.loads(line)
-                except json.JSONDecodeError:
+                    encoded = line.encode("utf-8")
+                except UnicodeError:
                     self._responses.put(
                         UpstreamError(
                             "UPSTREAM_PROTOCOL_ERROR",
-                            "Upstream stdio returned invalid JSON.",
+                            "Upstream stdio returned non-UTF-8 output.",
                             category="protocol",
                         )
                     )
                     continue
-                if not isinstance(parsed, dict):
+                if len(encoded) > MAX_RESPONSE_BYTES:
                     self._responses.put(
                         UpstreamError(
-                            "UPSTREAM_PROTOCOL_ERROR",
-                            "Upstream stdio response was not a JSON object.",
+                            "UPSTREAM_RESPONSE_TOO_LARGE",
+                            "Upstream response exceeded the maximum supported size.",
                             category="protocol",
                         )
                     )
                     continue
-                if "id" not in parsed and isinstance(parsed.get("method"), str):
-                    continue
-                self._responses.put(parsed)
+                self._queue_stdio_response(line)
         except UnicodeError:
             self._responses.put(
                 UpstreamError(
@@ -608,6 +1090,34 @@ class StdioUpstreamClient(BaseUpstreamClient):
                     category="protocol",
                 )
             )
+
+    def _queue_stdio_response(self, raw_line: str | bytes) -> None:
+        line = raw_line.strip()
+        if not line:
+            return
+        try:
+            parsed = strict_json_loads(line)
+        except (UnicodeError, ValueError):
+            self._responses.put(
+                UpstreamError(
+                    "UPSTREAM_PROTOCOL_ERROR",
+                    "Upstream stdio returned invalid JSON.",
+                    category="protocol",
+                )
+            )
+            return
+        if not isinstance(parsed, dict):
+            self._responses.put(
+                UpstreamError(
+                    "UPSTREAM_PROTOCOL_ERROR",
+                    "Upstream stdio response was not a JSON object.",
+                    category="protocol",
+                )
+            )
+            return
+        if "id" not in parsed and isinstance(parsed.get("method"), str):
+            return
+        self._responses.put(parsed)
 
     def _read_stderr(self) -> None:
         if self.process.stderr is None:
@@ -651,7 +1161,8 @@ class UpstreamManager:
         self.result_store = result_store or ResultStore()
         self.statuses: dict[str, UpstreamStatus] = {}
         self._state = _registry_state()
-        self._lifecycle_lock = threading.Lock()
+        self._lifecycle_condition = threading.Condition(threading.Lock())
+        self._active_call_leases = 0
         self._closed = False
         try:
             self._initialize_configs(frozenset(reserved_names))
@@ -756,6 +1267,33 @@ class UpstreamManager:
         result_owner: str | None = None,
         store_overflow: bool = False,
     ) -> dict[str, Any]:
+        alias, _separator, _remote = name.partition("__")
+        if not self._acquire_call_lease():
+            return upstream_error_result(
+                "UPSTREAM_NOT_AVAILABLE",
+                "Upstream Gateway is closed.",
+                retryable=True,
+                alias=alias,
+                tool_name=name,
+            )
+        try:
+            return self._call_tool_with_lease(
+                name,
+                arguments,
+                result_owner=result_owner,
+                store_overflow=store_overflow,
+            )
+        finally:
+            self._release_call_lease()
+
+    def _call_tool_with_lease(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        result_owner: str | None,
+        store_overflow: bool,
+    ) -> dict[str, Any]:
         state = self._state
         tool = state.all_tools.get(name)
         if tool is None:
@@ -765,24 +1303,15 @@ class UpstreamManager:
                 category="validation",
             )
         alias, _separator, _remote = name.partition("__")
-        with self._lifecycle_lock:
-            if self._closed:
-                return upstream_error_result(
-                    "UPSTREAM_DISCONNECTED",
-                    "Upstream Gateway is closed.",
-                    retryable=True,
-                    alias=alias,
-                    tool_name=name,
-                )
-            client = state.clients.get(alias)
-            if client is None:
-                return upstream_error_result(
-                    "UPSTREAM_NOT_AVAILABLE",
-                    f"Upstream {alias!r} is not available.",
-                    retryable=True,
-                    alias=alias,
-                    tool_name=name,
-                )
+        client = state.clients.get(alias)
+        if client is None:
+            return upstream_error_result(
+                "UPSTREAM_NOT_AVAILABLE",
+                f"Upstream {alias!r} is not available.",
+                retryable=True,
+                alias=alias,
+                tool_name=name,
+            )
         try:
             raw_result = client.call_tool_raw(tool.remote_name, arguments or {})
             normalized = normalize_tool_result(raw_result)
@@ -794,14 +1323,24 @@ class UpstreamManager:
                     owner=result_owner,
                     server_alias=alias,
                 )
-            budgeted = budget_tool_result(normalized)
-            if handle is not None:
-                structured = budgeted.get("structuredContent")
-                if not isinstance(structured, dict):
-                    structured = {}
-                    budgeted["structuredContent"] = structured
-                structured["_result_handle"] = handle
-                structured["_result_fetch_tool"] = "upstream_result_fetch"
+            required_metadata = (
+                {
+                    "_result_handle": handle,
+                    "_result_fetch_tool": "upstream_result_fetch",
+                }
+                if handle is not None
+                else None
+            )
+            budgeted = budget_tool_result(
+                normalized,
+                required_structured_content=required_metadata,
+            )
+            if len(result_json_bytes(budgeted)) > RESULT_INLINE_MAX:
+                raise UpstreamError(
+                    "UPSTREAM_PROTOCOL_ERROR",
+                    "Budgeted upstream result exceeded the final envelope limit.",
+                    category="protocol",
+                )
             return budgeted
         except UpstreamError as exc:
             return budget_tool_result(
@@ -825,6 +1364,16 @@ class UpstreamManager:
                     tool_name=name,
                 )
             )
+        except (RecursionError, TypeError, ValueError):
+            return budget_tool_result(
+                upstream_error_result(
+                    "UPSTREAM_PROTOCOL_ERROR",
+                    "Upstream tool result was not valid standard JSON.",
+                    category="protocol",
+                    alias=alias,
+                    tool_name=name,
+                )
+            )
 
     def status_payload(self) -> dict[str, Any]:
         state = self._state
@@ -842,14 +1391,29 @@ class UpstreamManager:
         }
 
     def close(self) -> None:
-        with self._lifecycle_lock:
+        with self._lifecycle_condition:
             if self._closed:
                 return
             self._closed = True
+            while self._active_call_leases:
+                self._lifecycle_condition.wait()
             state = self._state
         for client in state.clients.values():
             client.close()
         self.result_store.clear()
+
+    def _acquire_call_lease(self) -> bool:
+        with self._lifecycle_condition:
+            if self._closed:
+                return False
+            self._active_call_leases += 1
+            return True
+
+    def _release_call_lease(self) -> None:
+        with self._lifecycle_condition:
+            self._active_call_leases = max(0, self._active_call_leases - 1)
+            if self._active_call_leases == 0:
+                self._lifecycle_condition.notify_all()
 
     def _initialize_configs(self, reserved_names: frozenset[str]) -> None:
         seen_public_names = set(reserved_names)
@@ -892,14 +1456,26 @@ class UpstreamManager:
                                 f"Upstream tool namespace collision: {public_name!r}."
                             )
                         seen_public_names.add(public_name)
-                        raw_definition = namespaced_tool_definition(public_name, raw_tool)
-                        public_definition = sanitize_definition(raw_definition)
+                        try:
+                            raw_definition = namespaced_tool_definition(
+                                public_name,
+                                raw_tool,
+                            )
+                            public_definition = sanitize_definition(raw_definition)
+                            frozen_raw_definition = _freeze_json(raw_definition)
+                            frozen_public_definition = _freeze_json(public_definition)
+                        except (RecursionError, TypeError, ValueError) as exc:
+                            raise UpstreamError(
+                                "UPSTREAM_PROTOCOL_ERROR",
+                                "Upstream tool definition was not valid bounded JSON metadata.",
+                                category="protocol",
+                            ) from exc
                         registered.append(
                             UpstreamTool(
                                 public_name=public_name,
                                 remote_name=remote_name,
-                                raw_definition=raw_definition,
-                                public_definition=public_definition,
+                                raw_definition=frozen_raw_definition,
+                                public_definition=frozen_public_definition,
                                 effective_risk=classify_risk(
                                     raw_tool, config.tool_policy, remote_name
                                 ),
@@ -1162,8 +1738,8 @@ def tool_catalog_entry(
     title = definition.get("title")
     description = definition.get("description")
     input_schema = definition.get("inputSchema")
-    properties = input_schema.get("properties") if isinstance(input_schema, dict) else None
-    argument_names = tuple(properties) if isinstance(properties, dict) else ()
+    properties = input_schema.get("properties") if isinstance(input_schema, Mapping) else None
+    argument_names = tuple(properties) if isinstance(properties, Mapping) else ()
     return UpstreamToolCatalogEntry(
         public_name=tool.public_name,
         server_alias=config.alias,
@@ -1229,7 +1805,10 @@ def namespaced_tool_name(alias: str, remote_name: str) -> str:
 def namespaced_tool_definition(
     public_name: str, tool: dict[str, Any]
 ) -> dict[str, Any]:
-    definition = copy.deepcopy(tool)
+    # Sanitization and immutable snapshot construction own the deep traversal.
+    # A shallow copy is enough to replace the public name without mutating the
+    # freshly decoded upstream object.
+    definition = dict(tool)
     definition["name"] = public_name
     return definition
 
@@ -1259,7 +1838,16 @@ def normalize_tool_result(result: dict[str, Any]) -> dict[str, Any]:
             "Upstream tools/call result was not an object.",
             category="protocol",
         )
-    normalized = copy.deepcopy(result)
+    try:
+        normalized = _clone_json_tree(result, max_depth=MAX_UPSTREAM_RESULT_DEPTH)
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream tools/call result exceeded the supported JSON structure.",
+            category="protocol",
+        ) from exc
+    if not isinstance(normalized, dict):
+        raise AssertionError("JSON object clone did not preserve its root type.")
     content = normalized.get("content")
     if content is None:
         normalized["content"] = []
@@ -1267,6 +1855,13 @@ def normalize_tool_result(result: dict[str, Any]) -> dict[str, Any]:
         raise UpstreamError(
             "UPSTREAM_PROTOCOL_ERROR",
             "Upstream tools/call content was not an array of content objects.",
+            category="protocol",
+        )
+    structured = normalized.get("structuredContent")
+    if "structuredContent" in normalized and not isinstance(structured, dict):
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream tools/call structuredContent was not an object.",
             category="protocol",
         )
     is_error = normalized.get("isError")
@@ -1296,7 +1891,7 @@ def upstream_error_result(
         "message": message,
         "category": category,
         "retryable": retryable,
-        "details": copy.deepcopy(details or {}),
+        "details": _bounded_error_details(details),
     }
     payload: dict[str, Any] = {"ok": False, "error": error}
     if alias is not None:
@@ -1327,9 +1922,29 @@ def decode_http_rpc_response(
     *,
     expected_id: int | None = None,
 ) -> dict[str, Any]:
-    text = raw.decode("utf-8")
+    try:
+        text = raw.decode("utf-8")
+        return _decode_http_rpc_text(
+            text,
+            content_type,
+            expected_id=expected_id,
+        )
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise UpstreamError(
+            "UPSTREAM_PROTOCOL_ERROR",
+            "Upstream HTTP response was not valid standard JSON.",
+            category="protocol",
+        ) from exc
+
+
+def _decode_http_rpc_text(
+    text: str,
+    content_type: str,
+    *,
+    expected_id: int | None,
+) -> dict[str, Any]:
     if "text/event-stream" not in content_type.lower():
-        parsed = json.loads(text)
+        parsed = strict_json_loads(text)
         if isinstance(parsed, dict):
             return parsed
         raise UpstreamError(
@@ -1357,7 +1972,7 @@ def decode_http_rpc_response(
         )
     candidates: list[dict[str, Any]] = []
     for event in events:
-        parsed = json.loads(event)
+        parsed = strict_json_loads(event)
         if not isinstance(parsed, dict):
             raise UpstreamError(
                 "UPSTREAM_PROTOCOL_ERROR",
@@ -1367,7 +1982,8 @@ def decode_http_rpc_response(
         candidates.append(parsed)
     if expected_id is not None:
         for candidate in candidates:
-            if candidate.get("id") == expected_id:
+            candidate_id = candidate.get("id")
+            if type(candidate_id) is int and candidate_id == expected_id:
                 return candidate
     return candidates[0]
 
@@ -1457,7 +2073,7 @@ def error_payload(exc: BaseException) -> dict[str, Any]:
             "retryable": exc.retryable,
         }
         if exc.details:
-            payload["details"] = copy.deepcopy(exc.details)
+            payload["details"] = _bounded_error_details(exc.details)
         return payload
     if isinstance(exc, UpstreamConfigError):
         return {
@@ -1547,28 +2163,33 @@ def upstream_exposure_report(state: UpstreamRegistryState) -> dict[str, Any]:
     direct_names = frozenset(state.direct_tool_names)
     definition_sizes = {
         name: len(
-            json.dumps(
+            strict_json_bytes(
                 tool.public_definition,
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
-            ).encode("utf-8")
+            )
         )
         for name, tool in state.all_tools.items()
     }
-    server_tools: dict[str, list[dict[str, Any]]] = {}
+    server_metrics: dict[str, dict[str, int]] = {}
     for name in sorted(state.all_tools):
-        tool = state.all_tools[name]
         alias, _separator, _remote = name.partition("__")
-        server_tools.setdefault(alias, []).append(
+        metrics = server_metrics.setdefault(
+            alias,
             {
-                "name": name,
-                "remote_name": tool.remote_name,
-                "direct": name in direct_names,
-                "definition_bytes": definition_sizes[name],
-                "risk": tool.effective_risk,
-            }
+                "catalog_count": 0,
+                "direct_count": 0,
+                "broker_only_count": 0,
+                "definition_bytes": 0,
+            },
         )
+        metrics["catalog_count"] += 1
+        metrics["definition_bytes"] += definition_sizes[name]
+        if name in direct_names:
+            metrics["direct_count"] += 1
+        else:
+            metrics["broker_only_count"] += 1
     largest = sorted(
         state.all_tools,
         key=lambda name: (-definition_sizes[name], name),
@@ -1597,12 +2218,9 @@ def upstream_exposure_report(state: UpstreamRegistryState) -> dict[str, Any]:
         "servers": [
             {
                 "alias": alias,
-                "catalog_count": len(tools),
-                "direct_count": sum(1 for tool in tools if tool["direct"]),
-                "broker_only_count": sum(1 for tool in tools if not tool["direct"]),
-                "tools": tools,
+                **metrics,
             }
-            for alias, tools in sorted(server_tools.items())
+            for alias, metrics in sorted(server_metrics.items())
         ],
     }
 

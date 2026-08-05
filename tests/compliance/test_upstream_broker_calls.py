@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from coding_tools_mcp.server import JsonRpcError, Runtime, TOOL_REGISTRY
+from coding_tools_mcp.errors import ToolFailure
+from coding_tools_mcp.server import (
+    JsonRpcError,
+    Runtime,
+    TOOL_REGISTRY,
+    _json_schema_equal,
+    validate_schema_value,
+)
 from coding_tools_mcp.upstream import UpstreamServerConfig
 from tests.compliance.test_upstream_gateway import FakeUpstreamClient, build_manager
 
@@ -33,6 +42,12 @@ READ_TOOL = {
                     {"type": "string", "enum": ["alpha"]},
                     {"type": "integer", "minimum": 10, "maximum": 20},
                 ]
+            },
+            "blocked": {"type": "string", "not": {"const": "forbidden"}},
+            "unique_labels": {
+                "type": "array",
+                "uniqueItems": True,
+                "items": {"type": "string"},
             },
         },
         "required": ["mode", "kind", "count", "ratio", "labels", "choice"],
@@ -64,6 +79,90 @@ LOOSE_TOOL = {
 }
 
 
+REF_TOOL = {
+    "name": "ref_read",
+    "description": "Accept a nested reference degraded to accept-any.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"query": {"$ref": "#/$defs/query"}},
+        "required": ["query"],
+        "$defs": {"query": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": True},
+}
+
+ONEOF_REF_TOOL = {
+    "name": "oneof_ref_read",
+    "description": "Accept a oneOf containing an unresolved reference.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "value": {
+                "oneOf": [
+                    {"$ref": "#/$defs/value"},
+                    {"type": "string"},
+                ]
+            }
+        },
+        "required": ["value"],
+        "$defs": {"value": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": True},
+}
+
+
+ENUM_BUDGET_TOOL = {
+    "name": "enum_budget_read",
+    "description": "Accept values omitted from a contained oversized enum.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {"value": {"enum": list(range(51))}},
+        "required": ["value"],
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": True},
+}
+
+PROPERTIES_BUDGET_TOOL = {
+    "name": "properties_budget_read",
+    "description": "Accept a declared property omitted by containment limits.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {f"p{index}": {"type": "integer"} for index in range(41)},
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": True},
+}
+
+PROPERTIES_SCHEMA_BUDGET_TOOL = {
+    "name": "properties_schema_budget_read",
+    "description": "Do not apply additionalProperties schema to omitted declared properties.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {f"p{index}": {"type": "integer"} for index in range(41)},
+        "additionalProperties": {"type": "string"},
+    },
+    "annotations": {"readOnlyHint": True},
+}
+
+BRANCH_BUDGET_TOOL = {
+    "name": "branch_budget_read",
+    "description": "Accept values represented only by omitted combination branches.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "any_value": {"anyOf": [{"const": value} for value in range(11)]},
+            "one_value": {"oneOf": [{"const": value} for value in range(11)]},
+        },
+        "required": ["any_value", "one_value"],
+        "additionalProperties": False,
+    },
+    "annotations": {"readOnlyHint": True},
+}
+
+
 class UpstreamBrokerCallTests(unittest.TestCase):
     def build_runtime(self, *, fake_readonly: bool = False) -> tuple[Runtime, FakeUpstreamClient]:
         config = UpstreamServerConfig(
@@ -75,7 +174,17 @@ class UpstreamBrokerCallTests(unittest.TestCase):
         client = FakeUpstreamClient(
             config,
             "2025-11-25",
-            tools=[READ_TOOL, MUTATING_TOOL, LOOSE_TOOL],
+            tools=[
+                READ_TOOL,
+                MUTATING_TOOL,
+                LOOSE_TOOL,
+                REF_TOOL,
+                ONEOF_REF_TOOL,
+                ENUM_BUDGET_TOOL,
+                PROPERTIES_BUDGET_TOOL,
+                PROPERTIES_SCHEMA_BUDGET_TOOL,
+                BRANCH_BUDGET_TOOL,
+            ],
         )
         manager = build_manager([config], [client])
         self.temp = TemporaryDirectory()
@@ -205,6 +314,29 @@ class UpstreamBrokerCallTests(unittest.TestCase):
         self.assertEqual(client.calls[0][0], "complex_write")
         runtime.close()
 
+    def test_search_digest_can_directly_authorize_mutating_route(self) -> None:
+        runtime, client = self.build_runtime()
+        search = runtime.call_tool(
+            "upstream_tool_search",
+            {"query": "mutate remote state", "read_only": False, "limit": 10},
+        )
+        result_entry = next(
+            item
+            for item in search["structuredContent"]["results"]
+            if item["name"] == "remote__complex_write"
+        )
+        result = runtime.call_tool(
+            "upstream_tool_call_mutating",
+            {
+                "name": result_entry["name"],
+                "arguments": {"action": "write", "payload": "from-search"},
+                "schema_digest": result_entry["schema_digest"],
+            },
+        )
+        self.assertFalse(result["isError"])
+        self.assertEqual(client.calls, [("complex_write", {"action": "write", "payload": "from-search"})])
+        runtime.close()
+
     def test_public_schema_required_type_enum_const_bounds_and_oneof(self) -> None:
         runtime, client = self.build_runtime()
         cases = [
@@ -216,6 +348,8 @@ class UpstreamBrokerCallTests(unittest.TestCase):
             ({**self.valid_read_arguments(), "labels": []}, "at least"),
             ({**self.valid_read_arguments(), "labels": ["a"]}, "shorter"),
             ({**self.valid_read_arguments(), "choice": 5}, "exactly one"),
+            ({**self.valid_read_arguments(), "blocked": "forbidden"}, "forbidden schema"),
+            ({**self.valid_read_arguments(), "unique_labels": ["x", "x"]}, "unique"),
             ({**self.valid_read_arguments(), "extra": True}, "recognized"),
         ]
         for arguments, message in cases:
@@ -232,6 +366,91 @@ class UpstreamBrokerCallTests(unittest.TestCase):
                 self.assertIn(message, result["structuredContent"]["error"]["message"])
         self.assertEqual(client.calls, [])
         runtime.close()
+
+    def test_json_schema_equality_distinguishes_boolean_from_number(self) -> None:
+        with self.assertRaises(ToolFailure):
+            validate_schema_value(True, {"const": 1}, path="value")
+        with self.assertRaises(ToolFailure):
+            validate_schema_value(True, {"enum": [1]}, path="value")
+
+        validate_schema_value(
+            [True, 1],
+            {"type": "array", "uniqueItems": True},
+            path="value",
+        )
+        with self.assertRaises(ToolFailure):
+            validate_schema_value(
+                [1, 1.0],
+                {"type": "array", "uniqueItems": True},
+                path="value",
+            )
+        with self.assertRaises(ToolFailure):
+            validate_schema_value(
+                [{"a": 1, "b": [2]}, {"b": [2.0], "a": 1.0}],
+                {"type": "array", "uniqueItems": True},
+                path="value",
+            )
+
+    def test_json_schema_numeric_equality_is_exact_beyond_decimal_context(self) -> None:
+        for digits in (30, 100):
+            with self.subTest(digits=digits):
+                value = 10 ** (digits - 1) + 12345
+                adjacent = value + 1
+                self.assertFalse(_json_schema_equal(value, adjacent))
+                validate_schema_value(value, {"const": value}, path="value")
+                validate_schema_value(value, {"enum": [value]}, path="value")
+                with self.assertRaises(ToolFailure):
+                    validate_schema_value(adjacent, {"const": value}, path="value")
+                with self.assertRaises(ToolFailure):
+                    validate_schema_value(adjacent, {"enum": [value]}, path="value")
+
+        scientific_value = 10**30
+        self.assertTrue(_json_schema_equal(scientific_value, 1e30))
+        validate_schema_value(1e30, {"const": scientific_value}, path="value")
+        validate_schema_value(1e30, {"enum": [scientific_value]}, path="value")
+
+        nested_left = 10**99 + 7
+        nested_right = nested_left + 1
+        validate_schema_value(
+            [{"nested": [nested_left]}, {"nested": [nested_right]}],
+            {"type": "array", "uniqueItems": True},
+            path="value",
+        )
+        with self.assertRaises(ToolFailure):
+            validate_schema_value(
+                [{"nested": [scientific_value]}, {"nested": [1e30]}],
+                {"type": "array", "uniqueItems": True},
+                path="value",
+            )
+
+    def test_json_schema_large_integer_fingerprint_ignores_host_string_limit(self) -> None:
+        original_limit = sys.get_int_max_str_digits()
+        try:
+            sys.set_int_max_str_digits(1_000)
+            value = 10**1_000 + 7
+            adjacent = value + 1
+            self.assertFalse(_json_schema_equal(value, adjacent))
+            validate_schema_value(value, {"const": value}, path="value")
+            with self.assertRaises(ToolFailure):
+                validate_schema_value(adjacent, {"const": value}, path="value")
+            with self.assertRaises(ToolFailure) as below_minimum:
+                validate_schema_value(value - 1, {"minimum": value}, path="value")
+            self.assertIn("must be >=", below_minimum.exception.message)
+            with self.assertRaises(ToolFailure) as above_maximum:
+                validate_schema_value(adjacent, {"maximum": value}, path="value")
+            self.assertIn("must be <=", above_maximum.exception.message)
+        finally:
+            sys.set_int_max_str_digits(original_limit)
+
+    def test_unique_items_ten_thousand_values_is_linear_time(self) -> None:
+        started = time.perf_counter()
+        validate_schema_value(
+            list(range(10_000)),
+            {"type": "array", "uniqueItems": True},
+            path="value",
+        )
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 2.0, f"uniqueItems validation took {elapsed:.3f}s")
 
     def test_loose_schema_accepts_arbitrary_object(self) -> None:
         runtime, client = self.build_runtime()
@@ -265,9 +484,10 @@ class UpstreamBrokerCallTests(unittest.TestCase):
     def test_fake_readonly_annotation_does_not_change_risk_route(self) -> None:
         runtime, client = self.build_runtime(fake_readonly=True)
         definitions = {tool["name"]: tool for tool in runtime.list_tools()["tools"]}
-        self.assertTrue(
-            definitions["upstream_tool_call_mutating"]["annotations"]["readOnlyHint"]
-        )
+        annotations = definitions["upstream_tool_call_mutating"]["annotations"]
+        self.assertFalse(annotations["readOnlyHint"])
+        self.assertTrue(annotations["destructiveHint"])
+        self.assertTrue(annotations["openWorldHint"])
         result = runtime.call_tool(
             "upstream_tool_call",
             {
@@ -280,6 +500,86 @@ class UpstreamBrokerCallTests(unittest.TestCase):
             "UPSTREAM_TOOL_NOT_READONLY",
         )
         self.assertEqual(client.calls, [])
+        runtime.close()
+
+    def test_broker_calls_omit_output_schema_for_true_passthrough(self) -> None:
+        runtime, _client = self.build_runtime()
+        definitions = {tool["name"]: tool for tool in runtime.list_tools()["tools"]}
+        self.assertNotIn("outputSchema", definitions["upstream_tool_call"])
+        self.assertNotIn("outputSchema", definitions["upstream_tool_call_mutating"])
+        runtime.close()
+
+    def test_content_only_upstream_result_remains_content_only(self) -> None:
+        runtime, client = self.build_runtime()
+        upstream_result = {
+            "content": [{"type": "text", "text": "done"}],
+            "isError": False,
+        }
+        with patch.object(client, "call_tool_raw", return_value=copy.deepcopy(upstream_result)):
+            result = runtime.call_tool(
+                "upstream_tool_call",
+                {
+                    "name": "remote__complex_read",
+                    "arguments": self.valid_read_arguments(),
+                },
+            )
+        self.assertEqual(result, upstream_result)
+        self.assertNotIn("structuredContent", result)
+        runtime.close()
+
+    def test_nested_ref_property_degrades_to_accept_any(self) -> None:
+        runtime, client = self.build_runtime()
+        result = runtime.call_tool(
+            "upstream_tool_call",
+            {"name": "remote__ref_read", "arguments": {"query": "abc"}},
+        )
+        self.assertFalse(result["isError"])
+        self.assertEqual(client.calls, [("ref_read", {"query": "abc"})])
+        runtime.close()
+
+    def test_oneof_with_nested_ref_degrades_without_double_match_rejection(self) -> None:
+        runtime, client = self.build_runtime()
+        result = runtime.call_tool(
+            "upstream_tool_call",
+            {"name": "remote__oneof_ref_read", "arguments": {"value": "abc"}},
+        )
+        self.assertFalse(result["isError"])
+        self.assertEqual(client.calls, [("oneof_ref_read", {"value": "abc"})])
+        runtime.close()
+
+    def test_schema_quantity_budgets_only_widen_real_broker_validation(self) -> None:
+        runtime, client = self.build_runtime()
+        cases = [
+            ("enum_budget_read", {"value": 50}),
+            ("properties_budget_read", {"p40": 40}),
+            ("properties_schema_budget_read", {"p40": 40}),
+            ("branch_budget_read", {"any_value": 10, "one_value": 10}),
+        ]
+        for remote_name, arguments in cases:
+            with self.subTest(remote_name=remote_name):
+                result = runtime.call_tool(
+                    "upstream_tool_call",
+                    {"name": f"remote__{remote_name}", "arguments": arguments},
+                )
+                self.assertFalse(result["isError"])
+
+        self.assertEqual(client.calls, cases)
+
+        enum_schema = runtime.upstream_manager.state.all_tools[
+            "remote__enum_budget_read"
+        ].public_definition["inputSchema"]["properties"]["value"]
+        self.assertNotIn("enum", enum_schema)
+        for tool_name in ("properties_budget_read", "properties_schema_budget_read"):
+            public_input = runtime.upstream_manager.state.all_tools[
+                f"remote__{tool_name}"
+            ].public_definition["inputSchema"]
+            self.assertEqual(len(public_input["properties"]), 40)
+            self.assertNotIn("additionalProperties", public_input)
+        branch_properties = runtime.upstream_manager.state.all_tools[
+            "remote__branch_budget_read"
+        ].public_definition["inputSchema"]["properties"]
+        self.assertNotIn("anyOf", branch_properties["any_value"])
+        self.assertNotIn("oneOf", branch_properties["one_value"])
         runtime.close()
 
     def test_invalid_digest_format_is_rejected_before_remote_call(self) -> None:

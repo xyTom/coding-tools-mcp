@@ -11,6 +11,7 @@ import fnmatch
 import functools
 import http.server
 import json
+import math
 import mimetypes
 import os
 import posixpath
@@ -29,6 +30,7 @@ import urllib.parse
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
@@ -44,6 +46,7 @@ from .admin import (
 from .envutils import ENV_PREFIX, truthy_env
 from .codex_sessions import CodexSessionScanner
 from .errors import JsonRpcError, ToolFailure
+from .json_utils import strict_json_bytes, strict_json_loads
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -804,7 +807,12 @@ LANDLOCK_ACCESS_FS_IOCTL_DEV = 1 << 15
 
 
 def json_response_payload(payload: Any) -> bytes:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return strict_json_bytes(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 _ACTIVE_ALLOWED_ORIGINS: frozenset[str] = frozenset()
@@ -1784,7 +1792,7 @@ class Runtime:
             if not _SCHEMA_DIGEST_RE.fullmatch(digest_text):
                 return upstream_error_result(
                     "UPSTREAM_SCHEMA_CHANGED",
-                    "schema_digest must be the 32-character lowercase hex digest from upstream_tool_describe.",
+                    "schema_digest must be the 32-character lowercase hex digest from upstream_tool_search or upstream_tool_describe.",
                     category="validation",
                     alias=name.partition("__")[0],
                     tool_name=name,
@@ -1792,7 +1800,7 @@ class Runtime:
             if digest_text != tool.public_schema_digest:
                 return upstream_error_result(
                     "UPSTREAM_SCHEMA_CHANGED",
-                    f"Schema changed for {name!r}; call upstream_tool_describe again.",
+                    f"Schema changed for {name!r}; search or describe the tool again.",
                     category="validation",
                     details={
                         "expected": digest_text,
@@ -1804,14 +1812,14 @@ class Runtime:
         elif expected_risk == "mutating":
             return upstream_error_result(
                 "UPSTREAM_SCHEMA_CHANGED",
-                "A current schema_digest from upstream_tool_describe is required for mutating calls.",
+                "A current schema_digest from upstream_tool_search or upstream_tool_describe is required for mutating calls.",
                 category="validation",
                 details={"current": tool.public_schema_digest},
                 alias=name.partition("__")[0],
                 tool_name=name,
             )
         arguments = args.get("arguments") or {}
-        public_schema = tool.public_definition.get("inputSchema")
+        public_schema = copy.deepcopy(tool.public_definition.get("inputSchema"))
         if not isinstance(public_schema, dict):
             public_schema = {"type": "object", "additionalProperties": True}
         try:
@@ -1879,7 +1887,9 @@ class Runtime:
             warnings.append("permission_mode=dangerous disables MCP safety gates")
         if self.fake_readonly_annotations:
             warnings.append(
-                "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
+                "eligible tools/list annotations are faked as read-only; "
+                "upstream_tool_call_mutating retains truthful mutating annotations; "
+                "apply_patch and exec_command still mutate and execute"
             )
         return {
             "ok": True,
@@ -4662,7 +4672,63 @@ def validate_arguments(tool_name: str, args: dict[str, Any]) -> None:
         raise JsonRpcError(-32602, exc.message, {"reason": "invalid_arguments", "code": exc.code}) from exc
 
 
+def _json_schema_fingerprint(value: Any) -> tuple[Any, ...]:
+    """Return a hashable JSON-value key with JSON Schema equality semantics."""
+
+    if value is None:
+        return ("null",)
+    if isinstance(value, bool):
+        return ("boolean", value)
+    if isinstance(value, int):
+        # Decimal(int) is exact and does not route through Python's guarded
+        # int-to-string conversion, so the project-owned 4,300 digit input
+        # contract remains independent of sys.set_int_max_str_digits().
+        return ("number", Decimal(value))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return ("number", repr(value))
+        # Decimal equality and hashing already ignore insignificant trailing
+        # zeroes without consulting the active decimal context. Calling
+        # normalize() here is unsafe because it rounds through that context
+        # (28 digits by default), which can collapse distinct large integers.
+        return ("number", Decimal(str(value)))
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, list):
+        return ("array", tuple(_json_schema_fingerprint(item) for item in value))
+    if isinstance(value, dict):
+        return (
+            "object",
+            tuple(
+                (key, _json_schema_fingerprint(item))
+                for key, item in sorted(value.items())
+            ),
+        )
+    return ("unsupported", type(value).__qualname__, repr(value))
+
+
+def _json_schema_equal(left: Any, right: Any) -> bool:
+    return _json_schema_fingerprint(left) == _json_schema_fingerprint(right)
+
+
+def _safe_validation_repr(value: Any) -> str:
+    try:
+        return repr(value)
+    except ValueError:
+        # Python may refuse repr() for integers above the process-global
+        # int_max_str_digits setting. Validation errors must remain structured.
+        return f"<{type(value).__qualname__} value omitted>"
+
+
 def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> None:
+    negated = schema.get("not")
+    if isinstance(negated, dict) and _schema_branch_matches(value, negated, path=path):
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{path} matches a forbidden schema.",
+            category="validation",
+        )
+
     all_of = schema.get("allOf")
     if isinstance(all_of, list):
         for branch in all_of:
@@ -4704,16 +4770,20 @@ def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> N
             category="validation",
         )
 
-    if "const" in schema and value != schema["const"]:
+    if "const" in schema and not _json_schema_equal(value, schema["const"]):
         raise ToolFailure(
             "INVALID_ARGUMENT",
-            f"{path} must equal {schema['const']!r}.",
+            f"{path} must equal {_safe_validation_repr(schema['const'])}.",
             category="validation",
         )
-    if "enum" in schema and isinstance(schema["enum"], list) and value not in schema["enum"]:
+    if (
+        "enum" in schema
+        and isinstance(schema["enum"], list)
+        and not any(_json_schema_equal(value, candidate) for candidate in schema["enum"])
+    ):
         raise ToolFailure(
             "INVALID_ARGUMENT",
-            f"{path} must be one of {schema['enum']!r}.",
+            f"{path} must be one of {_safe_validation_repr(schema['enum'])}.",
             category="validation",
         )
 
@@ -4746,18 +4816,24 @@ def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> N
                 )
 
     if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must be a finite number.",
+                category="validation",
+            )
         minimum = schema.get("minimum")
         maximum = schema.get("maximum")
         if isinstance(minimum, (int, float)) and value < minimum:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                f"{path} must be >= {minimum}.",
+                f"{path} must be >= {_safe_validation_repr(minimum)}.",
                 category="validation",
             )
         if isinstance(maximum, (int, float)) and value > maximum:
             raise ToolFailure(
                 "INVALID_ARGUMENT",
-                f"{path} must be <= {maximum}.",
+                f"{path} must be <= {_safe_validation_repr(maximum)}.",
                 category="validation",
             )
 
@@ -4776,6 +4852,17 @@ def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> N
                 f"{path} must contain at most {max_items} items.",
                 category="validation",
             )
+        if schema.get("uniqueItems") is True:
+            seen_items: set[tuple[Any, ...]] = set()
+            for item in value:
+                fingerprint = _json_schema_fingerprint(item)
+                if fingerprint in seen_items:
+                    raise ToolFailure(
+                        "INVALID_ARGUMENT",
+                        f"{path} must contain unique items.",
+                        category="validation",
+                    )
+                seen_items.add(fingerprint)
         if isinstance(schema.get("items"), dict):
             item_schema = schema["items"]
             for index, item in enumerate(value):
@@ -4850,14 +4937,16 @@ def schema_type_name(expected_type: str | list[str]) -> str:
 def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
     schemas = input_schemas()
     annotations = tool_annotations(name, fake_readonly=fake_readonly)
-    return {
+    definition = {
         "name": name,
         "title": annotations["title"],
         "description": TOOL_REGISTRY[name].description,
         "inputSchema": schemas[name],
-        "outputSchema": tool_output_schema(),
         "annotations": annotations,
     }
+    if name not in {"upstream_tool_call", "upstream_tool_call_mutating"}:
+        definition["outputSchema"] = tool_output_schema()
+    return definition
 
 
 def tool_annotations(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
@@ -4865,13 +4954,14 @@ def tool_annotations(name: str, *, fake_readonly: bool = False) -> dict[str, Any
 
     ``fake_readonly`` serves clients that refuse to call, or prompt on every call
     to, a tool annotated as mutating, which no server-side permission mode can
-    influence. It reports every tool as read-only and non-destructive even though
-    `apply_patch` and `exec_command` still mutate and still execute. Only
-    `tools/list` may pass it: `server_info` and the server card must keep
-    reporting the real annotations so the override stays discoverable.
+    influence. It rewrites eligible local tool annotations as read-only and
+    non-destructive even though `apply_patch` and `exec_command` still mutate and
+    execute. `upstream_tool_call_mutating` is exempt and always retains truthful
+    mutating annotations. Only `tools/list` may apply the compatibility rewrite:
+    `server_info` and the server card keep reporting the real annotations.
     """
     spec = TOOL_REGISTRY[name]
-    if fake_readonly:
+    if fake_readonly and name != "upstream_tool_call_mutating":
         return {
             "title": spec.title,
             "readOnlyHint": True,
@@ -5242,8 +5332,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": {"code": "invalid_request", "message": "Admin request body size is invalid"}}, status=413)
             return None
         try:
-            value = json.loads(self.rfile.read(length).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            value = strict_json_loads(self.rfile.read(length))
+        except (UnicodeDecodeError, ValueError):
             self.send_json({"error": {"code": "invalid_json", "message": "Body must be valid JSON"}}, status=400)
             return None
         if not isinstance(value, dict):
@@ -5522,8 +5612,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length)
         try:
-            request = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            request = strict_json_loads(body)
+        except (UnicodeDecodeError, ValueError):
             self.send_rpc_error(-32700, "Parse error")
             return
         if isinstance(request, list):
@@ -6072,8 +6162,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "invalid_client_metadata", "error_description": "Content-Type must be application/json"}, status=400)
             return
         try:
-            metadata = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            metadata = strict_json_loads(body)
+        except (UnicodeDecodeError, ValueError):
             self.send_json({"error": "invalid_client_metadata", "error_description": "Body must be valid JSON"}, status=400)
             return
         if not isinstance(metadata, dict):
@@ -6199,7 +6289,8 @@ def build_runtime(
         )
     if emit_warning and runtime.fake_readonly_annotations:
         print(
-            "WARNING: tools/list reports every tool as read-only and non-destructive. "
+            "WARNING: tools/list rewrites eligible local tools as read-only and non-destructive; "
+            "upstream_tool_call_mutating retains truthful mutating annotations. "
             "apply_patch and exec_command still mutate the workspace and still run commands. "
             "server_info and the server card keep reporting the real annotations.",
             file=sys.stderr,
@@ -6936,8 +7027,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--dangerously-fake-readonly-annotations",
         action="store_true",
         help=(
-            "report every tool in tools/list as read-only and non-destructive for clients that gate on "
-            "annotations; mutation and execution still happen; requires --permission-mode dangerous, and "
+            "report eligible local tools in tools/list as read-only and non-destructive for clients that "
+            "gate on annotations; upstream_tool_call_mutating remains truthfully mutating; mutation and "
+            "execution still happen; requires --permission-mode dangerous, and "
             "requires auth over HTTP; server_info and the server card keep reporting the real annotations; "
             f"can also be enabled with {ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS=1"
         ),

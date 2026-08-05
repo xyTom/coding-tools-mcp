@@ -4,8 +4,10 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from tempfile import TemporaryDirectory
 
+from coding_tools_mcp import upstream as upstream_module
 from coding_tools_mcp.server import Runtime
 from coding_tools_mcp.upstream import (
     BaseUpstreamClient,
@@ -13,6 +15,7 @@ from coding_tools_mcp.upstream import (
     UpstreamError,
     UpstreamServerConfig,
 )
+from coding_tools_mcp.upstream_result import RESULT_INLINE_MAX
 from coding_tools_mcp.upstream_result_store import ResultNotFound
 from tests.compliance.test_upstream_gateway import FakeUpstreamClient, build_manager
 
@@ -101,7 +104,102 @@ class UpstreamLifecycleTests(unittest.TestCase):
         self.assertTrue(client.transport_closed.is_set())
         self.assertEqual(client.close_calls, 1)
 
-    def test_close_prevents_new_calls_with_retryable_disconnect(self) -> None:
+    def test_close_waits_through_result_store_postprocessing(self) -> None:
+        config = self.config()
+        client = FakeUpstreamClient(config, "2025-11-25")
+        manager = build_manager([config], [client])
+        entered = threading.Event()
+        release = threading.Event()
+        original_normalize = upstream_module.normalize_tool_result
+        large_result = {
+            "content": [{"type": "text", "text": "x" * (RESULT_INLINE_MAX + 4_096)}],
+            "structuredContent": {"value": "large"},
+            "isError": False,
+        }
+
+        def blocking_normalize(value: dict[str, object]) -> dict[str, object]:
+            entered.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("test did not release postprocessing")
+            return original_normalize(value)
+
+        results: list[dict[str, object]] = []
+        with patch.object(client, "call_tool_raw", return_value=large_result), patch.object(
+            upstream_module,
+            "normalize_tool_result",
+            side_effect=blocking_normalize,
+        ):
+            call_thread = threading.Thread(
+                target=lambda: results.append(
+                    manager.call_tool(
+                        "remote__search",
+                        {"q": "race"},
+                        result_owner="owner",
+                        store_overflow=True,
+                    )
+                )
+            )
+            call_thread.start()
+            self.assertTrue(entered.wait(timeout=2))
+            close_thread = threading.Thread(target=manager.close)
+            close_thread.start()
+            time.sleep(0.05)
+            self.assertTrue(close_thread.is_alive())
+            self.assertEqual(manager.result_store.owner_handle_count("owner"), 0)
+            release.set()
+            call_thread.join(timeout=3)
+            close_thread.join(timeout=3)
+
+        self.assertFalse(call_thread.is_alive())
+        self.assertFalse(close_thread.is_alive())
+        self.assertIn("_result_handle", results[0]["structuredContent"])
+        self.assertEqual(manager.result_store.owner_handle_count("owner"), 0)
+
+    def test_one_hundred_calls_and_close_have_no_deadlock(self) -> None:
+        config = self.config()
+        client = FakeUpstreamClient(config, "2025-11-25")
+        manager = build_manager([config], [client])
+        barrier = threading.Barrier(101)
+        release = threading.Event()
+        original_normalize = upstream_module.normalize_tool_result
+        results: list[dict[str, object]] = []
+        results_lock = threading.Lock()
+
+        def blocking_normalize(value: dict[str, object]) -> dict[str, object]:
+            barrier.wait(timeout=10)
+            if not release.wait(timeout=5):
+                raise TimeoutError("test did not release calls")
+            return original_normalize(value)
+
+        def invoke(index: int) -> None:
+            result = manager.call_tool("remote__search", {"q": str(index)})
+            with results_lock:
+                results.append(result)
+
+        with patch.object(
+            upstream_module,
+            "normalize_tool_result",
+            side_effect=blocking_normalize,
+        ):
+            threads = [threading.Thread(target=invoke, args=(index,)) for index in range(100)]
+            for thread in threads:
+                thread.start()
+            barrier.wait(timeout=10)
+            close_thread = threading.Thread(target=manager.close)
+            close_thread.start()
+            time.sleep(0.05)
+            self.assertTrue(close_thread.is_alive())
+            release.set()
+            for thread in threads:
+                thread.join(timeout=5)
+            close_thread.join(timeout=5)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertFalse(close_thread.is_alive())
+        self.assertEqual(len(results), 100)
+        self.assertTrue(all(not result["isError"] for result in results))
+
+    def test_close_prevents_new_calls_with_retryable_not_available(self) -> None:
         config = self.config()
         client = FakeUpstreamClient(config, "2025-11-25")
         manager = build_manager([config], [client])
@@ -110,14 +208,14 @@ class UpstreamLifecycleTests(unittest.TestCase):
 
         result = manager.call_tool("remote__search", {"q": "after-close"})
         error = result["structuredContent"]["error"]
-        self.assertEqual(error["code"], "UPSTREAM_DISCONNECTED")
+        self.assertEqual(error["code"], "UPSTREAM_NOT_AVAILABLE")
         self.assertTrue(error["retryable"])
         self.assertEqual(client.close_calls, 1)
         real_client = HttpUpstreamClient(config, "2025-11-25")
         real_client.close()
         with self.assertRaises(UpstreamError) as raised:
             real_client.call_tool_raw("search", {"q": "direct-after-close"})
-        self.assertEqual(raised.exception.code, "UPSTREAM_DISCONNECTED")
+        self.assertEqual(raised.exception.code, "UPSTREAM_NOT_AVAILABLE")
         self.assertTrue(raised.exception.retryable)
 
     def test_two_runtimes_do_not_share_clients_catalog_sessions_or_result_store(self) -> None:

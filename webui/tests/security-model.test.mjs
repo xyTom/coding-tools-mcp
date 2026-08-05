@@ -41,22 +41,23 @@ test('new Gateway server template defaults to restart-only broker exposure', () 
   assert.deepEqual(template.tool_search.custom_synonyms, {});
 });
 
-test('Gateway exposure preview distinguishes direct, pinned, and broker-only tools', () => {
+test('Gateway exposure preview consumes the real aggregate backend contract', () => {
   const activeStatus = {
     exposure_report: {
       servers: [{
         alias: 'remote',
-        tools: [
-          { remote_name: 'search', direct: true },
-          { remote_name: 'create_issue', direct: true },
-          { remote_name: 'delete_issue', direct: true },
-        ],
+        catalog_count: 3,
+        direct_count: 1,
+        broker_only_count: 2,
+        definition_bytes: 812,
       }],
     },
   };
   const direct = gatewayExposurePreview({ servers: { remote: {} } }, activeStatus)[0];
-  assert.deepEqual(direct.direct, ['search', 'create_issue', 'delete_issue']);
-  assert.deepEqual(direct.broker_only, []);
+  assert.equal(direct.catalog_count, 3);
+  assert.equal(direct.direct_count, 1);
+  assert.equal(direct.broker_only_count, 2);
+  assert.equal(direct.definition_bytes, 812);
 
   const broker = gatewayExposurePreview({
     servers: {
@@ -67,9 +68,10 @@ test('Gateway exposure preview distinguishes direct, pinned, and broker-only too
       },
     },
   }, activeStatus)[0];
-  assert.deepEqual(broker.direct, ['search']);
-  assert.deepEqual(broker.pinned, ['search']);
-  assert.deepEqual(broker.broker_only, ['create_issue']);
+  assert.deepEqual(broker.configured_pins, ['search']);
+  assert.deepEqual(broker.configured_include, ['create_issue', 'search']);
+  assert.deepEqual(broker.configured_exclude, []);
+  assert.equal('tools' in broker, false);
 });
 
 test('WebUI source has no obsolete catalog controls or unsafe rendering/storage paths', async () => {

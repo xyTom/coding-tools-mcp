@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from typing import Any
+
+from .json_utils import strict_json_bytes
 
 
 RESULT_INLINE_MAX = 128_000
@@ -41,7 +42,7 @@ class _TextBudget:
         truncated = _truncate_utf8(text, allowance)
         self.remaining_bytes = max(
             0,
-            self.remaining_bytes - len(truncated.encode("utf-8")),
+            self.remaining_bytes - _text_budget_bytes(truncated),
         )
         return truncated
 
@@ -54,40 +55,67 @@ class _DeepBudget:
 
 
 def result_json_bytes(value: Any) -> bytes:
-    return json.dumps(
+    return strict_json_bytes(
         value,
         ensure_ascii=False,
         separators=(",", ":"),
-    ).encode("utf-8")
+        allow_nan=False,
+    )
 
 
 def budget_tool_result(
     result: dict[str, Any],
     *,
     max_bytes: int = RESULT_INLINE_MAX,
+    required_structured_content: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Return an MCP tools/call result that fits the final UTF-8 envelope budget."""
+    """Return a final MCP tools/call result within the UTF-8 envelope budget.
 
-    serialized = result_json_bytes(result)
+    ``required_structured_content`` is merged before every size check and is
+    preserved by all truncation fallbacks. Broker result handles use this path
+    so metadata injection cannot push an already-budgeted envelope over the
+    hard limit.
+    """
+
+    required = dict(required_structured_content or {})
+    candidate = _merge_required_structured_content(result, required) if required else result
+    serialized = result_json_bytes(candidate)
     if len(serialized) <= max_bytes:
-        return result
+        return candidate
 
-    original_bytes = len(serialized)
+    original_bytes = len(result_json_bytes(result))
     for profile in _PROFILES:
-        truncated = _build_truncated_result(result, original_bytes, profile)
+        truncated = _build_truncated_result(
+            result,
+            original_bytes,
+            profile,
+            required_structured_content=required,
+        )
         if len(result_json_bytes(truncated)) <= max_bytes:
             return truncated
 
+    minimal_structured: dict[str, Any] = {
+        "_truncated": True,
+        "_original_bytes": original_bytes,
+    }
+    minimal_structured.update(required)
     minimal = {
         "content": [],
-        "structuredContent": {
-            "_truncated": True,
-            "_original_bytes": original_bytes,
-        },
+        "structuredContent": minimal_structured,
         "isError": bool(result.get("isError", False)),
     }
     if len(result_json_bytes(minimal)) <= max_bytes:
         return minimal
+
+    if required:
+        required_only = {
+            "content": [],
+            "structuredContent": required,
+            "isError": bool(result.get("isError", False)),
+        }
+        if len(result_json_bytes(required_only)) <= max_bytes:
+            return required_only
+        raise ValueError("Required result metadata exceeds the final envelope budget.")
 
     # RESULT_INLINE_MAX is intentionally far above this compact envelope. This
     # branch keeps the helper total for callers that inject an unrealistically
@@ -98,15 +126,30 @@ def budget_tool_result(
     }
 
 
+def _merge_required_structured_content(
+    result: dict[str, Any],
+    required: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(result)
+    structured = result.get("structuredContent")
+    merged_structured = dict(structured) if isinstance(structured, dict) else {}
+    merged_structured.update(required)
+    merged["structuredContent"] = merged_structured
+    return merged
+
+
 def _build_truncated_result(
     result: dict[str, Any],
     original_bytes: int,
     profile: _BudgetProfile,
+    *,
+    required_structured_content: dict[str, Any],
 ) -> dict[str, Any]:
     content = _truncate_content(result.get("content"), profile)
     structured = _truncate_structured_content(result.get("structuredContent"), profile)
     structured["_truncated"] = True
     structured["_original_bytes"] = original_bytes
+    structured.update(required_structured_content)
 
     truncated: dict[str, Any] = {
         "content": content,
@@ -251,8 +294,7 @@ def _deep_limit(value: Any, budget: _DeepBudget, *, depth: int) -> Any:
 
 
 def _truncate_utf8(text: str, max_bytes: int) -> str:
-    encoded = text.encode("utf-8")
-    if len(encoded) <= max_bytes:
+    if _text_budget_bytes(text) <= max_bytes:
         return text
     marker_bytes = _TRUNCATION_MARKER.encode("utf-8")
     if max_bytes <= len(marker_bytes):
@@ -263,8 +305,21 @@ def _truncate_utf8(text: str, max_bytes: int) -> str:
     high = len(text)
     while low < high:
         middle = (low + high + 1) // 2
-        if len(text[:middle].encode("utf-8")) <= target:
+        if _text_budget_bytes(text[:middle]) <= target:
             low = middle
         else:
             high = middle - 1
     return text[:low] + _TRUNCATION_MARKER
+
+
+def _text_budget_bytes(text: str) -> int:
+    """Count UTF-8 bytes, representing unpaired surrogates as JSON escapes."""
+
+    total = 0
+    for character in text:
+        codepoint = ord(character)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            total += 6  # ``\\ud800`` / ``\\udc00`` in ensure_ascii JSON.
+        else:
+            total += len(character.encode("utf-8"))
+    return total

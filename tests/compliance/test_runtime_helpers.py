@@ -1685,16 +1685,21 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
             self.assertTrue(annotations["exec_command"]["openWorldHint"])
             self.assertIsNone(runtime.server_info_payload()["annotation_override"])
 
-    def test_override_makes_every_listed_tool_report_read_only(self) -> None:
+    def test_override_preserves_mutating_broker_route_annotations(self) -> None:
         with TemporaryDirectory() as tmp:
             runtime = Runtime(Path(tmp), permission_mode="dangerous", fake_readonly_annotations=True)
             annotations = {tool["name"]: tool["annotations"] for tool in runtime.list_tools()["tools"]}
             self.assertEqual(set(annotations), set(runtime.exposed_tool_names()))
             for name, annotation in annotations.items():
                 with self.subTest(tool=name):
-                    self.assertIs(annotation["readOnlyHint"], True)
-                    self.assertIs(annotation["destructiveHint"], False)
-                    self.assertIs(annotation["openWorldHint"], False)
+                    if name == "upstream_tool_call_mutating":
+                        self.assertIs(annotation["readOnlyHint"], False)
+                        self.assertIs(annotation["destructiveHint"], True)
+                        self.assertIs(annotation["openWorldHint"], True)
+                    else:
+                        self.assertIs(annotation["readOnlyHint"], True)
+                        self.assertIs(annotation["destructiveHint"], False)
+                        self.assertIs(annotation["openWorldHint"], False)
 
     def test_override_is_disclosed_without_faking_server_info_or_card_annotations(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1723,6 +1728,10 @@ class FakeReadonlyAnnotationTests(unittest.TestCase):
             warnings = runtime.check_exec_environment({})["warnings"]
             self.assertTrue(
                 any("faked as read-only" in warning for warning in warnings),
+                warnings,
+            )
+            self.assertTrue(
+                any("upstream_tool_call_mutating" in warning for warning in warnings),
                 warnings,
             )
 

@@ -8,7 +8,7 @@ from MCP unit tests alone.
 
 | Concern | This runtime in 0.2 | Practical comparison |
 | --- | --- | --- |
-| Tool choice | One stable catalog of 20 low-level coding tools; no profiles or dynamic process tools | A fixed catalog reduces discovery and routing variance, but a host agent can still add its own tools |
+| Tool choice | One stable catalog of 25 low-level coding tools; no profiles or dynamic process tools | A fixed catalog reduces discovery and routing variance, but a host agent can still add its own tools |
 | Editing | `apply_patch` is the sole direct mutation primitive; it stages all files, checks baselines, preserves mode/BOM/newlines, and rolls back partial commits | A whole-file `edit_file` can be simpler for a model, while patching sends fewer unchanged bytes and gives stronger conflict/rollback behavior |
 | Results | Concise bounded `content`, complete `structuredContent`, image bytes once | Avoids paying model context for duplicated JSON, diffs, and base64 |
 | Commands | Ten-second default foreground yield; fixed `write_stdin`, `read_output`, and `kill_session`; bounded sessions and real POSIX PTY | Short tests normally finish in one call; background/interactive work has explicit next actions |

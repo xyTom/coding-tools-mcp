@@ -636,26 +636,17 @@ function gatewayExposurePreview(documentValue, activeStatus = {}) {
     const exclude = new Set(Array.isArray(config.exclude_tools) ? config.exclude_tools : []);
     const pinned = new Set(Array.isArray(config.pinned_tools) ? config.pinned_tools : []);
     const active = activeServers.get(alias);
-    const knownTools = Array.isArray(active?.tools) ? active.tools : [];
-    const filtered = knownTools.filter((tool) => {
-      const remote = String(tool.remote_name || '');
-      return (!include.size || include.has(remote)) && !exclude.has(remote);
-    });
-    const direct = mode === 'direct'
-      ? filtered.map((tool) => tool.remote_name)
-      : filtered.filter((tool) => pinned.has(tool.remote_name)).map((tool) => tool.remote_name);
-    const brokerOnly = mode === 'broker'
-      ? filtered.filter((tool) => !pinned.has(tool.remote_name)).map((tool) => tool.remote_name)
-      : [];
     return {
       alias,
       mode,
       catalog_known: Boolean(active),
-      catalog_count: filtered.length,
-      direct,
-      pinned: mode === 'broker' ? direct : [],
-      broker_only: brokerOnly,
+      catalog_count: Number.isInteger(active?.catalog_count) ? active.catalog_count : null,
+      direct_count: Number.isInteger(active?.direct_count) ? active.direct_count : null,
+      broker_only_count: Number.isInteger(active?.broker_only_count) ? active.broker_only_count : null,
+      definition_bytes: Number.isInteger(active?.definition_bytes) ? active.definition_bytes : null,
       configured_pins: [...pinned].sort(),
+      configured_include: [...include].sort(),
+      configured_exclude: [...exclude].sort(),
     };
   });
 }
@@ -669,14 +660,16 @@ function renderGatewayExposurePreview(container, preview) {
   }
   for (const item of preview) {
     const card = createNode(documentRef, 'article', { className: 'card' });
-    const directText = item.catalog_known ? item.direct.join(', ') || '无' : '当前 Runtime 尚无该 server 的可用 catalog';
-    const brokerText = item.catalog_known ? item.broker_only.join(', ') || '无' : '保存并创建新 Runtime 后才能计算';
+    const directText = item.catalog_known ? String(item.direct_count) : 'unknown';
+    const brokerText = item.catalog_known ? String(item.broker_only_count) : 'unknown';
+    const catalogText = item.catalog_known ? String(item.catalog_count) : 'unknown';
     card.append(
       createNode(documentRef, 'h4', { text: `${item.alias} · ${item.mode}` }),
-      createNode(documentRef, 'p', { text: `Direct (${item.direct.length}): ${directText}` }),
-      createNode(documentRef, 'p', { text: `Pinned (${item.pinned.length}): ${item.pinned.join(', ') || '无'}` }),
-      createNode(documentRef, 'p', { text: `Broker-only (${item.broker_only.length}): ${brokerText}` }),
-      createNode(documentRef, 'p', { className: 'muted', text: `Catalog after include/exclude: ${item.catalog_known ? item.catalog_count : 'unknown'}；configured pins: ${item.configured_pins.join(', ') || '无'}` }),
+      createNode(documentRef, 'p', { text: `Active Runtime direct count: ${directText}` }),
+      createNode(documentRef, 'p', { text: `Active Runtime broker-only count: ${brokerText}` }),
+      createNode(documentRef, 'p', { text: `Active Runtime catalog count: ${catalogText}` }),
+      createNode(documentRef, 'p', { className: 'muted', text: `Configured pins: ${item.configured_pins.join(', ') || '无'}；include: ${item.configured_include.join(', ') || '全部'}；exclude: ${item.configured_exclude.join(', ') || '无'}` }),
+      createNode(documentRef, 'p', { className: 'muted', text: 'Active Runtime 仅提供聚合计数；草稿过滤结果需在新 MCP session/Runtime 或服务重启后确认。' }),
     );
     container.append(card);
   }

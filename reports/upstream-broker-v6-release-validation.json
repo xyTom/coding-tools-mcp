@@ -52,9 +52,9 @@
         "top5": [
           "fixture__repo_search",
           "fixture__database_query",
-          "fixture__record_fetch",
+          "fixture__literature_search",
           "fixture__annotation_search",
-          "fixture__literature_search"
+          "fixture__record_fetch"
         ]
       },
       {
@@ -132,8 +132,8 @@
         "top5": [
           "fixture__database_query",
           "fixture__annotation_search",
-          "fixture__literature_search",
           "fixture__repo_search",
+          "fixture__literature_search",
           "fixture__table_schema"
         ]
       },
@@ -192,9 +192,9 @@
         "top5": [
           "fixture__literature_search",
           "fixture__database_query",
-          "fixture__record_fetch",
           "fixture__annotation_search",
-          "fixture__repo_search"
+          "fixture__repo_search",
+          "fixture__record_fetch"
         ]
       },
       {
@@ -344,12 +344,12 @@
     ],
     "performance": {
       "build_iterations": 25,
-      "build_ms_p50": 85.8537,
-      "build_ms_p95": 93.2954,
+      "build_ms_p50": 92.5886,
+      "build_ms_p95": 100.991,
       "catalog_size": 500,
       "search_iterations": 600,
-      "search_ms_p50": 14.3123,
-      "search_ms_p95": 20.2941
+      "search_ms_p50": 14.3774,
+      "search_ms_p95": 22.1425
     },
     "top1_hits": 30,
     "top1_rate": 1.0,

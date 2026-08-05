@@ -138,6 +138,8 @@ class MCPClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             **subprocess_group_kwargs(),
         )
         deadline = time.time() + float(os.environ.get("CODING_TOOLS_MCP_STARTUP_TIMEOUT", "10"))
@@ -180,17 +182,27 @@ class MCPClient:
                 if os.name == "nt":
                     self.process.terminate()
                 else:
-                    try:
-                        os.killpg(self.process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+                    kill_process_group = getattr(os, "killpg", None)
+                    if kill_process_group is not None:
+                        try:
+                            kill_process_group(
+                                self.process.pid,
+                                getattr(signal, "SIGTERM", 15),
+                            )
+                        except ProcessLookupError:
+                            pass
                 try:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     if os.name == "nt":
                         self.process.kill()
                     else:
-                        os.killpg(self.process.pid, signal.SIGKILL)
+                        kill_process_group = getattr(os, "killpg", None)
+                        if kill_process_group is not None:
+                            kill_process_group(
+                                self.process.pid,
+                                getattr(signal, "SIGKILL", 9),
+                            )
                     self.process.wait(timeout=2)
         finally:
             for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
@@ -372,6 +384,8 @@ class StdioMCPClient:
             stderr=subprocess.PIPE,
             env=env,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             **kwargs,
         )
         threading.Thread(target=self._drain_stdout, daemon=True).start()

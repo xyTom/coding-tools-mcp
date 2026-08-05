@@ -97,8 +97,10 @@ must never describe this switch as safe or genuinely read-only.
 - Raw definitions remain server-side diagnostics. Public definitions replace
   `name` with the stable namespace, recursively sanitize untrusted metadata,
   retain supported public schema and real annotations, and receive a public
-  schema digest. The local fake-readonly compatibility override never changes
-  effective risk or Broker routing.
+  schema digest. Containment budgets are widen-only: omitted enum values,
+  properties, or non-monotonic combination branches cannot make previously
+  legal arguments invalid. The local fake-readonly compatibility override never
+  changes effective risk or Broker routing.
 - The five Broker tools are fixed local `TOOL_REGISTRY` entries. Search and
   describe use only the current Runtime's frozen catalog. Read-only and mutating
   calls are separate routes; mutating calls require the matching public digest,
@@ -108,12 +110,18 @@ must never describe this switch as safe or genuinely read-only.
   Admin changes are restart-only and do not mutate an existing Runtime.
 - `structuredContent`, `content`, and `isError` from a valid upstream
   `tools/call` result are preserved and Broker dispatch does not double-wrap the
-  MCP envelope. Missing `content` is normalized to an empty array. Oversized
-  Broker results may be stored before truncation in a short-lived, per-manager,
-  session-owned ResultStore and paged through the fixed fetch tool.
+  MCP envelope. Content-only upstream results remain content-only, so the two
+  passthrough Broker call tools omit `outputSchema`. Missing `content` is
+  normalized to an empty array. Oversized Broker results may be stored before
+  truncation in a short-lived, per-manager, session-owned ResultStore and paged
+  through the fixed fetch tool. Required handle metadata is included inside the
+  final 128,000-byte budget calculation and survives every fallback.
 - Timeout, disconnect, oversized response, invalid JSON-RPC envelope, invalid
   schema/result shape, HTTP failure, and upstream RPC errors use stable
   structured Gateway errors.
+- All MCP, Admin, OAuth DCR, and upstream transport JSON inputs use one
+  strict decoder: integers are limited to 4,300 digits and floating-point
+  values that overflow to non-finite representations are rejected.
 - Gateway tools are remote capabilities. Local Workspace path confinement and
   local permission gates describe local tools only; they are not claimed as a
   security boundary for a remote server. The remote server controls its own
@@ -237,7 +245,10 @@ The following block is consumed by the Phase 02 contract tests.
       "changes_catalog": false,
       "changes_handlers": false,
       "requires_permission_mode": "dangerous",
-      "http_requires_authentication": true
+      "http_requires_authentication": true,
+      "exempt_tools": [
+        "upstream_tool_call_mutating"
+      ]
     }
   },
   "legacy_tool_profile_migration": {
@@ -316,7 +327,9 @@ The following block is consumed by the Phase 02 contract tests.
     "immutable_per_runtime": true,
     "list_changed": false,
     "config_before_initialize": true,
-    "schema": "preserve_except_public_name",
+    "schema": "sanitized_public_definition",
+    "schema_containment_budget": "widen_only",
+    "raw_schema_storage": "server_side_only",
     "annotations": "preserve_real",
     "structured_content": "preserve",
     "content": "normalize_boundary_without_json_assumption",
@@ -338,8 +351,53 @@ The following block is consumed by the Phase 02 contract tests.
     ],
     "broker_tools_fixed_local_catalog": true,
     "broker_public_schema_digest": true,
+    "broker_mutating_digest_source": "search_or_describe_not_session_proof",
     "broker_argument_validation": "public_input_schema",
     "broker_passthrough": true,
+    "broker_call_output_schema": "omitted_for_passthrough",
+    "result_handle_budgeting": "reserved_before_final_size_check",
+    "upstream_result_unicode": "utf8_with_surrogate_escape_fallback",
+    "upstream_call_after_close_error": "UPSTREAM_NOT_AVAILABLE",
+    "catalog_search_index_snapshot": "single_build_immutable",
+    "catalog_tokenizer_snapshot": "sealed_immutable_synonym_reverse_and_phrase_maps",
+    "upstream_definition_snapshot": "immutable_mapping_sequence_wrappers_with_iterative_mutable_deepcopy_export",
+    "schema_assertion_projection": "bounded_by_schema_containment_depth",
+    "upstream_discovery_schema_snapshot": "sanitize_then_iterative_freeze_without_recursive_copy",
+    "upstream_structured_content": "object_when_present",
+    "json_container_depth_semantics": "root_container_is_level_1_scalar_adds_no_level",
+    "upstream_result_structure_depth": 64,
+    "upstream_result_nesting_error": "UPSTREAM_PROTOCOL_ERROR",
+    "upstream_rpc_response_id": "exact_integer_request_id_not_boolean_float_or_string",
+    "upstream_rpc_error_code": "required_exact_integer",
+    "upstream_error_details_depth": 64,
+    "upstream_error_details_depth_scope": "per_untrusted_detail_value_excluding_gateway_and_status_wrappers",
+    "upstream_error_details_json": "strict_json_or_bounded_omission",
+    "upstream_error_details_overflow": "rpc_protocol_error_or_bounded_omission",
+    "upstream_status_error_mapping": "preserve_safe_envelope_bound_details_only",
+    "upstream_error_details_shared_container_scope": "cycles_or_shared_within_single_value_omitted_cross_top_level_identity_normalized_independently",
+    "upstream_stdio_response_limit_bytes": 1048576,
+    "upstream_stdio_oversize_error": "UPSTREAM_RESPONSE_TOO_LARGE",
+    "json_schema_equality": "exact_typed_json_value_semantics",
+    "unique_items_validation": "canonical_fingerprint_expected_linear",
+    "strict_json_input": "utf8_bounded_integer_finite_float_structural_errors_normalized",
+    "strict_json_output": "bounded_integer_finite_float_surrogate_escape_fallback",
+    "json_encoding": "utf-8_only",
+    "mcp_stdio_encoding": "raw_pipe_utf8",
+    "mcp_stdio_output_unicode": "utf8_with_surrogate_escape_fallback",
+    "upstream_stdio_output_unicode": "utf8_with_surrogate_escape_fallback",
+    "json_integer_digit_limit": 4300,
+    "json_integer_limit_source": "project_fixed_independent_of_python_global",
+    "json_integer_lifecycle": "input_schema_result_and_transport",
+    "json_nesting_failure": "parse_or_protocol_error",
+    "strict_json_boundaries": [
+      "mcp_stdio",
+      "mcp_http",
+      "admin_http",
+      "oauth_dcr",
+      "upstream_stdio",
+      "upstream_http",
+      "upstream_sse"
+    ],
     "result_store": "session_owned_ttl_in_memory",
     "dynamic_activation": false
   },
@@ -403,7 +461,8 @@ The following block is consumed by the Phase 02 contract tests.
     "gateway_change": "persist_and_restart_only",
     "gateway_dynamic_reload": false,
     "gateway_new_server_default_expose_mode": "broker",
-    "gateway_exposure_preview": "direct_pinned_broker_only",
+    "gateway_exposure_report": "aggregate_counts_only",
+    "gateway_exposure_preview": "active_aggregate_counts_plus_draft_configuration",
     "gateway_activation_copy": "new_session_runtime_or_service_restart",
     "gateway_list_changed_claim": false,
     "secret_material_displayed": false,

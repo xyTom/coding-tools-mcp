@@ -1,6 +1,12 @@
 # T11 Handoff — Stable-Catalog Upstream Broker Release Validation
 
-Status: **complete**
+Status: **complete (superseded by T12 final gate)**
+
+> **Historical evidence only.** T11 is not a current merge-readiness source.
+> Test counts, implementation notes, and review ordering below are point-in-time
+> records and may be obsolete after T12. Current evidence is exclusively:
+> `T12-post-review-remediation.md`, `upstream-broker-traceability.md`, the current
+> generated reports, and a hash-stable independent final review.
 
 Parent HEAD: `414aec64a99c2e2dd5a3496ec5e6846c5746d103`
 
@@ -17,8 +23,108 @@ Commit subject: `docs(handoff): validate stable-catalog upstream broker`
 - Manager `start_server()` / `stop_server()` / reload APIs: **not implemented**
 - Existing Runtime mutation after Admin writes: **not implemented by design**
 
-T11 adds no product runtime behavior. It adds one repeatable release-validation script,
-one machine-readable result report, and this handoff.
+The original T11 validation commit added no product runtime behavior; it added one
+repeatable release-validation script, one machine-readable result report, and
+this handoff. Post-review runtime and protocol changes are now owned by T12. The historical detail below is retained as review evidence, not as part of the original T11 no-feature-change claim.
+
+## Post-review remediation
+
+Three independent merge-readiness review rounds against HEAD
+`60ef13de6b33390fef7a17fc07991c6d4a33d3a6` found defects that were not covered
+by the original T00-T11 regression set. The working tree closes those findings
+under the T12 post-review remediation task card, without implementing deferred dynamic scope.
+
+Closed in the first review round:
+
+- `upstream_tool_call_mutating` keeps truthful mutating annotations under the
+  compatibility fake-readonly override;
+- Manager-level call leases cover remote I/O, normalization, result budgeting,
+  ResultStore writes, and handle injection;
+- untrusted public Schema `pattern` values are removed;
+- Streamable HTTP session requests and notifications send
+  `MCP-Protocol-Version`;
+- retained `not` and `uniqueItems` constraints are enforced;
+- nested `$ref` nodes degrade without forcing object arguments;
+- MCP and upstream JSON boundaries reject non-finite numbers;
+- per-server observability is aggregate-only;
+- English queries expand back to Chinese synonym keys;
+- README and the machine-readable integration contract are synchronized.
+
+Closed in the second review round:
+
+- required result-handle metadata is budgeted before the final size check,
+  survives all fallbacks, and the Manager defensively rechecks the serialized
+  envelope against the 128,000-byte hard limit;
+- `uniqueItems` uses canonical typed fingerprints rather than an O(n²) pairwise
+  comparison, with a 10,000-item performance regression;
+- `const`, `enum`, and `uniqueItems` use JSON-value equality semantics, so
+  booleans remain distinct from numbers while numerically equal JSON numbers
+  compare equal;
+- unresolved or assertion-free branches in `allOf`, `anyOf`, and `oneOf` degrade
+  conservatively without creating false multi-match rejection;
+- the two Broker passthrough call tools omit `outputSchema`, allowing legal
+  content-only upstream results to remain unchanged;
+- all fake-readonly warnings, docstrings, startup messages, and CLI help now
+  disclose the `upstream_tool_call_mutating` exemption;
+- the modified stdio transport is type-clean; mypy now reports only the two
+  pre-existing baseline errors in `tool_results.py` and `server.py`.
+
+Closed in the third review round:
+
+- numeric fingerprints use `Decimal(str(value))` without context-sensitive
+  normalization, preserving exact equality for adjacent 30-, 100-, 1,000-, and
+  4,000-digit integers while retaining `1 == 1.0` and `-0 == 0`;
+- restrictive cardinality budgets are widen-only: oversized `enum`, `anyOf`,
+  and `oneOf` constraints are removed, excess `allOf` branches are omitted, and
+  truncated property maps no longer retain restrictive `additionalProperties`;
+- partially sanitized assertions inside `not` and `oneOf` are treated as
+  unknown, preventing containment from becoming stricter through negation or
+  exclusive matching;
+- real Broker regressions cover the 51st enum value, 41st declared property,
+  schema-valued `additionalProperties`, and 11th `anyOf`/`oneOf` branch.
+
+Closed in the third review round:
+
+- one shared strict JSON loader now covers MCP stdio/HTTP, Admin JSON bodies,
+  OAuth dynamic client registration, and upstream stdio/HTTP/SSE;
+- 4,300-digit integers remain valid, while 4,301-digit integers produce stable
+  parse/protocol errors without terminating the stdio loop or HTTP request
+  handling;
+- floating-point literals such as `1e309` that overflow to infinity are rejected
+  at the same boundaries;
+- `SPEC.md` and `docs/competitive-analysis.md` now report the fixed 25-tool
+  catalog, and the spec lists all five Broker tools.
+
+Additional final-review protocol closure:
+
+- byte transport input is explicitly UTF-8 only; UTF-16/UTF-32 are rejected;
+- decoder `RecursionError` is normalized to parse/protocol errors and does
+  not terminate stdio readers or HTTP request handling;
+- the project 4,300-digit integer limit is independent of Python's
+  process-global `int_max_str_digits` setting.
+- production MCP stdio uses raw binary pipes with UTF-8 decoding/encoding and
+  LF framing, independent of Windows GBK/CP936 text-wrapper defaults;
+- stdio response encoding preserves ordinary Unicode as real UTF-8 and falls
+  back to ASCII JSON escapes for unpaired high/low surrogates, so adversarial
+  `\ud800`/`\udc00` values cannot terminate the process;
+- the real subprocess regression also verifies emoji output remains real UTF-8
+  and a subsequent `tools/list` request succeeds.
+- a real `python -m coding_tools_mcp --stdio` subprocess regression runs with
+  `PYTHONUTF8=0` and no `PYTHONIOENCODING`, preserves Chinese UTF-8
+  paths/content, returns `-32700` for invalid UTF-8, then continues.
+
+Historical T11 validation result (superseded by T12):
+
+```text
+192 focused tests passed in 35.477s (skipped=37)
+423 full-discovery tests passed in 80.622s
+OK (skipped=84)
+```
+
+The release-validation script passed again with 30/30 top-1 and 30/30 top-5
+search fixtures. The tracked machine-readable report was regenerated with
+`uv run --frozen python scripts/validate_upstream_broker_release.py --output reports/upstream-broker-v6-release-validation.json`.
+`git diff --check` and Ruff passed for all changed Python files.
 
 ## Validation artifacts
 
@@ -55,7 +161,7 @@ Environment included explicit HOME/USERPROFILE and telemetry disabled.
 Result:
 
 ```text
-Ran 391 tests in 87.030s
+Ran 423 tests in 80.622s
 OK (skipped=84)
 ```
 
@@ -187,5 +293,6 @@ The following remain outside stable-catalog Broker v6:
 
 ## Release disposition
 
-The branch is ready for review or merge as a stable-catalog Broker implementation.
-No remote push, pull request, merge, tag, or release publication was performed by T11.
+The post-review merge blockers are closed in the working tree. The implementation
+is ready for final review after these changes are committed. No remote push, pull
+request, merge, tag, or release publication was performed.

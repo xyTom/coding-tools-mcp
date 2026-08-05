@@ -6,7 +6,8 @@ import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from types import MappingProxyType
+from typing import Protocol, cast, runtime_checkable
 
 
 DEFAULT_SEARCH_LIMIT = 5
@@ -94,20 +95,43 @@ def merge_synonyms(
     return merged
 
 
-class ToolTokenizer:
-    """Instance-scoped tokenizer for tool names, metadata, and multilingual queries."""
+class ToolTokenizer(tuple[object, ...]):
+    """Tuple-backed immutable tokenizer snapshot for metadata and queries."""
 
-    def __init__(self, synonyms: Mapping[str, Sequence[str]] | None = None) -> None:
-        self.synonyms = merge_synonyms({}, synonyms or {})
-        self.known_phrases = frozenset(self.synonyms)
+    __slots__ = ()
+
+    def __new__(
+        cls,
+        synonyms: Mapping[str, Sequence[str]] | None = None,
+    ) -> "ToolTokenizer":
+        merged = merge_synonyms({}, synonyms or {})
+        frozen_synonyms: Mapping[str, tuple[str, ...]] = MappingProxyType(
+            {key: tuple(values) for key, values in merged.items()}
+        )
+        known_phrases = frozenset(frozen_synonyms)
         reverse: dict[str, list[str]] = {}
-        for values in self.synonyms.values():
+        for key, values in frozen_synonyms.items():
             group = _stable_unique(values)
             for value in group:
-                reverse[value] = _stable_unique(reverse.get(value, []) + group)[
-                    :MAX_EXPANSIONS_PER_TERM
-                ]
-        self.reverse_synonyms = reverse
+                reverse[value] = _stable_unique(
+                    reverse.get(value, []) + [key, *group]
+                )[:MAX_EXPANSIONS_PER_TERM]
+        frozen_reverse: Mapping[str, tuple[str, ...]] = MappingProxyType(
+            {key: tuple(values) for key, values in reverse.items()}
+        )
+        return tuple.__new__(cls, (frozen_synonyms, known_phrases, frozen_reverse))
+
+    @property
+    def synonyms(self) -> Mapping[str, tuple[str, ...]]:
+        return cast(Mapping[str, tuple[str, ...]], self[0])
+
+    @property
+    def known_phrases(self) -> frozenset[str]:
+        return cast(frozenset[str], self[1])
+
+    @property
+    def reverse_synonyms(self) -> Mapping[str, tuple[str, ...]]:
+        return cast(Mapping[str, tuple[str, ...]], self[2])
 
     def tokenize(self, text: str) -> list[str]:
         normalized = unicodedata.normalize("NFKC", str(text))
@@ -324,8 +348,8 @@ class CatalogSearchIndex(SearchBackend):
     ) -> None:
         merged = merge_synonyms(BUILTIN_SYNONYMS, synonyms)
         self._tokenizer = ToolTokenizer(merged)
-        self._entries: dict[str, UpstreamToolCatalogEntry] = {}
-        self._fields: dict[str, BM25Field] = {}
+        self._entries: Mapping[str, UpstreamToolCatalogEntry] = {}
+        self._fields: Mapping[str, BM25Field] = {}
         self._built = False
 
     @property
@@ -333,21 +357,23 @@ class CatalogSearchIndex(SearchBackend):
         return self._tokenizer
 
     def build(self, entries: Mapping[str, UpstreamToolCatalogEntry]) -> None:
-        self._entries = dict(entries)
-        self._fields = {
+        if self._built:
+            raise RuntimeError("CatalogSearchIndex snapshots cannot be rebuilt.")
+        frozen_entries = dict(entries)
+        fields = {
             name: BM25Field(name=name, weight=weight)
             for name, weight in FIELD_WEIGHTS.items()
         }
         tokenize = self._tokenizer.tokenize
-        for doc_id, entry in self._entries.items():
-            self._fields["name"].add_document(doc_id, tokenize(entry.remote_name))
-            self._fields["title"].add_document(doc_id, tokenize(entry.title))
-            self._fields["tags"].add_document(
+        for doc_id, entry in frozen_entries.items():
+            fields["name"].add_document(doc_id, tokenize(entry.remote_name))
+            fields["title"].add_document(doc_id, tokenize(entry.title))
+            fields["tags"].add_document(
                 doc_id,
                 [token for tag in entry.tags for token in tokenize(tag)],
             )
-            self._fields["alias"].add_document(doc_id, tokenize(entry.server_alias))
-            self._fields["arguments"].add_document(
+            fields["alias"].add_document(doc_id, tokenize(entry.server_alias))
+            fields["arguments"].add_document(
                 doc_id,
                 [
                     token
@@ -355,12 +381,14 @@ class CatalogSearchIndex(SearchBackend):
                     for token in tokenize(argument_name)
                 ],
             )
-            self._fields["description"].add_document(
+            fields["description"].add_document(
                 doc_id,
                 tokenize(entry.description),
             )
-        for field in self._fields.values():
+        for field in fields.values():
             field.finalize()
+        self._entries = MappingProxyType(frozen_entries)
+        self._fields = MappingProxyType(fields)
         self._built = True
 
     def search(
