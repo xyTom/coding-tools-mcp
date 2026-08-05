@@ -1,5 +1,7 @@
 # Coding Tools MCP
 
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2FxyTom%2Fcoding-tools-mcp.svg)](https://mcptoplist.com/server/glama%2FxyTom%2Fcoding-tools-mcp)
+
 **English** | [简体中文](README.zh-CN.md)
 
 > Give any AI chat or agent a safe pair of hands on your codebase.
