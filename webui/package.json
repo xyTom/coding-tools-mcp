@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test:models": "node --test tests/settings-model.test.mjs tests/security-model.test.mjs",
+    "test:models": "node --test tests/settings-model.test.mjs tests/security-model.test.mjs tests/i18n.test.mjs",
     "test:dom": "node --test tests/dom-interactions.test.mjs",
     "test": "npm run test:models && npm run test:dom",
     "build": "node scripts/build.mjs"

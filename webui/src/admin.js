@@ -1,3 +1,10 @@
+const i18n = globalThis.McpI18n || {
+  getLocale: () => 'zh-CN',
+  initI18n: () => {},
+  translateText: (value) => String(value ?? ''),
+};
+const translateUi = (value) => i18n.translateText(value, i18n.getLocale());
+
 class ApiError extends Error {
   constructor(status, payload, message) {
     super(message || payload?.error?.message || `Admin request failed with HTTP ${status}.`);
@@ -287,13 +294,16 @@ function renderOAuthItems(container, items, collection, onAction) {
 }
 
 function confirmDestructive(documentRef, { title, message, confirmLabel = '确认', returnFocus } = {}) {
+  const localizedTitle = translateUi(title || '确认操作');
+  const localizedMessage = translateUi(message || '');
+  const localizedLabel = translateUi(confirmLabel);
   const dialog = documentRef.getElementById('confirmDialog');
   if (!dialog || typeof dialog.showModal !== 'function') {
-    return Promise.resolve(globalThis.confirm ? globalThis.confirm(message || title || '确认操作？') : false);
+    return Promise.resolve(globalThis.confirm ? globalThis.confirm(localizedMessage || localizedTitle || translateUi('确认操作？')) : false);
   }
-  documentRef.getElementById('confirmTitle').textContent = title || '确认操作';
-  documentRef.getElementById('confirmMessage').textContent = message || '';
-  documentRef.getElementById('confirmAccept').textContent = confirmLabel;
+  documentRef.getElementById('confirmTitle').textContent = localizedTitle;
+  documentRef.getElementById('confirmMessage').textContent = localizedMessage;
+  documentRef.getElementById('confirmAccept').textContent = localizedLabel;
   return new Promise((resolve) => {
     const finish = () => {
       dialog.removeEventListener('close', finish);
@@ -335,6 +345,7 @@ async function handleSettingsSave({ api, state, documentRef }) {
 }
 
 function initAdminApp(documentRef = document) {
+  i18n.initI18n();
   const model = globalThis.McpSettingsModel;
   const copy = globalThis.McpSettingsCopy;
   const workspaceEditor = globalThis.McpWorkspaceEditor;
@@ -361,7 +372,10 @@ function initAdminApp(documentRef = document) {
       section.classList.toggle('active', active);
     }
     for (const button of documentRef.querySelectorAll('.nav-item')) {
-      button.classList.toggle('active', button.dataset.section === name);
+      const active = button.dataset.section === name;
+      button.classList.toggle('active', active);
+      if (active) button.setAttribute('aria-current', 'page');
+      else button.removeAttribute('aria-current');
     }
     byId('mainContent')?.focus();
   }

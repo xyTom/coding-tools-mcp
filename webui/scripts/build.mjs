@@ -10,6 +10,7 @@ const scripts = [
   'settings-model.js',
   'workspace-editor.js',
   'settings-page.js',
+  'i18n.js',
   'admin.js',
 ];
 

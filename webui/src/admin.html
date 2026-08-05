@@ -10,11 +10,16 @@
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
   <header class="topbar">
-    <div>
-      <p class="eyebrow">coding-tools-mcp</p>
-      <h1>Admin Console</h1>
+    <div class="brand-lockup">
+      <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 7.5 12 4l5 3.5v5L12 16l-5-3.5z"/><path d="m7 12.5-3 2v4L8 21l4-2.5V16m5-3.5 3 2v4L16 21l-4-2.5"/></svg></div>
+      <div>
+        <p class="eyebrow">coding-tools-mcp</p>
+        <h1>MCP 管理台</h1>
+      </div>
     </div>
-    <form id="authForm" class="auth-form" autocomplete="off">
+    <div class="topbar-actions">
+      <button class="secondary language-toggle" type="button" data-language-toggle data-i18n-skip aria-label="Switch to English" title="Switch to English"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.7 5.5 3.7 9S14.4 18.5 12 21c-2.4-2.5-3.7-5.5-3.7-9S9.6 5.5 12 3z"/></svg><span data-locale-label>EN</span></button>
+      <form id="authForm" class="auth-form" autocomplete="off">
       <div>
         <label for="adminToken">本次页面使用的 Admin token</label>
         <input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required>
@@ -22,12 +27,13 @@
       </div>
       <button type="submit">连接</button>
       <button id="forgetToken" type="button" class="secondary">清除</button>
-    </form>
+      </form>
+    </div>
   </header>
 
   <div class="layout">
     <nav aria-label="Admin 页面" class="sidebar">
-      <button class="nav-item active" data-section="overview" type="button">概览</button>
+      <button class="nav-item active" data-section="overview" type="button" aria-current="page">概览</button>
       <button class="nav-item" data-section="settings" type="button">设置</button>
       <button class="nav-item" data-section="workspaces" type="button">Workspace</button>
       <button class="nav-item" data-section="gateway" type="button">Gateway</button>
@@ -147,6 +153,7 @@
   <script type="module" src="./settings-model.js"></script>
   <script type="module" src="./workspace-editor.js"></script>
   <script type="module" src="./settings-page.js"></script>
+  <script type="module" src="./i18n.js"></script>
   <script type="module" src="./admin.js"></script>
 </body>
 </html>

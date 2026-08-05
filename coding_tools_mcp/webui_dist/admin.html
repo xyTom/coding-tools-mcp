@@ -109,16 +109,245 @@ dialog::backdrop { background:rgba(0,0,0,.55); }
   main { padding:.8rem; }
   .toolbar input, .toolbar select { width:100%; }
 }
+
+/* Console design refresh: preserve the broker DOM while applying the shared design system. */
+:root {
+  --primary: #1e3a5f;
+  --primary-hover: #152d49;
+  --surface-soft: #f8fafc;
+  --surface-tint: #f1f6fb;
+  --line-strong: #b9c6d6;
+  --blue: #2563eb;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, .05);
+  --shadow-md: 0 8px 24px rgba(30, 58, 95, .08);
+  --shadow-lg: 0 24px 64px rgba(15, 23, 42, .16);
+  --bg: #f4f7fb;
+  --surface: #ffffff;
+  --text: #0f172a;
+  --muted: #64748b;
+  --line: #d8e1ec;
+  --accent: #167044;
+  --accent-text: #ffffff;
+  --danger: #b42318;
+  --warning: #8a5a00;
+  --good: #167044;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --primary: #d7e7f7;
+    --primary-hover: #ffffff;
+    --surface-soft: #172231;
+    --surface-tint: #1d2b3c;
+    --line-strong: #506176;
+    --blue: #7cb7ff;
+    --bg: #0d141d;
+    --surface: #151f2b;
+    --text: #edf4fb;
+    --muted: #aebdcb;
+    --line: #35465a;
+    --accent: #55c98b;
+    --accent-text: #07150d;
+    --danger: #ff9a91;
+    --warning: #ffd081;
+    --good: #78dca7;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, .24);
+    --shadow-md: 0 10px 28px rgba(0, 0, 0, .28);
+    --shadow-lg: 0 26px 72px rgba(0, 0, 0, .42);
+  }
+}
+
+html { scroll-behavior: smooth; }
+body {
+  min-height: 100dvh;
+  background:
+    radial-gradient(circle at 10% 0%, color-mix(in srgb, var(--blue) 7%, transparent), transparent 28rem),
+    var(--bg);
+  letter-spacing: .005em;
+}
+button {
+  border-radius: 10px;
+  font-weight: 680;
+  box-shadow: var(--shadow-sm);
+  transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+button:hover { filter: none; box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 18%, transparent); }
+button:active { transform: translateY(1px); box-shadow: none; }
+button.secondary { border-color: var(--line-strong); background: var(--surface); color: var(--primary); }
+button.secondary:hover { background: var(--surface-tint); border-color: color-mix(in srgb, var(--primary) 45%, var(--line)); }
+button.danger:hover { background: color-mix(in srgb, var(--danger) 82%, #000); }
+input, select, textarea {
+  border-color: var(--line-strong);
+  border-radius: 10px;
+  box-shadow: inset 0 1px 1px rgba(15, 23, 42, .025);
+  transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
+}
+input:hover, select:hover, textarea:hover { border-color: color-mix(in srgb, var(--primary) 42%, var(--line)); }
+input:focus, select:focus, textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 17%, transparent); outline: none; }
+.skip-link {
+  top: .65rem;
+  left: .75rem;
+  transform: translateY(-160%);
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  color: var(--surface);
+  font-weight: 700;
+  transition: transform .18s ease;
+}
+.skip-link:focus { top: .65rem; transform: translateY(0); }
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  align-items: center;
+  padding: .85rem 1.4rem;
+  border-bottom-color: color-mix(in srgb, var(--line) 88%, transparent);
+  background: color-mix(in srgb, var(--surface) 93%, transparent);
+  box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(16px);
+}
+.brand-lockup { display: flex; align-items: center; gap: .75rem; min-width: max-content; }
+.brand-mark {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  color: #fff;
+  background: linear-gradient(145deg, #294f78, #1e3a5f);
+  box-shadow: 0 7px 18px rgba(30, 58, 95, .22);
+}
+.brand-mark svg, .language-toggle svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.brand-lockup h1 { font-size: 1.18rem; letter-spacing: -.02em; }
+.topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: .65rem; min-width: 0; }
+.language-toggle { min-width: 64px; padding-inline: .7rem; gap: .4rem; font-variant-numeric: tabular-nums; }
+.language-toggle svg { width: 18px; height: 18px; }
+.auth-form {
+  grid-template-columns: minmax(230px, 430px) auto auto;
+  padding-left: .7rem;
+  border-left: 1px solid var(--line);
+}
+.layout { grid-template-columns: 228px minmax(0, 1fr); min-height: calc(100dvh - 76px); }
+.sidebar {
+  position: sticky;
+  top: 76px;
+  align-self: start;
+  height: calc(100dvh - 76px);
+  padding: 1.15rem .8rem;
+  overflow: auto;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+}
+.nav-item {
+  position: relative;
+  width: 100%;
+  min-height: 44px;
+  padding: .65rem .8rem;
+  border-radius: 10px;
+  color: var(--muted);
+  font-weight: 620;
+  box-shadow: none;
+}
+.nav-item:hover { color: var(--primary); background: var(--surface-tint); box-shadow: none; }
+.nav-item.active {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--blue) 11%, var(--surface));
+  border-color: color-mix(in srgb, var(--blue) 28%, var(--line));
+  font-weight: 760;
+}
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  width: 3px;
+  height: 22px;
+  border-radius: 4px;
+  background: var(--accent);
+}
+main { padding: 2rem clamp(1.1rem, 3vw, 2.75rem) 6.5rem; }
+.page-section { max-width: 1440px; margin: 0 auto; animation: page-enter .2s ease both; }
+@keyframes page-enter { from { opacity: .42; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.section-heading { align-items: flex-end; margin-bottom: 1.35rem; }
+.section-heading h2 { font-size: clamp(1.55rem, 2.4vw, 2rem); letter-spacing: -.025em; }
+.status {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: var(--shadow-sm);
+}
+.card, .workspace-card {
+  border-color: var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+.card:hover, .workspace-card:hover { border-color: color-mix(in srgb, var(--blue) 24%, var(--line)); box-shadow: var(--shadow-md); }
+.card-grid { gap: .9rem; }
+.code-block {
+  border: 1px solid #263a55;
+  background: #122033;
+  color: #e8f0f8;
+}
+.alert { border-radius: 10px; }
+.danger-zone { background: color-mix(in srgb, var(--danger) 6%, var(--surface)); }
+.conversation-card button { border-radius: var(--radius-md); }
+.message, .context-entry { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+dialog { border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); }
+
+@media (max-width: 980px) {
+  .topbar { align-items: flex-start; flex-direction: column; }
+  .topbar-actions { width: 100%; justify-content: flex-start; }
+  .auth-form { width: 100%; padding-left: 0; border-left: 0; }
+  .layout { min-height: calc(100dvh - 150px); }
+  .sidebar { top: 150px; height: calc(100dvh - 150px); }
+}
+@media (max-width: 850px) {
+  .topbar { position: static; }
+  .topbar-actions { align-items: stretch; flex-wrap: wrap; }
+  .language-toggle { flex: 0 0 auto; }
+  .auth-form { flex: 1 1 100%; }
+  .sidebar { position: sticky; top: 0; height: auto; padding: .65rem; }
+  .nav-item.active::before { display: none; }
+  main { padding-top: 1.35rem; }
+}
+@media (max-width: 560px) {
+  .brand-lockup { min-width: 0; }
+  .brand-mark { width: 36px; height: 36px; }
+  .brand-lockup h1 { font-size: 1rem; }
+  .topbar-actions { display: grid; grid-template-columns: auto 1fr; }
+  .auth-form { grid-column: 1 / -1; }
+  .language-toggle { align-self: end; }
+  .card-grid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
 </style>
 </head>
 <body>
   <a class="skip-link" href="#mainContent">跳到主要内容</a>
   <header class="topbar">
-    <div>
-      <p class="eyebrow">coding-tools-mcp</p>
-      <h1>Admin Console</h1>
+    <div class="brand-lockup">
+      <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 7.5 12 4l5 3.5v5L12 16l-5-3.5z"/><path d="m7 12.5-3 2v4L8 21l4-2.5V16m5-3.5 3 2v4L16 21l-4-2.5"/></svg></div>
+      <div>
+        <p class="eyebrow">coding-tools-mcp</p>
+        <h1>MCP 管理台</h1>
+      </div>
     </div>
-    <form id="authForm" class="auth-form" autocomplete="off">
+    <div class="topbar-actions">
+      <button class="secondary language-toggle" type="button" data-language-toggle data-i18n-skip aria-label="Switch to English" title="Switch to English"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.7 5.5 3.7 9S14.4 18.5 12 21c-2.4-2.5-3.7-5.5-3.7-9S9.6 5.5 12 3z"/></svg><span data-locale-label>EN</span></button>
+      <form id="authForm" class="auth-form" autocomplete="off">
       <div>
         <label for="adminToken">本次页面使用的 Admin token</label>
         <input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required>
@@ -126,12 +355,13 @@ dialog::backdrop { background:rgba(0,0,0,.55); }
       </div>
       <button type="submit">连接</button>
       <button id="forgetToken" type="button" class="secondary">清除</button>
-    </form>
+      </form>
+    </div>
   </header>
 
   <div class="layout">
     <nav aria-label="Admin 页面" class="sidebar">
-      <button class="nav-item active" data-section="overview" type="button">概览</button>
+      <button class="nav-item active" data-section="overview" type="button" aria-current="page">概览</button>
       <button class="nav-item" data-section="settings" type="button">设置</button>
       <button class="nav-item" data-section="workspaces" type="button">Workspace</button>
       <button class="nav-item" data-section="gateway" type="button">Gateway</button>
@@ -551,7 +781,681 @@ function renderFormError(documentRef, message, fieldId = '') {
 globalThis.McpSettingsPage = { renderSettingsForm, collectSettingsDraft, renderFormError };
 export { renderSettingsForm, collectSettingsDraft, renderFormError };
 </script>
+  <script type="module" data-build-source="i18n.js">
+const DEFAULT_LOCALE = 'zh-CN';
+const SUPPORTED_LOCALES = new Set(['zh-CN', 'en']);
+
+export const EN_MESSAGES = Object.freeze({
+  'MCP 管理台': 'MCP Console',
+  '跳到主要内容': 'Skip to main content',
+  '安全管理入口': 'Secure admin access',
+  '欢迎回来': 'Welcome back',
+  '登录后可集中管理工具连接、工作区和聊天记录。': 'Sign in to manage tool connections, workspaces, and chat records in one place.',
+  '管理 Token': 'Admin token',
+  '请输入管理 Token': 'Enter your admin token',
+  'Token 只保存在当前浏览器中，不会显示在页面上。': 'The token is stored only in this browser and is never displayed on the page.',
+  '进入管理台': 'Open console',
+  '或': 'or',
+  '使用 OAuth 登录': 'Sign in with OAuth',
+  '请输入管理 token 或使用 OAuth 登录。': 'Enter an admin token or sign in with OAuth.',
+  'token 验证成功后保存在当前浏览器；退出登录会将其清除。': 'After verification, the token is stored in this browser and removed when you sign out.',
+  '展开或收起导航': 'Expand or collapse navigation',
+  '工具、工作区与聊天持久化': 'Tools, workspaces, and chat persistence',
+  '已连接': 'Connected',
+  '处理中': 'Working',
+  '输出': 'Output',
+  '刷新': 'Refresh',
+  '退出': 'Sign out',
+  '功能导航': 'Navigation',
+  '关闭导航': 'Close navigation',
+  '管理台导航': 'Console navigation',
+  '常用': 'Common',
+  '安全与系统': 'Security & system',
+  '工具': 'Tools',
+  '工作区': 'Workspace',
+  '目录': 'Folder',
+  '条': 'Entries',
+  '总览': 'Overview',
+  '工具连接': 'Tool connections',
+  '添加工具连接': 'Add tool connection',
+  '聊天记录与恢复': 'Chat records & recovery',
+  '活动会话': 'Active sessions',
+  '已授权客户端': 'Authorized clients',
+  '登录签名密钥': 'Signing keys',
+  '活动日志': 'Activity log',
+  '设置': 'Settings',
+  '开发者工具': 'Developer tools',
+  '服务状态和最近持久化情况集中在首页。': 'View service health and recent persistence activity at a glance.',
+  'MCP 配置': 'MCP configurations',
+  '可用工具': 'Available tools',
+  'MCP 会话': 'MCP sessions',
+  '最近调用': 'Recent calls',
+  '聊天项目': 'Chat projects',
+  '聊天备份': 'Chat backups',
+  '恢复上下文': 'Recovery context',
+  '配置路径': 'Configuration paths',
+  '服务入口': 'Service endpoints',
+  '当前结果': 'Current result',
+  '等待连接。': 'Waiting for connection.',
+  '查看、启停、重启和移除已连接工具。': 'View, enable, restart, and remove connected tools.',
+  '重新加载工具': 'Reload tools',
+  '别名': 'Alias',
+  '传输': 'Transport',
+  '启用': 'Enabled',
+  '状态': 'Status',
+  '操作': 'Actions',
+  '使用表单填写连接信息；JSON 仅在高级区域用于诊断。': 'Complete the connection form. JSON is available only in the advanced diagnostics area.',
+  '新建连接': 'New connection',
+  '连接信息': 'Connection details',
+  '先选择最接近的连接类型': 'Choose the closest connection type',
+  '文件与目录': 'Files and folders',
+  '浏览器工具': 'Browser tool',
+  '其他本地工具': 'Other local tool',
+  '其他远程工具': 'Other remote tool',
+  '使用此模板': 'Use template',
+  '刷新模板': 'Refresh templates',
+  '模板会自动填写常用配置，你只需检查并补充必要信息。': 'The template fills common settings automatically; review them and add any required information.',
+  '连接名称': 'Connection name',
+  '例如：实验资料库': 'For example: Research library',
+  '连接位置': 'Connection location',
+  '这台电脑上的工具': 'Tool on this computer',
+  '通过网址连接的工具': 'Tool connected by URL',
+  '启动命令': 'Launch command',
+  '模板通常会自动填写': 'Usually filled by the template',
+  '如果不确定，请保留模板提供的内容。': 'If you are unsure, keep the value provided by the template.',
+  '服务地址': 'Service URL',
+  '启动参数（每行一个）': 'Launch arguments (one per line)',
+  '每行填写一个参数': 'Enter one argument per line',
+  '环境变量（每行一个）': 'Environment variables (one per line)',
+  '例如 API_KEY=secret': 'For example: API_KEY=secret',
+  '敏感值建议使用“设置 → 凭据与密钥”保存。': 'Store sensitive values under Settings → Credentials & secrets.',
+  '请求头（每行一个）': 'Request headers (one per line)',
+  '例如 Authorization=Bearer ...': 'For example: Authorization=Bearer ...',
+  '只显示这些工具（可选）': 'Show only these tools (optional)',
+  '隐藏这些工具（可选）': 'Hide these tools (optional)',
+  '每行一个工具名称': 'One tool name per line',
+  '等待时间（毫秒）': 'Timeout (milliseconds)',
+  '保存后立即启用': 'Enable immediately after saving',
+  '保存连接': 'Save connection',
+  '更新高级配置': 'Update advanced configuration',
+  '读取高级配置': 'Load advanced configuration',
+  '高级选项：配置 JSON': 'Advanced: configuration JSON',
+  '仅建议熟悉 MCP 配置的用户直接编辑。普通添加流程无需展开此区域。': 'Direct editing is intended for users familiar with MCP configuration. The standard workflow does not require this section.',
+  '配置 JSON': 'Configuration JSON',
+  '校验格式': 'Validate',
+  '格式化': 'Format',
+  '预览变更': 'Preview changes',
+  '保存高级配置': 'Save advanced configuration',
+  '聊天记录用于审计与回放，恢复上下文用于下一轮 Agent 读回。': 'Chat records support auditing and replay; recovery context can be loaded by the agent in a later run.',
+  'Codex 会话导入': 'Import Codex sessions',
+  '扫描目录': 'Scan locations',
+  '留空使用默认 Codex 会话目录，也可以每行填写一个目录或文件': 'Leave blank to use the default Codex session folder, or enter one folder or file per line',
+  '候选上限': 'Candidate limit',
+  '扫描深度': 'Scan depth',
+  '扫描候选': 'Scan candidates',
+  '导入选中': 'Import selected',
+  '同步选中': 'Sync selected',
+  '同步全部候选': 'Sync all candidates',
+  '候选列表只显示元数据；聊天正文会在确认导入或同步后进入聊天记录。': 'The candidate list shows metadata only. Chat content is added after import or sync is confirmed.',
+  '候选会话': 'Candidate session',
+  '消息': 'Messages',
+  '最近时间': 'Last activity',
+  '来源文件': 'Source file',
+  '聊天记录': 'Chat records',
+  '筛选会话名 / UID / 会话 ID': 'Filter by session name, UID, or session ID',
+  '全部记录': 'All records',
+  '仅有聊天备份': 'Chat backup only',
+  '仅有恢复上下文': 'Recovery context only',
+  '聊天和上下文都有': 'Chat and context',
+  '筛选': 'Filter',
+  '清空': 'Clear',
+  '显示来源': 'Show source',
+  '目标会话 ID，用于合并选中的会话': 'Target session ID for merging selected sessions',
+  '合并选中': 'Merge selected',
+  '导出全部聊天': 'Export all chats',
+  '导出全部上下文': 'Export all context',
+  '会话': 'Session',
+  '记录': 'Records',
+  '来源': 'Source',
+  '选择一个会话': 'Select a session',
+  '读取后可以查看聊天备份、维护恢复上下文，并生成可复制的恢复包。': 'Open a session to review chat backups, maintain recovery context, and generate a recovery package.',
+  '会话工作区': 'Session workspace',
+  '当前：': 'Current:',
+  '未选择': 'Not selected',
+  '有未保存修改': 'Unsaved changes',
+  '读取': 'Load',
+  '重新读取': 'Reload',
+  '聊天 MD': 'Chat Markdown',
+  '上下文 MD': 'Context Markdown',
+  '生成恢复包': 'Generate recovery package',
+  '关闭': 'Close',
+  '选择一个聊天会话后，这里会显示可编辑的完整消息文本。': 'Select a chat session to view and edit its complete message text.',
+  '选择一个聊天会话后，这里会显示恢复上下文条目。': 'Select a chat session to view its recovery-context entries.',
+  '恢复上下文检查点': 'Recovery context checkpoint',
+  '新增': 'New',
+  '会话 ID': 'Session ID',
+  '类型': 'Type',
+  '检查点': 'Checkpoint',
+  '摘要': 'Summary',
+  '备注': 'Note',
+  '上下文': 'Context',
+  '条目 ID': 'Entry ID',
+  '时间': 'Time',
+  '使用当前会话': 'Use current session',
+  '保存检查点': 'Save checkpoint',
+  '新建': 'New',
+  '危险操作': 'Danger zone',
+  '删除当前会话': 'Delete current session',
+  '一键清空全部聊天记录': 'Clear all chat records',
+  '查看工作区、HTTP 会话和运行中的命令。': 'View workspaces, HTTP sessions, and running commands.',
+  '导出 MCP 记录': 'Export MCP records',
+  '当前工作区': 'Current workspace',
+  '全局默认目录': 'Global default folder',
+  'MCP HTTP 会话': 'MCP HTTP sessions',
+  '运行命令会话': 'Command sessions',
+  '聊天会话': 'Chat sessions',
+  '新会话默认值': 'Default for new sessions',
+  '设置目录': 'Set folder',
+  '活动': 'Activity',
+  '会话默认目录': 'Session default folder',
+  '命令执行目录': 'Command working folder',
+  '命令': 'Command',
+  '最近的 MCP 访问和工具调用。': 'Recent MCP requests and tool calls.',
+  '/mcp 最近访问': 'Recent /mcp requests',
+  '工具调用': 'Tool calls',
+  '结果': 'Result',
+  '耗时': 'Duration',
+  '错误': 'Error',
+  'OAuth 客户端与凭据': 'OAuth clients & credentials',
+  '连接标准 MCP 客户端、检查持久化状态，并撤销已签发授权。': 'Connect standard MCP clients, inspect persistence status, and revoke issued authorization.',
+  '未启用': 'Not enabled',
+  '动态': 'Dynamic',
+  '公开地址': 'Public URL',
+  '客户端': 'Client',
+  '创建时间': 'Created',
+  '持久化': 'Persistence',
+  '指纹': 'Fingerprint',
+  '正在读取…': 'Loading…',
+  '正在检查 OAuth Password…': 'Checking OAuth password…',
+  '用于新的 OAuth 授权页面登录；它与 Access Token、Refresh Token 和 signing key 相互独立。': 'Used to sign in on new OAuth authorization pages. It is separate from access tokens, refresh tokens, and signing keys.',
+  '生成并保存 OAuth Password': 'Generate and save OAuth password',
+  '轮换 OAuth Password': 'Rotate OAuth password',
+  '新的 OAuth Password': 'New OAuth password',
+  '此密码只显示一次，请立即保存。': 'This password is shown only once. Save it now.',
+  '复制': 'Copy',
+  '指纹：': 'Fingerprint:',
+  '连接新的 MCP 客户端': 'Connect a new MCP client',
+  '标准客户端只需填写 MCP URL，客户端会自动执行 OAuth 2.1 Authorization Code + PKCE。Client secret 默认不需要。': 'Standard clients only need the MCP URL. The client automatically completes OAuth 2.1 Authorization Code + PKCE; a client secret is not required by default.',
+  '复制 OAuth 配置': 'Copy OAuth configuration',
+  '复制 Vault 启用命令': 'Copy Vault setup command',
+  '配置固定公开地址': 'Configure a fixed public URL',
+  '正在检查 OAuth 持久化状态…': 'Checking OAuth persistence…',
+  'Secret Vault 启用说明': 'Secret Vault setup',
+  '在 PowerShell 7 中执行后，完全停止并重新启动服务。旧明文 OAuth Password、signing key 和 refresh-token pepper 会自动迁移到加密 Vault。': 'Run this in PowerShell 7, then fully stop and restart the service. Legacy plaintext OAuth passwords, signing keys, and refresh-token pepper are migrated to the encrypted Vault.',
+  '生成一次性本地 OAuth 凭据': 'Generate one-time local OAuth credentials',
+  '用于调试或支持手动 token 配置的客户端。标准 MCP 客户端不需要此操作。Access token 与 refresh token 只显示一次，服务器只保存可撤销元数据和 refresh-token 哈希。': 'For debugging or clients that support manual token configuration. Standard MCP clients do not need this. Access and refresh tokens are shown once; the server stores only revocable metadata and the refresh-token hash.',
+  '随机生成': 'Generate',
+  '开始 PKCE 授权': 'Start PKCE authorization',
+  '授权范围固定为 mcp，不会授予管理权限。': 'The scope is fixed to mcp and does not grant admin access.',
+  '凭据已签发，请立即保存': 'Credentials issued — save them now',
+  'Access token 有效期': 'Access-token lifetime',
+  '复制完整 JSON': 'Copy complete JSON',
+  '清除页面中的凭据': 'Clear credentials from page',
+  '授权 Grants': 'Authorization grants',
+  'Access Token 记录': 'Access-token records',
+  '这里只保存 JWT 标识和状态，不保存 bearer token 原文。': 'Only JWT identifiers and status are stored here; bearer-token values are never stored.',
+  '模式': 'Mode',
+  '过期时间': 'Expires',
+  '服务器仅保存 refresh token 哈希；原始 token 无法回显或恢复。': 'The server stores only refresh-token hashes; original tokens cannot be displayed or recovered.',
+  '最近使用': 'Last used',
+  '审计事件': 'Audit events',
+  '刷新后显示最近事件。': 'Refresh to show recent events.',
+  '只显示密钥元数据。正常轮换会保留旧密钥以验证未过期的访问凭据。': 'Only key metadata is displayed. Normal rotation keeps old keys so unexpired credentials remain verifiable.',
+  '生成并激活新密钥': 'Generate and activate new key',
+  '密钥环': 'Key ring',
+  '算法': 'Algorithm',
+  '按任务配置工作区、安全、连接和凭据。技术细节收在高级设置中。': 'Configure workspaces, security, connections, and credentials by task. Technical details stay under Advanced settings.',
+  '正在读取设置…': 'Loading settings…',
+  '1. 工作区': '1. Workspaces',
+  '为工具选择可访问的文件夹。默认工作区必须启用，目录不能重复或相互嵌套。': 'Choose folders tools may access. The default workspace must be enabled, and folders cannot be duplicated or nested.',
+  '添加工作区': 'Add workspace',
+  '2. 安全与工具权限': '2. Security & tool permissions',
+  '使用方式': 'Usage mode',
+  '仅查看': 'View only',
+  '安全编辑（推荐）': 'Safe editing (recommended)',
+  '可信本地开发': 'Trusted local development',
+  '隔离环境完全权限': 'Full access in isolated environment',
+  '自定义高级设置': 'Custom advanced settings',
+  '完全权限会关闭主要命令权限门；只应在隔离的容器或虚拟机内使用。': 'Full access disables major command safeguards. Use it only in an isolated container or virtual machine.',
+  '3. 连接与远程访问': '3. Connectivity & remote access',
+  '谁可以访问': 'Who can access',
+  '仅本机访问': 'This computer only',
+  '局域网或容器访问': 'Local network or container',
+  '自定义地址': 'Custom address',
+  '自定义监听地址': 'Custom listen address',
+  '端口': 'Port',
+  '预计访问地址': 'Expected access URL',
+  '允许访问的浏览器来源': 'Allowed browser origins',
+  '每行一个地址，例如 https://admin.example.com': 'One URL per line, for example https://admin.example.com',
+  '这会限制哪些浏览器页面可以调用管理接口。': 'This limits which browser pages may call the admin API.',
+  '公开访问地址（OAuth）': 'Public URL (OAuth)',
+  '4. 凭据与密钥': '4. Credentials & secrets',
+  '正在检查 Secret Vault…': 'Checking Secret Vault…',
+  '凭据 Vault 文件': 'Credential Vault file',
+  '已保存凭据': 'Saved credentials',
+  '这里保存的是上游 MCP 的 GitHub Token、API Key 等真实凭据。服务商签发的 Token 不能由管理台随机生成；OAuth Password 请到“OAuth 客户端与凭据”生成或轮换。': 'Store real upstream MCP credentials such as GitHub tokens and API keys here. Provider-issued tokens cannot be generated by the console; generate or rotate OAuth passwords under OAuth clients & credentials.',
+  '密钥名称': 'Secret name',
+  '密钥值': 'Secret value',
+  '保存密钥': 'Save secret',
+  '删除密钥': 'Delete secret',
+  '已保存密钥只显示名称，不会回显值。Vault 未启用时保存和删除按钮会被禁用。': 'Saved secrets show names only, never values. Save and delete are disabled until the Vault is enabled.',
+  '运行时认证（立即生效）': 'Runtime authentication (takes effect immediately)',
+  'MCP 访问凭据': 'MCP access credential',
+  '管理台访问凭据': 'Console access credential',
+  '立即更新': 'Update now',
+  '高级设置': 'Advanced settings',
+  '兼容模式：不发 refresh token，改用受追踪的长期 access token': 'Compatibility mode: issue a tracked long-lived access token instead of a refresh token',
+  '兼容模式并不等于真正只读；它只用于不支持刷新令牌的旧客户端。': 'Compatibility mode is not truly read-only. Use it only for legacy clients without refresh-token support.',
+  '权限模式': 'Permission mode',
+  '工具访问级别': 'Tool access level',
+  'Shell 环境继承': 'Shell environment inheritance',
+  'OAuth signing key 不再允许从设置页直接替换。请在“登录签名密钥”中轮换，并先启用 Secret Vault。': 'OAuth signing keys can no longer be replaced directly from Settings. Enable Secret Vault, then rotate them under Signing keys.',
+  '打开登录签名密钥': 'Open signing keys',
+  '原始设置预览': 'Raw settings preview',
+  '所有设置已生效。': 'All settings are active.',
+  '放弃更改': 'Discard changes',
+  '保存更改': 'Save changes',
+  '直接调用管理工具，适合调试和高级操作。': 'Call admin tools directly for debugging and advanced operations.',
+  '执行': 'Run',
+  '输出镜像': 'Output mirror',
+  '见输出弹窗。': 'See the Output dialog.',
+  '准备就绪。': 'Ready.',
+  '成功': 'Success',
+  '失败': 'Failed',
+  '健康': 'Health',
+  '编辑': 'Edit',
+  '停用': 'Disable',
+  '重启': 'Restart',
+  '日志': 'Logs',
+  '删除': 'Delete',
+  '终止': 'Terminate',
+  '激活': 'Activate',
+  '紧急撤销': 'Emergency revoke',
+  '撤销 Token': 'Revoke token',
+  '撤销 Family': 'Revoke family',
+  '导出 MD': 'Export Markdown',
+  '恢复包': 'Recovery package',
+  '导入': 'Import',
+  '同步': 'Sync',
+  '保存修改': 'Save changes',
+  '检查目录': 'Check folder',
+  '默认工作区': 'Default workspace',
+  '显示名称': 'Display name',
+  '文件夹路径': 'Folder path',
+  '例如 G:\\Research': 'For example: G:\\Research',
+  '新工作区': 'New workspace',
+  '尚未添加工作区。': 'No workspaces have been added.',
+  '暂无调用记录。': 'No tool calls yet.',
+  '暂无 /mcp 访问记录。': 'No /mcp requests yet.',
+  '暂无运行命令会话。': 'No command sessions are running.',
+  '还没有配置 MCP。': 'No MCP connections configured yet.',
+  '暂无密钥记录': 'No key records.',
+  '无法读取密钥环。': 'Unable to read the key ring.',
+  '暂无聊天记录。agent 调用 record_chat_transcript 或 record_chat_message 后会显示在这里。': 'No chat records yet. They appear after the agent calls record_chat_transcript or record_chat_message.',
+  '没有符合筛选条件的聊天记录。': 'No chat records match the current filter.',
+  '点击“扫描候选”后，这里会显示可导入的 Codex 会话。': 'Scan candidates to show importable Codex sessions here.',
+  '暂无已授权客户端。请在上方复制 MCP URL，并由客户端发起 OAuth 连接。': 'No authorized clients. Copy the MCP URL above and start the OAuth connection from your client.',
+  '暂无 OAuth Grant。': 'No OAuth grants.',
+  '暂无 Access Token 记录。': 'No access-token records.',
+  '暂无 MCP HTTP 会话。访问 /mcp 后会显示在这里。': 'No MCP HTTP sessions. They appear after /mcp is accessed.',
+  '请求': 'Requests',
+  '最近 RPC': 'Latest RPC',
+  '项目': 'Project',
+  '路径': 'Path',
+  '角色': 'Role',
+  '聊天文本': 'Chat text',
+  '未分组': 'Ungrouped',
+  '空闲': 'Idle',
+  '刷新中': 'Refreshing',
+  '正在检查登录状态…': 'Checking sign-in status…',
+  '没有可复制的内容。': 'There is nothing to copy.',
+  '已复制到剪贴板。': 'Copied to clipboard.',
+  '请重试。': 'Please try again.',
+  '请先选择会话': 'Select a session first.',
+  '请先选择要导入或同步的候选会话': 'Select candidate sessions to import or sync.',
+  '请先选择要合并的会话，并填写目标会话 ID': 'Select sessions to merge and enter a target session ID.',
+  '密钥名不能为空': 'Secret name is required.',
+  '密钥名和值不能为空': 'Secret name and value are required.',
+  '当前状态缺少可编辑配置，请刷新后重试。': 'The current state has no editable configuration. Refresh and try again.',
+  '只开放检查和读取工具。': 'Allows inspection and read-only tools only.',
+  '可编辑工作区，同时限制网络和高风险命令。': 'Allows workspace editing while restricting network access and high-risk commands.',
+  '允许网络、Shell 展开和内联脚本。': 'Allows network access, shell expansion, and inline scripts.',
+  '仅适用于容器或虚拟机，会关闭主要命令权限门。': 'For containers or virtual machines only; disables major command safeguards.',
+  '继续': 'continue',
+  '切换页面': 'switching pages',
+  '关闭会话工作区': 'closing the session workspace',
+  '合并会话': 'merging sessions',
+  '清空全部记录': 'clearing all records',
+  '删除会话': 'deleting the session',
+  '删除上下文条目': 'deleting the context entry',
+  '删除消息': 'deleting the message',
+  '重新读取会话': 'reloading the session',
+  '切换会话': 'switching sessions',
+  '刷新页面状态': 'refreshing page status',
+  '完全权限会关闭主要命令权限门。确认仅在隔离环境中使用吗？': 'Full access disables major command safeguards. Confirm that you are using an isolated environment.',
+  '确认删除这条恢复上下文？': 'Delete this recovery-context entry?',
+  '确认删除这个 MCP 配置？': 'Delete this MCP configuration?',
+  '撤销这个 Grant 及其 Access/Refresh Token？': 'Revoke this grant and its access and refresh tokens?',
+  '立即撤销这个 Access Token？': 'Revoke this access token immediately?',
+  '撤销这个 Refresh Token Family？客户端将无法继续刷新。': 'Revoke this refresh-token family? The client will no longer be able to refresh.',
+  '确认终止这个会话？': 'Terminate this session?',
+  '切换工作区会重置该会话的默认目录。继续？': 'Changing the workspace resets this session’s default folder. Continue?',
+  '确认删除这条聊天消息？': 'Delete this chat message?',
+  '确认删除这个聊天会话的全部消息与上下文？': 'Delete all messages and recovery context in this chat session?',
+  '确认清空全部聊天记录和恢复上下文？这个操作不可撤销。': 'Clear all chat records and recovery context? This action cannot be undone.',
+  '放弃所有未保存的设置修改？': 'Discard all unsaved settings changes?',
+  '确认删除这个密钥？': 'Delete this secret?',
+  '生成并激活新的 OAuth signing key？旧 key 将保留用于验证未过期 token。': 'Generate and activate a new OAuth signing key? The old key will remain available to verify unexpired tokens.',
+  '轮换后，旧 OAuth Password 将不能继续用于新的授权页面登录。\n\n已有 Access Token 和 Refresh Token 不会被撤销。\n\n确认轮换？': 'After rotation, the old OAuth password can no longer be used for new authorization-page sign-ins.\n\nExisting access and refresh tokens will not be revoked.\n\nRotate now?',
+  '可以生成并加密保存新的 OAuth Password。': 'A new OAuth password can be generated and stored securely.',
+  '密码已加密持久化；轮换只影响新的授权页面登录。': 'The password is stored encrypted; rotation affects only new authorization-page sign-ins.',
+  '已签发 Access Token；当前兼容模式不会返回 refresh token。': 'An access token was issued; compatibility mode does not return a refresh token.',
+  '已签发可刷新的 OAuth 凭据。原始 refresh token 只在这里显示一次。': 'Refreshable OAuth credentials were issued. The original refresh token is shown here only once.',
+  'Secret Vault 已启用，可以加密保存上游 MCP 凭据。': 'Secret Vault is enabled and can store upstream MCP credentials securely.',
+  '已有 Access Token 和 Refresh Token 不会被撤销。': 'Existing access and refresh tokens will not be revoked.',
+  '设置已保存。': 'Settings saved.',
+  '有未保存修改。': 'Unsaved changes.',
+  '设置未保存，请检查标记的字段。': 'Settings were not saved. Check the highlighted fields.',
+  '目录校验失败。': 'Folder validation failed.',
+  '默认工作区必须保持启用；请先选择新的默认工作区。': 'The default workspace must remain enabled. Choose a new default workspace first.',
+  '未命名会话': 'Untitled session',
+  '未提供': 'Not provided',
+  '这个会话还没有恢复上下文条目。agent 调用 record-context 或兼容入口后会显示在这里。': 'This session has no recovery-context entries yet. They appear after the agent calls record-context or a compatible endpoint.',
+  '已撤销': 'Revoked',
+  '已过期': 'Expired',
+  '已禁用': 'Disabled',
+  '有效': 'Active',
+  '已启用': 'Enabled',
+  '未配置': 'Not configured',
+  '已配置': 'Configured',
+  '固定地址': 'Fixed URL',
+  '随请求变化': 'Request-derived',
+  '是': 'Yes',
+  '否': 'No',
+  '未初始化': 'Not initialized',
+  '未运行': 'Not running',
+  '重新启用': 'Re-enable',
+  '禁用': 'Disable',
+  '由环境变量管理': 'Managed by environment variable',
+  '首次自动生成': 'Initially generated',
+  '旧配置迁移': 'Legacy settings migration',
+  '请修改 CODING_TOOLS_MCP_OAUTH_PASSWORD 后重启服务。': 'Change CODING_TOOLS_MCP_OAUTH_PASSWORD, then restart the service.',
+  'Secret Vault 未启用。请先设置 CODING_TOOLS_MCP_SECRETS_KEY 并重启服务。': 'Secret Vault is not enabled. Set CODING_TOOLS_MCP_SECRETS_KEY and restart the service.',
+  '响应不是 JSON': 'The response is not JSON.',
+  '保存服务没有返回 JSON': 'The save service did not return JSON.',
+  '校验服务没有返回 JSON': 'The validation service did not return JSON.',
+  '输出已复制': 'Output copied.',
+  '正在使用自定义高级设置。': 'Using custom advanced settings.',
+  '用户': 'User',
+  '助手': 'Assistant',
+  '系统': 'System',
+  '未知': 'Unknown',
+  '上下文检查点': 'Context checkpoint',
+  '环境变量': 'Environment variable',
+  'OAuth 模式未启用。': 'OAuth mode is not enabled.',
+  '未配置固定公开 OAuth 地址；隧道域名变化会使旧 Token 失效。': 'No fixed public OAuth URL is configured; changing the tunnel domain invalidates old tokens.',
+  '兼容模式已启用，不会签发 refresh token。': 'Compatibility mode is enabled; refresh tokens will not be issued.',
+  'Refresh-token pepper 仍在 server-settings.json 中明文保存。': 'The refresh-token pepper is still stored in plaintext in server-settings.json.',
+  'Signing key 仍在 server-settings.json 中明文保存。': 'The signing key is still stored in plaintext in server-settings.json.',
+  'OAuth 持久化配置正常：固定 issuer、加密 Vault 和 refresh token 均已启用。': 'OAuth persistence is healthy: fixed issuer, encrypted Vault, and refresh tokens are enabled.',
+  '撤销 Grant': 'Revoke grant',
+  '无法读取 Access Token 记录。': 'Unable to load access-token records.',
+  '无法读取 OAuth 客户端；请确认管理员凭据和 OAuth 模式。': 'Unable to load OAuth clients. Check the admin credential and OAuth mode.',
+  '无法读取 OAuth Grants。': 'Unable to load OAuth grants.',
+  '无法读取 Refresh Token Families。': 'Unable to load refresh-token families.',
+  'MCP URL 已复制。': 'MCP URL copied.',
+  'OAuth Password 已复制。': 'OAuth password copied.',
+  'Secret Vault 启用命令已复制。': 'Secret Vault setup command copied.',
+  'OAuth 连接配置已复制。': 'OAuth connection configuration copied.',
+  'OAuth 凭据 JSON 已复制。': 'OAuth credential JSON copied.',
+  'JSON 已格式化': 'JSON formatted.',
+  '已复制': 'Copied',
+  '恢复上下文内容不能为空': 'Recovery-context content is required.',
+  '请先填写或选择会话 ID': 'Enter or select a session ID first.',
+  '请先选择或填写会话 ID': 'Select or enter a session ID first.',
+  '没有找到上下文条目': 'Recovery-context entry not found.',
+  'OAuth 回调缺少本地 PKCE verifier。': 'The OAuth callback is missing the local PKCE verifier.',
+  'OAuth 回调缺少 state。': 'The OAuth callback is missing state.',
+  'OAuth state 校验失败。': 'OAuth state validation failed.',
+  '浏览器不允许复制，请手动选中输出内容复制': 'The browser blocked clipboard access. Select and copy the output manually.',
+  'Client ID 只能包含字母、数字、点、下划线、波浪号和连字符，长度 1–128。': 'Client ID may contain letters, numbers, periods, underscores, tildes, and hyphens, with a length of 1–128 characters.',
+  'OAuth 模式未启用，无法签发凭据。': 'OAuth mode is not enabled, so credentials cannot be issued.',
+  '修改连接信息，保存后会重新加载工具。': 'Edit the connection details. Saving reloads the tool.',
+  '选择连接类型并填写表单，高级配置可以保持折叠。': 'Choose a connection type and complete the form. Advanced configuration can remain collapsed.',
+  '编辑工具连接': 'Edit tool connection',
+  '保存编辑并重载': 'Save edits and reload',
+  '预览编辑': 'Preview edits',
+  '请输入管理 token。': 'Enter the admin token.',
+  '未分组项目': 'Ungrouped project',
+  '清理': 'Clean-up',
+  '双轨': 'Dual track',
+  '编码修复': 'Encoding fix',
+  '聊天备份测试': 'Chat backup test',
+  'MCP 聊天备份双轨': 'MCP chat-backup dual track',
+  'MCP 配置格式校验通过': 'MCP configuration passed validation.',
+  '配置': 'Configuration',
+});
+
+const FRAGMENTS = Object.freeze([
+  ['还有未保存的编辑，确认', 'There are unsaved edits. Confirm '],
+  ['确认删除', 'Confirm deletion of '],
+  ['确认清空', 'Confirm clearing '],
+  ['保存并重载', 'Save and reload'],
+  ['编辑工具连接：', 'Edit tool connection: '],
+  ['已读取会话正文', 'Session content loaded'],
+  ['正在验证管理 token…', 'Verifying admin token…'],
+  ['管理 token 无效或已过期，请检查后重试。', 'The admin token is invalid or expired. Check it and try again.'],
+  ['需要管理员登录后才能进入管理台。', 'Administrator sign-in is required to open the console.'],
+  ['无法连接管理服务，请检查服务是否正在运行。', 'Unable to reach the admin service. Check whether it is running.'],
+  ['连接异常', 'Connection error'],
+  ['登录已失效，请重新输入管理 token。', 'Your session expired. Enter the admin token again.'],
+  ['已退出登录，请输入管理 token 或使用 OAuth 登录。', 'Signed out. Enter an admin token or sign in with OAuth.'],
+  ['OAuth 登录失败或授权已过期，请重试。', 'OAuth sign-in failed or authorization expired. Try again.'],
+  ['OAuth 登录未完成：', 'OAuth sign-in was not completed: '],
+  ['无法保存连接：', 'Unable to save connection: '],
+  ['请检查表单内容后重试', 'Check the form and try again'],
+  ['配置格式校验失败：', 'Configuration validation failed: '],
+  ['向导配置错误：', 'Form configuration error: '],
+  ['JSON 格式或校验错误：', 'JSON format or validation error: '],
+  ['必须是字符串', 'must be a string'],
+  ['必须是对象', 'must be an object'],
+  ['不能为空', 'is required'],
+  ['不能包含 shell 控制语法', 'cannot contain shell control syntax'],
+  ['暂无', 'No '],
+]);
+
+const originalText = new WeakMap();
+const originalAttributes = new WeakMap();
+let currentLocale = DEFAULT_LOCALE;
+let observer = null;
+
+export function normalizeLocale(locale) {
+  const value = String(locale || '').toLowerCase();
+  if (value === 'en' || value.startsWith('en-')) return 'en';
+  if (value === 'zh-cn' || value.startsWith('zh')) return 'zh-CN';
+  return DEFAULT_LOCALE;
+}
+
+export function translateText(value, locale = currentLocale) {
+  const text = String(value ?? '');
+  if (normalizeLocale(locale) !== 'en' || !text.trim()) return text;
+  const leading = text.match(/^\s*/)?.[0] || '';
+  const trailing = text.match(/\s*$/)?.[0] || '';
+  const source = text.trim();
+  let translated = EN_MESSAGES[source];
+  if (!translated) {
+    const patterns = [
+      [/^(\d+) 个项目$/, (_, count) => `${count} projects`],
+      [/^(\d+) 个候选$/, (_, count) => `${count} candidates`],
+      [/^(\d+) 个$/, (_, count) => `${count} items`],
+      [/^(\d+) 条$/, (_, count) => `${count} entries`],
+      [/^(\d+) 次$/, (_, count) => `${count} requests`],
+      [/^读取 (\d+) 条$/, (_, count) => `Load ${count}`],
+      [/^上下文 (\d+) 条$/, (_, count) => `Context ${count}`],
+      [/^聊天备份 (\d+) 条$/, (_, count) => `Chat backup ${count}`],
+      [/^请求 (\d+) 次$/, (_, count) => `${count} requests`],
+      [/^工作区 (\d+)$/, (_, count) => `Workspace ${count}`],
+      [/^当前：(.*)$/, (_, detail) => `Current: ${detail}`],
+      [/^编辑工具连接：(.*)$/, (_, detail) => `Edit tool connection: ${detail}`],
+      [/^还有未保存的编辑，确认(.+)？$/, (_, action) => `There are unsaved edits. Continue with ${translateText(action, 'en')}?`],
+      [/^(重新启用|禁用)客户端 (.+)？禁用会立即撤销其现有授权。$/, (_, action, client) => `${translateText(action, 'en')} client ${client}? Disabling it immediately revokes its existing authorization.`],
+      [/^激活 (.+)？$/, (_, key) => `Activate ${key}?`],
+      [/^紧急撤销 (.+) 会立即使相关 Agent token 失效。继续？$/, (_, key) => `Emergency-revoke ${key}? Related agent tokens will become invalid immediately.`],
+      [/^已载入 (.*) 的配置，修改后可预览或保存编辑。$/, (_, alias) => `Loaded ${alias}. You can now preview or save your edits.`],
+      [/^已读取 (\d+) 条消息。$/, (_, count) => `Loaded ${count} messages.`],
+    ];
+    for (const [pattern, formatter] of patterns) {
+      if (pattern.test(source)) {
+        translated = source.replace(pattern, formatter);
+        break;
+      }
+    }
+  }
+  if (!translated && /[\u3400-\u9fff]/.test(source)) {
+    translated = source;
+    for (const [from, to] of FRAGMENTS) translated = translated.replaceAll(from, to);
+  }
+  return leading + (translated || source) + trailing;
+}
+
+export function getLocale() {
+  return currentLocale;
+}
+
+function shouldSkip(element) {
+  return !element || Boolean(element.closest('script, style, code, pre, textarea, [data-i18n-skip], [contenteditable="true"]'));
+}
+
+function translateTextNode(node) {
+  const parent = node.parentElement;
+  if (shouldSkip(parent)) return;
+  const current = node.nodeValue || '';
+  if (currentLocale === 'zh-CN') {
+    const source = originalText.get(node);
+    if (source !== undefined && current !== source) node.nodeValue = source;
+    return;
+  }
+  if (/[\u3400-\u9fff]/.test(current)) originalText.set(node, current);
+  const source = originalText.get(node) ?? current;
+  const translated = translateText(source, currentLocale);
+  if (current !== translated) node.nodeValue = translated;
+}
+
+function translateAttributes(element) {
+  if (!element || element.closest('[data-i18n-skip]')) return;
+  const names = ['placeholder', 'title', 'aria-label'];
+  let stored = originalAttributes.get(element);
+  if (!stored) {
+    stored = new Map();
+    originalAttributes.set(element, stored);
+  }
+  for (const name of names) {
+    if (!element.hasAttribute(name)) continue;
+    const current = element.getAttribute(name) || '';
+    if (currentLocale === 'zh-CN') {
+      if (stored.has(name) && current !== stored.get(name)) element.setAttribute(name, stored.get(name));
+      continue;
+    }
+    if (/[\u3400-\u9fff]/.test(current)) stored.set(name, current);
+    const source = stored.get(name) ?? current;
+    const translated = translateText(source, currentLocale);
+    if (current !== translated) element.setAttribute(name, translated);
+  }
+}
+
+function applyTranslations(root = document.documentElement) {
+  if (root.nodeType === Node.TEXT_NODE) {
+    translateTextNode(root);
+    return;
+  }
+  if (root.nodeType !== Node.ELEMENT_NODE && root.nodeType !== Node.DOCUMENT_NODE) return;
+  if (root.nodeType === Node.ELEMENT_NODE) translateAttributes(root);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    translateTextNode(node);
+    node = walker.nextNode();
+  }
+  const elementRoot = root.nodeType === Node.DOCUMENT_NODE ? root.documentElement : root;
+  elementRoot.querySelectorAll?.('[placeholder], [title], [aria-label]').forEach(translateAttributes);
+}
+
+function updateToggles() {
+  document.querySelectorAll('[data-language-toggle]').forEach((button) => {
+    const switchingToEnglish = currentLocale === 'zh-CN';
+    const label = button.querySelector('[data-locale-label]');
+    if (label) label.textContent = switchingToEnglish ? 'EN' : '中文';
+    button.setAttribute('aria-label', switchingToEnglish ? 'Switch to English' : '切换至中文');
+    button.setAttribute('title', switchingToEnglish ? 'Switch to English' : '切换至中文');
+  });
+}
+
+export function setLocale(locale) {
+  currentLocale = normalizeLocale(locale);
+  document.documentElement.lang = currentLocale;
+  document.documentElement.dataset.locale = currentLocale;
+  applyTranslations(document);
+  updateToggles();
+  document.dispatchEvent(new CustomEvent('localechange', { detail: { locale: currentLocale } }));
+  return currentLocale;
+}
+
+function initialLocale() {
+  return normalizeLocale(globalThis.navigator?.language || DEFAULT_LOCALE);
+}
+
+export function initI18n() {
+  if (typeof document === 'undefined') return DEFAULT_LOCALE;
+  document.querySelectorAll('[data-language-toggle]').forEach((button) => {
+    button.addEventListener('click', () => setLocale(currentLocale === 'zh-CN' ? 'en' : 'zh-CN'));
+  });
+  if (!observer) {
+    observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'characterData') translateTextNode(mutation.target);
+        mutation.addedNodes.forEach((node) => applyTranslations(node));
+        if (mutation.type === 'attributes') translateAttributes(mutation.target);
+      }
+      updateToggles();
+    });
+    observer.observe(document.documentElement, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['placeholder', 'title', 'aria-label'],
+    });
+  }
+  return setLocale(initialLocale());
+}
+
+globalThis.McpI18n = Object.freeze({
+  EN_MESSAGES,
+  normalizeLocale,
+  translateText,
+  getLocale,
+  setLocale,
+  initI18n,
+});
+</script>
   <script type="module" data-build-source="admin.js">
+const i18n = globalThis.McpI18n || {
+  getLocale: () => 'zh-CN',
+  initI18n: () => {},
+  translateText: (value) => String(value ?? ''),
+};
+const translateUi = (value) => i18n.translateText(value, i18n.getLocale());
+
 class ApiError extends Error {
   constructor(status, payload, message) {
     super(message || payload?.error?.message || `Admin request failed with HTTP ${status}.`);
@@ -841,13 +1745,16 @@ function renderOAuthItems(container, items, collection, onAction) {
 }
 
 function confirmDestructive(documentRef, { title, message, confirmLabel = '确认', returnFocus } = {}) {
+  const localizedTitle = translateUi(title || '确认操作');
+  const localizedMessage = translateUi(message || '');
+  const localizedLabel = translateUi(confirmLabel);
   const dialog = documentRef.getElementById('confirmDialog');
   if (!dialog || typeof dialog.showModal !== 'function') {
-    return Promise.resolve(globalThis.confirm ? globalThis.confirm(message || title || '确认操作？') : false);
+    return Promise.resolve(globalThis.confirm ? globalThis.confirm(localizedMessage || localizedTitle || translateUi('确认操作？')) : false);
   }
-  documentRef.getElementById('confirmTitle').textContent = title || '确认操作';
-  documentRef.getElementById('confirmMessage').textContent = message || '';
-  documentRef.getElementById('confirmAccept').textContent = confirmLabel;
+  documentRef.getElementById('confirmTitle').textContent = localizedTitle;
+  documentRef.getElementById('confirmMessage').textContent = localizedMessage;
+  documentRef.getElementById('confirmAccept').textContent = localizedLabel;
   return new Promise((resolve) => {
     const finish = () => {
       dialog.removeEventListener('close', finish);
@@ -889,6 +1796,7 @@ async function handleSettingsSave({ api, state, documentRef }) {
 }
 
 function initAdminApp(documentRef = document) {
+  i18n.initI18n();
   const model = globalThis.McpSettingsModel;
   const copy = globalThis.McpSettingsCopy;
   const workspaceEditor = globalThis.McpWorkspaceEditor;
@@ -915,7 +1823,10 @@ function initAdminApp(documentRef = document) {
       section.classList.toggle('active', active);
     }
     for (const button of documentRef.querySelectorAll('.nav-item')) {
-      button.classList.toggle('active', button.dataset.section === name);
+      const active = button.dataset.section === name;
+      button.classList.toggle('active', active);
+      if (active) button.setAttribute('aria-current', 'page');
+      else button.removeAttribute('aria-current');
     }
     byId('mainContent')?.focus();
   }

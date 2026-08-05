@@ -496,7 +496,11 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                     timeout=5,
                 ) as response:
                     page = response.read().decode("utf-8")
+                self.assertIn('data-build-source="i18n.js"', page)
                 self.assertIn('data-build-source="admin.js"', page)
+                self.assertIn('data-language-toggle', page)
+                self.assertIn('McpI18n', page)
+                self.assertNotIn('src="./i18n.js"', page)
                 self.assertNotIn('src="./admin.js"', page)
             finally:
                 server.shutdown()
