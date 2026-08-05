@@ -11,6 +11,7 @@ import fnmatch
 import functools
 import http.server
 import json
+import math
 import mimetypes
 import os
 import posixpath
@@ -29,6 +30,7 @@ import urllib.parse
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
@@ -44,6 +46,7 @@ from .admin import (
 from .envutils import ENV_PREFIX, truthy_env
 from .codex_sessions import CodexSessionScanner
 from .errors import JsonRpcError, ToolFailure
+from .json_utils import strict_json_bytes, strict_json_loads
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -119,7 +122,10 @@ from .upstream import (
     UpstreamConfigSnapshot,
     UpstreamManager,
     load_upstream_config_snapshot,
+    upstream_error_result,
 )
+from .upstream_search import ToolSearchFilters
+from .upstream_result_store import RESULT_FETCH_MAX_CODEPOINTS, ResultNotFound
 from .workspace_binding import (
     WorkspaceBinding,
     WorkspaceBindingError,
@@ -578,6 +584,20 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     )
 
 
+_BROKER_INSTRUCTIONS = (
+    "Additional external tools may be available through the upstream broker. "
+    "Use upstream_tool_search to find a tool, upstream_tool_describe to inspect "
+    "its sanitized schema and digest, then call it through the matching read-only "
+    "or mutating broker route. Use upstream_result_fetch when an oversized Broker "
+    "result includes a session-owned handle. Unknown risk classification is mutating."
+)
+
+_BROKER_PASSTHROUGH = frozenset(
+    {"upstream_tool_call", "upstream_tool_call_mutating"}
+)
+_SCHEMA_DIGEST_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     """Single source of truth for one tool's title, description, and annotation hints.
@@ -615,6 +635,36 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "server_info": ToolSpec(
         title="Server info",
         description="Return server, workspace, project-context, auth, policy, and fixed-tool metadata.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "upstream_tool_search": ToolSpec(
+        title="Search upstream tools",
+        description="Search the fixed upstream tool catalog using compact public metadata.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "upstream_tool_describe": ToolSpec(
+        title="Describe upstream tool",
+        description="Return one upstream tool's sanitized public definition and schema digest.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "upstream_tool_call": ToolSpec(
+        title="Call read-only upstream tool",
+        description="Call one catalog tool classified as read-only after digest and public-schema validation.",
+        read_only=True,
+        open_world=True,
+    ),
+    "upstream_tool_call_mutating": ToolSpec(
+        title="Call mutating upstream tool",
+        description="Call one catalog tool classified as mutating with a required public schema digest.",
+        destructive=True,
+        open_world=True,
+    ),
+    "upstream_result_fetch": ToolSpec(
+        title="Fetch upstream result page",
+        description="Fetch a Unicode-codepoint page from one session-owned oversized Broker result.",
         read_only=True,
         idempotent=True,
     ),
@@ -757,7 +807,12 @@ LANDLOCK_ACCESS_FS_IOCTL_DEV = 1 << 15
 
 
 def json_response_payload(payload: Any) -> bytes:
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return strict_json_bytes(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 _ACTIVE_ALLOWED_ORIGINS: frozenset[str] = frozenset()
@@ -1315,6 +1370,7 @@ class Runtime:
                 details={"supported": list(SHELL_ENV_INHERIT_CHOICES)},
             )
         self.allow_network = allow_network or self.capabilities.network
+        self.transport = transport
         self.auth_token = auth_token or None
         self.oauth_config = oauth_config
         self.upstream_manager = upstream_manager or UpstreamManager.empty(
@@ -1353,6 +1409,7 @@ class Runtime:
         self.starting_sessions = 0
         self._closed = False
         self.http_session_id = secrets.token_urlsafe(24)
+        self.stdio_result_owner = f"stdio:{secrets.token_urlsafe(24)}"
         self.protocol_version = PROTOCOL_VERSION
         self.patch_baselines: dict[str, str | None] = {}
         self.patch_lock = threading.Lock()
@@ -1470,7 +1527,14 @@ class Runtime:
                 "title": SERVER_TITLE,
                 "version": __version__,
             },
-            "instructions": self.project_context.server_instructions(),
+            "instructions": "\n\n".join(
+                part
+                for part in (
+                    self.project_context.server_instructions(),
+                    _BROKER_INSTRUCTIONS,
+                )
+                if part
+            ),
         }
 
     def list_tools(self) -> dict[str, Any]:
@@ -1595,6 +1659,12 @@ class Runtime:
                     with self.request_sessions_lock:
                         self.request_sessions.pop(request_id, None)
                 self.request_context.request_id = None
+            if name in _BROKER_PASSTHROUGH:
+                structured = payload.get("structuredContent")
+                trace_payload = copy.deepcopy(structured) if isinstance(structured, dict) else {}
+                trace_payload.setdefault("ok", not bool(payload.get("isError")))
+                self.emit_tool_trace(name, args, trace_payload, started_at)
+                return payload
             payload.setdefault("ok", True)
             self.emit_tool_trace(name, args, payload, started_at)
             content = spec.content_builder(payload) if spec.content_builder else None
@@ -1643,6 +1713,168 @@ class Runtime:
             self.emit_tool_trace(name, args, payload, started_at)
             return make_tool_result(name, payload, is_error=True)
 
+    def upstream_tool_search(self, args: dict[str, Any]) -> dict[str, Any]:
+        filters = ToolSearchFilters(
+            server=args.get("server"),
+            read_only=args.get("read_only"),
+            tags=tuple(args.get("tags") or ()),
+            name_prefix=args.get("name_prefix"),
+            limit=int(args.get("limit", 5)),
+        )
+        results = self.upstream_manager.search_catalog(str(args["query"]), filters)
+        return {
+            "query": str(args["query"]),
+            "count": len(results),
+            "results": [
+                {
+                    "name": result.public_name,
+                    "server": result.server_alias,
+                    "remote_name": result.remote_name,
+                    "title": result.title,
+                    "description": result.description,
+                    "tags": list(result.tags),
+                    "risk": result.effective_risk,
+                    "schema_digest": result.public_schema_digest,
+                    "score": result.score,
+                }
+                for result in results
+            ],
+        }
+
+    def upstream_tool_describe(self, args: dict[str, Any]) -> dict[str, Any]:
+        description = self.upstream_manager.describe_catalog_tool(str(args["name"]))
+        if description is None:
+            raise ToolFailure(
+                "UPSTREAM_TOOL_NOT_FOUND",
+                f"Unknown upstream catalog tool: {args['name']}",
+                category="validation",
+            )
+        return description
+
+    def upstream_tool_call(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._upstream_broker_call(args, expected_risk="readonly")
+
+    def upstream_tool_call_mutating(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._upstream_broker_call(args, expected_risk="mutating")
+
+    def _upstream_broker_call(
+        self,
+        args: dict[str, Any],
+        *,
+        expected_risk: str,
+    ) -> dict[str, Any]:
+        name = str(args["name"])
+        state = self.upstream_manager.state
+        tool = state.all_tools.get(name)
+        if tool is None or name not in state.catalog:
+            return upstream_error_result(
+                "UPSTREAM_TOOL_NOT_FOUND",
+                f"Unknown upstream catalog tool: {name}",
+                category="validation",
+                tool_name=name,
+            )
+        if tool.effective_risk != expected_risk:
+            code = (
+                "UPSTREAM_TOOL_NOT_READONLY"
+                if expected_risk == "readonly"
+                else "UPSTREAM_TOOL_NOT_MUTATING"
+            )
+            return upstream_error_result(
+                code,
+                f"Upstream tool {name!r} is classified as {tool.effective_risk}.",
+                category="validation",
+                alias=name.partition("__")[0],
+                tool_name=name,
+            )
+        digest = args.get("schema_digest")
+        if digest is not None:
+            digest_text = str(digest)
+            if not _SCHEMA_DIGEST_RE.fullmatch(digest_text):
+                return upstream_error_result(
+                    "UPSTREAM_SCHEMA_CHANGED",
+                    "schema_digest must be the 32-character lowercase hex digest from upstream_tool_search or upstream_tool_describe.",
+                    category="validation",
+                    alias=name.partition("__")[0],
+                    tool_name=name,
+                )
+            if digest_text != tool.public_schema_digest:
+                return upstream_error_result(
+                    "UPSTREAM_SCHEMA_CHANGED",
+                    f"Schema changed for {name!r}; search or describe the tool again.",
+                    category="validation",
+                    details={
+                        "expected": digest_text,
+                        "current": tool.public_schema_digest,
+                    },
+                    alias=name.partition("__")[0],
+                    tool_name=name,
+                )
+        elif expected_risk == "mutating":
+            return upstream_error_result(
+                "UPSTREAM_SCHEMA_CHANGED",
+                "A current schema_digest from upstream_tool_search or upstream_tool_describe is required for mutating calls.",
+                category="validation",
+                details={"current": tool.public_schema_digest},
+                alias=name.partition("__")[0],
+                tool_name=name,
+            )
+        arguments = args.get("arguments") or {}
+        public_schema = copy.deepcopy(tool.public_definition.get("inputSchema"))
+        if not isinstance(public_schema, dict):
+            public_schema = {"type": "object", "additionalProperties": True}
+        try:
+            validate_schema_value(arguments, public_schema, path="arguments")
+        except ToolFailure as exc:
+            return upstream_error_result(
+                "UPSTREAM_ARGUMENTS_INVALID",
+                exc.message,
+                category="validation",
+                details={"validation_code": exc.code},
+                alias=name.partition("__")[0],
+                tool_name=name,
+            )
+        owner = self.current_result_owner()
+        return self.upstream_manager.call_tool(
+            name,
+            arguments,
+            result_owner=owner,
+            store_overflow=owner is not None,
+        )
+
+    def current_result_owner(self) -> str | None:
+        if self.transport == "http":
+            return self.http_session_id
+        if self.transport == "stdio":
+            return self.stdio_result_owner
+        return None
+
+    def upstream_result_fetch(self, args: dict[str, Any]) -> dict[str, Any]:
+        owner = self.current_result_owner()
+        try:
+            if owner is None:
+                raise ResultNotFound("Result handle was not found.")
+            page = self.upstream_manager.result_store.fetch(
+                str(args["handle"]),
+                owner=owner,
+                offset=int(args.get("offset", 0)),
+                limit=int(args.get("limit", 8000)),
+            )
+        except ResultNotFound as exc:
+            raise ToolFailure(
+                "UPSTREAM_RESULT_NOT_FOUND",
+                "Upstream result handle was not found or is no longer available.",
+                category="not_found",
+            ) from exc
+        return {
+            "handle": page.handle,
+            "text": page.text,
+            "offset": page.offset,
+            "next_offset": page.next_offset,
+            "total_codepoints": page.total_codepoints,
+            "eof": page.eof,
+            "server": page.server_alias,
+        }
+
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
 
@@ -1655,7 +1887,9 @@ class Runtime:
             warnings.append("permission_mode=dangerous disables MCP safety gates")
         if self.fake_readonly_annotations:
             warnings.append(
-                "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
+                "eligible tools/list annotations are faked as read-only; "
+                "upstream_tool_call_mutating retains truthful mutating annotations; "
+                "apply_patch and exec_command still mutate and execute"
             )
         return {
             "ok": True,
@@ -4438,46 +4672,240 @@ def validate_arguments(tool_name: str, args: dict[str, Any]) -> None:
         raise JsonRpcError(-32602, exc.message, {"reason": "invalid_arguments", "code": exc.code}) from exc
 
 
+def _json_schema_fingerprint(value: Any) -> tuple[Any, ...]:
+    """Return a hashable JSON-value key with JSON Schema equality semantics."""
+
+    if value is None:
+        return ("null",)
+    if isinstance(value, bool):
+        return ("boolean", value)
+    if isinstance(value, int):
+        # Decimal(int) is exact and does not route through Python's guarded
+        # int-to-string conversion, so the project-owned 4,300 digit input
+        # contract remains independent of sys.set_int_max_str_digits().
+        return ("number", Decimal(value))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return ("number", repr(value))
+        # Decimal equality and hashing already ignore insignificant trailing
+        # zeroes without consulting the active decimal context. Calling
+        # normalize() here is unsafe because it rounds through that context
+        # (28 digits by default), which can collapse distinct large integers.
+        return ("number", Decimal(str(value)))
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, list):
+        return ("array", tuple(_json_schema_fingerprint(item) for item in value))
+    if isinstance(value, dict):
+        return (
+            "object",
+            tuple(
+                (key, _json_schema_fingerprint(item))
+                for key, item in sorted(value.items())
+            ),
+        )
+    return ("unsupported", type(value).__qualname__, repr(value))
+
+
+def _json_schema_equal(left: Any, right: Any) -> bool:
+    return _json_schema_fingerprint(left) == _json_schema_fingerprint(right)
+
+
+def _safe_validation_repr(value: Any) -> str:
+    try:
+        return repr(value)
+    except ValueError:
+        # Python may refuse repr() for integers above the process-global
+        # int_max_str_digits setting. Validation errors must remain structured.
+        return f"<{type(value).__qualname__} value omitted>"
+
+
 def validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> None:
+    negated = schema.get("not")
+    if isinstance(negated, dict) and _schema_branch_matches(value, negated, path=path):
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{path} matches a forbidden schema.",
+            category="validation",
+        )
+
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for branch in all_of:
+            if isinstance(branch, dict):
+                validate_schema_value(value, branch, path=path)
+
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list) and any_of:
+        if not any(
+            _schema_branch_matches(value, branch, path=path)
+            for branch in any_of
+            if isinstance(branch, dict)
+        ):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} does not match any allowed schema.",
+                category="validation",
+            )
+
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list) and one_of:
+        matches = sum(
+            1
+            for branch in one_of
+            if isinstance(branch, dict) and _schema_branch_matches(value, branch, path=path)
+        )
+        if matches != 1:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must match exactly one allowed schema.",
+                category="validation",
+            )
+
     expected_type = schema.get("type")
     if expected_type is not None and not schema_type_matches(value, expected_type):
-        raise ToolFailure("INVALID_ARGUMENT", f"{path} must be {schema_type_name(expected_type)}.", category="validation")
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{path} must be {schema_type_name(expected_type)}.",
+            category="validation",
+        )
+
+    if "const" in schema and not _json_schema_equal(value, schema["const"]):
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{path} must equal {_safe_validation_repr(schema['const'])}.",
+            category="validation",
+        )
+    if (
+        "enum" in schema
+        and isinstance(schema["enum"], list)
+        and not any(_json_schema_equal(value, candidate) for candidate in schema["enum"])
+    ):
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            f"{path} must be one of {_safe_validation_repr(schema['enum'])}.",
+            category="validation",
+        )
 
     if isinstance(value, str):
         min_length = schema.get("minLength")
+        max_length = schema.get("maxLength")
         if isinstance(min_length, int) and len(value) < min_length:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} is shorter than {min_length}.", category="validation")
-        if "enum" in schema and value not in schema["enum"]:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} must be one of {schema['enum']!r}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} is shorter than {min_length}.",
+                category="validation",
+            )
+        if isinstance(max_length, int) and len(value) > max_length:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} is longer than {max_length}.",
+                category="validation",
+            )
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str):
+            try:
+                matched = re.search(pattern, value) is not None
+            except re.error:
+                matched = True
+            if not matched:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{path} does not match the required pattern.",
+                    category="validation",
+                )
 
-    if isinstance(value, int) and not isinstance(value, bool):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must be a finite number.",
+                category="validation",
+            )
         minimum = schema.get("minimum")
         maximum = schema.get("maximum")
         if isinstance(minimum, (int, float)) and value < minimum:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} must be >= {minimum}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must be >= {_safe_validation_repr(minimum)}.",
+                category="validation",
+            )
         if isinstance(maximum, (int, float)) and value > maximum:
-            raise ToolFailure("INVALID_ARGUMENT", f"{path} must be <= {maximum}.", category="validation")
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must be <= {_safe_validation_repr(maximum)}.",
+                category="validation",
+            )
 
-    if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        item_schema = schema["items"]
-        for index, item in enumerate(value):
-            validate_schema_value(item, item_schema, path=f"{path}[{index}]")
+    if isinstance(value, list):
+        min_items = schema.get("minItems")
+        max_items = schema.get("maxItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must contain at least {min_items} items.",
+                category="validation",
+            )
+        if isinstance(max_items, int) and len(value) > max_items:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"{path} must contain at most {max_items} items.",
+                category="validation",
+            )
+        if schema.get("uniqueItems") is True:
+            seen_items: set[tuple[Any, ...]] = set()
+            for item in value:
+                fingerprint = _json_schema_fingerprint(item)
+                if fingerprint in seen_items:
+                    raise ToolFailure(
+                        "INVALID_ARGUMENT",
+                        f"{path} must contain unique items.",
+                        category="validation",
+                    )
+                seen_items.add(fingerprint)
+        if isinstance(schema.get("items"), dict):
+            item_schema = schema["items"]
+            for index, item in enumerate(value):
+                validate_schema_value(item, item_schema, path=f"{path}[{index}]")
 
     if isinstance(value, dict):
         properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
         required = schema.get("required", [])
+        if not isinstance(required, list):
+            required = []
         for key in required:
-            if key not in value:
-                raise ToolFailure("INVALID_ARGUMENT", f"{path}.{key} is required.", category="validation")
+            if isinstance(key, str) and key not in value:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{path}.{key} is required.",
+                    category="validation",
+                )
         additional = schema.get("additionalProperties", True)
         for key, item in value.items():
             child_path = f"{path}.{key}"
-            if key in properties:
-                validate_schema_value(item, properties[key], path=child_path)
+            child_schema = properties.get(key)
+            if isinstance(child_schema, dict):
+                validate_schema_value(item, child_schema, path=child_path)
+            elif key in properties:
+                continue
             elif additional is False:
-                raise ToolFailure("INVALID_ARGUMENT", f"{child_path} is not a recognized argument.", category="validation")
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    f"{child_path} is not a recognized argument.",
+                    category="validation",
+                )
             elif isinstance(additional, dict):
                 validate_schema_value(item, additional, path=child_path)
+
+
+def _schema_branch_matches(value: Any, schema: dict[str, Any], *, path: str) -> bool:
+    try:
+        validate_schema_value(value, schema, path=path)
+    except ToolFailure:
+        return False
+    return True
 
 
 def schema_type_matches(value: Any, expected_type: str | list[str]) -> bool:
@@ -4509,14 +4937,16 @@ def schema_type_name(expected_type: str | list[str]) -> str:
 def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
     schemas = input_schemas()
     annotations = tool_annotations(name, fake_readonly=fake_readonly)
-    return {
+    definition = {
         "name": name,
         "title": annotations["title"],
         "description": TOOL_REGISTRY[name].description,
         "inputSchema": schemas[name],
-        "outputSchema": tool_output_schema(),
         "annotations": annotations,
     }
+    if name not in {"upstream_tool_call", "upstream_tool_call_mutating"}:
+        definition["outputSchema"] = tool_output_schema()
+    return definition
 
 
 def tool_annotations(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
@@ -4524,13 +4954,14 @@ def tool_annotations(name: str, *, fake_readonly: bool = False) -> dict[str, Any
 
     ``fake_readonly`` serves clients that refuse to call, or prompt on every call
     to, a tool annotated as mutating, which no server-side permission mode can
-    influence. It reports every tool as read-only and non-destructive even though
-    `apply_patch` and `exec_command` still mutate and still execute. Only
-    `tools/list` may pass it: `server_info` and the server card must keep
-    reporting the real annotations so the override stays discoverable.
+    influence. It rewrites eligible local tool annotations as read-only and
+    non-destructive even though `apply_patch` and `exec_command` still mutate and
+    execute. `upstream_tool_call_mutating` is exempt and always retains truthful
+    mutating annotations. Only `tools/list` may apply the compatibility rewrite:
+    `server_info` and the server card keep reporting the real annotations.
     """
     spec = TOOL_REGISTRY[name]
-    if fake_readonly:
+    if fake_readonly and name != "upstream_tool_call_mutating":
         return {
             "title": spec.title,
             "readOnlyHint": True,
@@ -4557,6 +4988,52 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     string_array = {"type": "array", "items": {"type": "string"}}
     return {
         "server_info": object_schema(),
+        "upstream_tool_search": object_schema(
+            {
+                "query": {**string, "minLength": 1},
+                "server": string,
+                "read_only": boolean,
+                "tags": string_array,
+                "name_prefix": string,
+                "limit": {**integer, "minimum": 1, "maximum": 20, "default": 5},
+            },
+            ["query"],
+        ),
+        "upstream_tool_describe": object_schema(
+            {
+                "name": {**string, "minLength": 1},
+            },
+            ["name"],
+        ),
+        "upstream_tool_call": object_schema(
+            {
+                "name": {**string, "minLength": 1},
+                "arguments": {"type": "object", "additionalProperties": True, "default": {}},
+                "schema_digest": {**string, "pattern": "^[0-9a-f]{32}$"},
+            },
+            ["name"],
+        ),
+        "upstream_tool_call_mutating": object_schema(
+            {
+                "name": {**string, "minLength": 1},
+                "arguments": {"type": "object", "additionalProperties": True, "default": {}},
+                "schema_digest": {**string, "pattern": "^[0-9a-f]{32}$"},
+            },
+            ["name", "schema_digest"],
+        ),
+        "upstream_result_fetch": object_schema(
+            {
+                "handle": {**string, "minLength": 1},
+                "offset": {**integer, "minimum": 0, "default": 0},
+                "limit": {
+                    **integer,
+                    "minimum": 1,
+                    "maximum": RESULT_FETCH_MAX_CODEPOINTS,
+                    "default": 8000,
+                },
+            },
+            ["handle"],
+        ),
         "check_exec_environment": object_schema(),
         "get_default_cwd": object_schema(),
         "set_default_cwd": object_schema(
@@ -4855,8 +5332,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": {"code": "invalid_request", "message": "Admin request body size is invalid"}}, status=413)
             return None
         try:
-            value = json.loads(self.rfile.read(length).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            value = strict_json_loads(self.rfile.read(length))
+        except (UnicodeDecodeError, ValueError):
             self.send_json({"error": {"code": "invalid_json", "message": "Body must be valid JSON"}}, status=400)
             return None
         if not isinstance(value, dict):
@@ -5135,8 +5612,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length)
         try:
-            request = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            request = strict_json_loads(body)
+        except (UnicodeDecodeError, ValueError):
             self.send_rpc_error(-32700, "Parse error")
             return
         if isinstance(request, list):
@@ -5685,8 +6162,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({"error": "invalid_client_metadata", "error_description": "Content-Type must be application/json"}, status=400)
             return
         try:
-            metadata = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            metadata = strict_json_loads(body)
+        except (UnicodeDecodeError, ValueError):
             self.send_json({"error": "invalid_client_metadata", "error_description": "Body must be valid JSON"}, status=400)
             return
         if not isinstance(metadata, dict):
@@ -5812,7 +6289,8 @@ def build_runtime(
         )
     if emit_warning and runtime.fake_readonly_annotations:
         print(
-            "WARNING: tools/list reports every tool as read-only and non-destructive. "
+            "WARNING: tools/list rewrites eligible local tools as read-only and non-destructive; "
+            "upstream_tool_call_mutating retains truthful mutating annotations. "
             "apply_patch and exec_command still mutate the workspace and still run commands. "
             "server_info and the server card keep reporting the real annotations.",
             file=sys.stderr,
@@ -6549,8 +7027,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--dangerously-fake-readonly-annotations",
         action="store_true",
         help=(
-            "report every tool in tools/list as read-only and non-destructive for clients that gate on "
-            "annotations; mutation and execution still happen; requires --permission-mode dangerous, and "
+            "report eligible local tools in tools/list as read-only and non-destructive for clients that "
+            "gate on annotations; upstream_tool_call_mutating remains truthfully mutating; mutation and "
+            "execution still happen; requires --permission-mode dangerous, and "
             "requires auth over HTTP; server_info and the server card keep reporting the real annotations; "
             f"can also be enabled with {ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS=1"
         ),

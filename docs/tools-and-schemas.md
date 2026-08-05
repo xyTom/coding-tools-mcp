@@ -6,10 +6,15 @@ properties, annotations, and error codes with the contract.
 
 ## Fixed inventory
 
-The default catalog contains exactly 20 tools:
+The default catalog contains exactly 25 tools:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
+- `upstream_tool_search`: search the fixed upstream catalog using compact sanitized metadata.
+- `upstream_tool_describe`: inspect one sanitized upstream definition and public schema digest.
+- `upstream_tool_call`: validate and call a catalog tool classified as read-only.
+- `upstream_tool_call_mutating`: validate and call a mutating catalog tool with a public digest.
+- `upstream_result_fetch`: page a session-owned original oversized Broker result.
 - `check_exec_environment`: lightweight execution policy and Landlock status.
 - `get_default_cwd`: inspect this MCP runtime's relative-path base.
 - `set_default_cwd`: change this MCP runtime's relative-path base.
@@ -32,14 +37,18 @@ The default catalog contains exactly 20 tools:
 - `view_image`: one MCP image content block plus structured metadata.
 
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 19 local tools
+content. That capability gate is not a tool profile. The other 24 local tools
 are always advertised.
 
-Optional upstream tools are appended only during Runtime initialization and use
-`{alias}__{remote_name}`. Local names are permanently reserved. Upstream schema,
-annotations, extension fields, `content`, `structuredContent`, and `isError` are
-preserved. Namespace collisions fail closed, and an established Runtime never
-changes its snapshot; therefore `listChanged` is `false`.
+Upstream tools are discovered only during Runtime initialization and use
+`{alias}__{remote_name}`. Legacy or `expose_mode=direct` servers append every
+filtered public definition directly. `expose_mode=broker` keeps the complete
+sanitized catalog behind the five fixed Broker tools and appends only pinned
+remote names directly. Local names are permanently reserved. Broker calls
+preserve `content`, `structuredContent`, and `isError` without double wrapping.
+Namespace collisions fail closed, and an established Runtime never changes its
+snapshot; therefore `listChanged` is `false`. See
+[upstream-broker.md](upstream-broker.md).
 
 ## Result envelope
 

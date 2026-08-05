@@ -17,7 +17,7 @@ command execution, interactive process sessions, Git inspection, optional
 upstream MCP composition, persistent OAuth, Workspace-bound HTTP sessions, and
 an authenticated Admin WebUI.
 
-The default local catalog contains 20 stable, truthfully annotated tools. Permission
+The default local catalog contains 25 stable, truthfully annotated tools. Permission
 modes change command policy, never `tools/list`. Optional upstream tools are
 snapshotted at Runtime initialization and exposed under stable namespaces; their
 remote capabilities remain governed by the upstream server, not by this
@@ -98,13 +98,17 @@ OAuth startup is fail-closed: the persistent Store and
 [Remote MCP](docs/remote-mcp.md) and the
 [upgrade guide](docs/migration-v0.1-to-v0.2.2.md).
 
-### Gateway
+### Gateway and fixed Broker
 
 Upstream MCP configuration is fixed before Runtime initialization. Each Runtime
 gets an immutable namespaced snapshot, so `listChanged: false` remains truthful.
-Local tool names are reserved; namespace collisions fail closed. Admin Gateway
-changes are persisted for restart only—there is no hot reload, start, or stop
-control path.
+`expose_mode=direct` keeps legacy direct exposure; `expose_mode=broker` keeps the
+complete sanitized catalog behind five permanently registered Broker tools and
+only exposes pinned remote names directly. Local names are reserved and
+collisions fail closed. Admin Gateway changes are validate-and-persist only and
+take effect for a new MCP Session/Runtime or service restart—there is no hot
+reload, start, stop, or list-changed path. See
+[Stable-Catalog Upstream Broker](docs/upstream-broker.md).
 
 ### Admin WebUI
 
@@ -121,6 +125,7 @@ and Vault references are never displayed.
 | Files and search | `read_file`, `list_dir`, `list_files`, `search_text`, `apply_patch`, `view_image` |
 | Execution | `exec_command`, `write_stdin`, `read_output`, `kill_session`, `request_permissions` |
 | Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame` |
+| Upstream Broker | `upstream_tool_search`, `upstream_tool_describe`, `upstream_tool_call`, `upstream_tool_call_mutating`, `upstream_result_fetch` |
 | Runtime | `server_info`, `check_exec_environment`, `get_default_cwd`, `set_default_cwd` |
 
 `apply_patch` is the only direct local file-mutation primitive. Root
