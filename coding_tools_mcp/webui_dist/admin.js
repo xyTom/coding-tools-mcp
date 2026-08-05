@@ -2,8 +2,11 @@ import { SettingsPageState } from './settings-page.js';
 import { createWorkspace, serializeSettings } from './settings-model.js';
 import { SAFETY_PRESETS, hostMode, presetFor } from './settings-copy.js';
 import { bindWorkspaceEditor, renderWorkspaceEditor } from './workspace-editor.js';
+import { getLocale, initI18n, translateText } from './i18n.js';
 
     const $ = (id) => document.getElementById(id);
+    const tr = (value) => translateText(value, getLocale());
+    const confirmLocalized = (message) => confirm(tr(message));
     const state = {
       token: localStorage.getItem('mcpAdminToken') || '',
       status: null,
@@ -202,7 +205,7 @@ import { bindWorkspaceEditor, renderWorkspaceEditor } from './workspace-editor.j
     }
 
     function confirmDirty(action = '继续') {
-      return !state.dirty || confirm(`还有未保存的编辑，确认${action}？`);
+      return !state.dirty || confirmLocalized(`还有未保存的编辑，确认${action}？`);
     }
 
     function setFormValues(values) {
@@ -247,8 +250,16 @@ import { bindWorkspaceEditor, renderWorkspaceEditor } from './workspace-editor.j
       if (name !== state.active && !confirmDirty('切换页面')) return;
       state.active = name;
       document.querySelectorAll('[data-view]').forEach((el) => el.classList.toggle('active', el.dataset.view === name));
-      document.querySelectorAll('[data-nav]').forEach((el) => el.classList.toggle('active', el.dataset.nav === name));
-      $('adminApp')?.classList.remove('nav-open');
+      document.querySelectorAll('[data-nav]').forEach((el) => {
+        const active = el.dataset.nav === name;
+        el.classList.toggle('active', active);
+        if (active) el.setAttribute('aria-current', 'page');
+        else el.removeAttribute('aria-current');
+      });
+      const app = $('adminApp');
+      app?.classList.remove('nav-open');
+      const desktopExpanded = !window.matchMedia('(max-width: 780px)').matches && !app?.classList.contains('nav-collapsed');
+      $('navToggle')?.setAttribute('aria-expanded', String(desktopExpanded));
     }
 
     function setChatTrack(name) {
@@ -372,7 +383,7 @@ import { bindWorkspaceEditor, renderWorkspaceEditor } from './workspace-editor.j
     }
 
     async function rotateOAuthPassword() {
-      const confirmed = confirm(
+      const confirmed = confirmLocalized(
         '轮换后，旧 OAuth Password 将不能继续用于新的授权页面登录。\n\n已有 Access Token 和 Refresh Token 不会被撤销。\n\n确认轮换？'
       );
       if (!confirmed) return;
@@ -621,9 +632,10 @@ import { bindWorkspaceEditor, renderWorkspaceEditor } from './workspace-editor.j
       state.editingServerAlias = alias;
       const editing = Boolean(alias);
       setText('serverEditorTitle', editing ? `编辑工具连接：${alias}` : '添加工具连接');
-      setText('serverEditorHint', editing ? '修改现有 MCP 配置，保存后会重新加载上游。' : '用向导生成 JSON，先预览再保存。');
+      setText('serverEditorHint', editing ? '修改连接信息，保存后会重新加载工具。' : '选择连接类型并填写表单，高级配置可以保持折叠。');
       setText('serverEditorNavLabel', editing ? '编辑工具连接' : '添加工具连接');
       setText('installServer', editing ? '保存编辑并重载' : '保存并重载');
+      setText('saveWizard', editing ? '保存修改' : '保存连接');
       setText('planServer', editing ? '预览编辑' : '预览变更');
       const aliasInput = $('wizardAlias');
       if (aliasInput) aliasInput.disabled = editing;
@@ -919,7 +931,7 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
       event?.preventDefault();
       syncDraftFromSettingsControls();
       const draft = state.settings;
-      if (draft.draft.permission_mode === 'dangerous' && !confirm('完全权限会关闭主要命令权限门。确认仅在隔离环境中使用吗？')) return;
+      if (draft.draft.permission_mode === 'dangerous' && !confirmLocalized('完全权限会关闭主要命令权限门。确认仅在隔离环境中使用吗？')) return;
       const settings = draft.payload;
       const response = await fetch('/api/admin/settings', { method:'POST', headers:headers(), body:JSON.stringify({ settings }) });
       const data = await response.json().catch(() => ({ ok:false, error:'保存服务没有返回 JSON' }));
@@ -1319,7 +1331,7 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
 
     window.deleteContextEntry = async (id) => {
       if (!confirmDirty('删除上下文条目')) return;
-      if (!confirm('确认删除这条恢复上下文？')) return;
+      if (!confirmLocalized('确认删除这条恢复上下文？')) return;
       out(await callTool('mcp_chat_delete_context', { id }));
       if (state.selectedConversation) await window.readChatConversation(state.selectedConversation);
       await refreshStatus({ force:true });
@@ -1338,9 +1350,9 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
     window.checkServer = async (alias) => { out(await callTool('mcp_server_health', { alias })); };
     window.serverLogs = async (alias) => { out(await callTool('mcp_server_logs', { alias, max_lines:80 })); };
     window.restartServer = async (alias) => { await callTool('mcp_server_stop', { alias }); out(await callTool('mcp_server_start', { alias })); await refreshStatus(); };
-    window.removeServer = async (alias) => { if (!confirm('确认删除这个 MCP 配置？')) return; out(await callTool('mcp_server_remove', { alias, apply:true })); await refreshStatus(); };
+    window.removeServer = async (alias) => { if (!confirmLocalized('确认删除这个 MCP 配置？')) return; out(await callTool('mcp_server_remove', { alias, apply:true })); await refreshStatus(); };
     async function runOAuthAdminAction(action, id, message) {
-      if (message && !confirm(message)) return;
+      if (message && !confirmLocalized(message)) return;
       out(await api('/api/admin/oauth/actions', { action, id }));
       await refreshOAuthAgents();
       await refreshStatus({ silent:true, force:true });
@@ -1349,10 +1361,10 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
     window.revokeOAuthGrant = async (grantId) => runOAuthAdminAction('revoke_grant', grantId, '撤销这个 Grant 及其 Access/Refresh Token？');
     window.revokeOAuthAccessToken = async (jti) => runOAuthAdminAction('revoke_access_token', jti, '立即撤销这个 Access Token？');
     window.revokeOAuthRefreshFamily = async (familyId) => runOAuthAdminAction('revoke_refresh_family', familyId, '撤销这个 Refresh Token Family？客户端将无法继续刷新。');
-    window.activateSigningKey = async (kid) => { if (!confirm(`激活 ${kid}？`)) return; out(await api('/api/admin/oauth/actions', { action:'activate_signing_key', id:kid })); await refreshStatus(); };
-    window.revokeSigningKey = async (kid) => { if (!confirm(`紧急撤销 ${kid} 会立即使相关 Agent token 失效。继续？`)) return; out(await api('/api/admin/oauth/actions', { action:'revoke_signing_key', id:kid })); await refreshStatus(); };
-    window.terminateSession = async (sessionId) => { if (!confirm('确认终止这个会话？')) return; out(await api('/api/admin/runtime', { terminate_session: sessionId })); await refreshStatus(); };
-    window.setSessionWorkspace = async (sessionId, workspaceId) => { if (!confirm('切换工作区会重置该会话的默认目录。继续？')) return; out(await api('/api/admin/workspaces/session', { session_id:sessionId, workspace_id:workspaceId })); await refreshStatus(); };
+    window.activateSigningKey = async (kid) => { if (!confirmLocalized(`激活 ${kid}？`)) return; out(await api('/api/admin/oauth/actions', { action:'activate_signing_key', id:kid })); await refreshStatus(); };
+    window.revokeSigningKey = async (kid) => { if (!confirmLocalized(`紧急撤销 ${kid} 会立即使相关 Agent token 失效。继续？`)) return; out(await api('/api/admin/oauth/actions', { action:'revoke_signing_key', id:kid })); await refreshStatus(); };
+    window.terminateSession = async (sessionId) => { if (!confirmLocalized('确认终止这个会话？')) return; out(await api('/api/admin/runtime', { terminate_session: sessionId })); await refreshStatus(); };
+    window.setSessionWorkspace = async (sessionId, workspaceId) => { if (!confirmLocalized('切换工作区会重置该会话的默认目录。继续？')) return; out(await api('/api/admin/workspaces/session', { session_id:sessionId, workspace_id:workspaceId })); await refreshStatus(); };
     window.exportTranscript = async (sessionId) => exportTranscriptPayload(sessionId);
     window.importCodexCandidate = async (candidateId) => importCodexSessions({ candidateIds:[candidateId] });
     window.syncCodexCandidate = async (candidateId) => importCodexSessions({ sync:true, candidateIds:[candidateId] });
@@ -1391,14 +1403,14 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
     };
     window.deleteChatMessage = async (id) => {
       if (!confirmDirty('删除消息')) return;
-      if (!confirm('确认删除这条聊天消息？')) return;
+      if (!confirmLocalized('确认删除这条聊天消息？')) return;
       out(await callTool('mcp_chat_delete_message', { id }));
       if (state.selectedConversation) await window.readChatConversation(state.selectedConversation);
       await refreshStatus({ force:true });
     };
     window.deleteChatConversation = async (conversationId) => {
       if (!confirmDirty('删除会话')) return;
-      if (!confirm('确认删除这个聊天会话的全部消息与上下文？')) return;
+      if (!confirmLocalized('确认删除这个聊天会话的全部消息与上下文？')) return;
       out(await callTool('mcp_chat_delete_conversation', { conversation_id: conversationId }));
       if (state.selectedConversation === conversationId) {
         state.selectedConversation = '';
@@ -1412,7 +1424,7 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
 
     async function clearChatRecords() {
       if (!confirmDirty('清空全部记录')) return;
-      if (!confirm('确认清空全部聊天记录和恢复上下文？这个操作不可撤销。')) return;
+      if (!confirmLocalized('确认清空全部聊天记录和恢复上下文？这个操作不可撤销。')) return;
       out(await callTool('mcp_chat_clear', {}));
       state.selectedConversation = '';
       setDirty(false);
@@ -1602,9 +1614,10 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
         const app = $('adminApp');
         if (window.matchMedia('(max-width: 780px)').matches) app.classList.toggle('nav-open');
         else app.classList.toggle('nav-collapsed');
+        $('navToggle').setAttribute('aria-expanded', String(app.classList.contains('nav-open') || !app.classList.contains('nav-collapsed')));
       };
-      $('navClose').onclick = () => $('adminApp').classList.remove('nav-open');
-      $('navBackdrop').onclick = () => $('adminApp').classList.remove('nav-open');
+      $('navClose').onclick = () => { $('adminApp').classList.remove('nav-open'); $('navToggle').setAttribute('aria-expanded', 'false'); };
+      $('navBackdrop').onclick = () => { $('adminApp').classList.remove('nav-open'); $('navToggle').setAttribute('aria-expanded', 'false'); };
       $('closeOutput').onclick = closeOutputPanel;
       $('outputBackdrop').onclick = closeOutputPanel;
       $('showOutput').onclick = showOutputPanel;
@@ -1625,6 +1638,14 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
       $('applyTemplate').onclick = () => resetServerEditor(selectedTemplateConfig());
       $('refreshTemplates').onclick = refreshTemplatesFromTool;
       $('newServerConfig').onclick = () => resetServerEditor(defaultServer);
+      $('saveWizard').onclick = async () => {
+        try {
+          setValue('serverConfig', JSON.stringify(wizardConfig(), null, 2));
+          await saveServerConfig();
+        } catch (err) {
+          out({ok:false, error:`无法保存连接：${err?.message || '请检查表单内容后重试'}`});
+        }
+      };
       $('syncJson').onclick = syncJsonFromWizard;
       $('syncWizard').onclick = syncWizardFromJson;
       $('formatJson').onclick = () => { const config = parseServerConfig(); setValue('serverConfig', JSON.stringify(config, null, 2)); out({ok:true, message:'JSON 已格式化'}); };
@@ -1682,7 +1703,7 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
         };
       });
       $('discardStartupSettings').onclick = () => {
-        if (!state.settings?.dirty || confirm('放弃所有未保存的设置修改？')) {
+        if (!state.settings?.dirty || confirmLocalized('放弃所有未保存的设置修改？')) {
           state.settings.reset({ active:state.settings.active, persisted:state.settings.persisted, pending_fields:state.settings.pendingFields });
           renderSettingsPage();
         }
@@ -1698,14 +1719,14 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
       $('secretDelete').onclick = async () => {
         const name = $('secretName').value.trim();
         if (!name) { out({ok:false, error:'密钥名不能为空'}); return; }
-        if (!confirm('确认删除这个密钥？')) return;
+        if (!confirmLocalized('确认删除这个密钥？')) return;
         out(await callTool('mcp_secret_delete', { name }));
         await refreshStatus();
       };
       $('reloadUpstream').onclick = async () => { out(await api('/api/admin/runtime', { reload_upstream:true })); await refreshStatus(); };
       $('refreshOAuthAgents').onclick = () => { refreshOAuthAgents(); };
       $('refreshSigningKeys').onclick = () => { refreshSigningKeys(); };
-      $('rotateSigningKey').onclick = async () => { if (!confirm('生成并激活新的 OAuth signing key？旧 key 将保留用于验证未过期 token。')) return; out(await api('/api/admin/oauth/actions', { action:'rotate_signing_key', id:'active' })); await refreshStatus(); };
+      $('rotateSigningKey').onclick = async () => { if (!confirmLocalized('生成并激活新的 OAuth signing key？旧 key 将保留用于验证未过期 token。')) return; out(await api('/api/admin/oauth/actions', { action:'rotate_signing_key', id:'active' })); await refreshStatus(); };
       $('generateOAuthPassword').onclick = generateOAuthPassword;
       $('rotateOAuthPassword').onclick = rotateOAuthPassword;
       $('copyOAuthPassword').onclick = async () => copyText($('oauthPasswordOneTimeValue').value, 'OAuth Password 已复制。');
@@ -1772,4 +1793,5 @@ $env:CODING_TOOLS_MCP_SECRETS_KEY = $key`;
       }, 5000);
     }
 
+    initI18n();
     initialize();

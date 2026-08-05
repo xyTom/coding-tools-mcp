@@ -8,18 +8,21 @@
   <link rel="stylesheet" href="./admin.css">
 </head>
 <body>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
   <main id="loginLayer" class="login-layer" aria-labelledby="loginTitle">
+    <button class="secondary language-toggle login-language" type="button" data-language-toggle data-i18n-skip aria-label="Switch to English" title="Switch to English"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.7 5.5 3.7 9S14.4 18.5 12 21c-2.4-2.5-3.7-5.5-3.7-9S9.6 5.5 12 3z"/></svg><span data-locale-label>EN</span></button>
     <section class="login-card">
-      <div class="login-brand"><div class="brand-mark">M</div><span>MCP 管理台</span></div>
+      <div class="login-brand"><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 7.5 12 4l5 3.5v5L12 16l-5-3.5z"/><path d="m7 12.5-3 2v4L8 21l4-2.5V16m5-3.5 3 2v4L16 21l-4-2.5"/></svg></div><span>MCP 管理台</span></div>
       <div>
-        <p class="login-eyebrow">管理员登录</p>
-        <h1 id="loginTitle">连接到管理工作区</h1>
-        <p class="login-copy">登录凭据只用于验证管理接口。验证成功后才会加载管理台内容。</p>
+        <p class="login-eyebrow">安全管理入口</p>
+        <h1 id="loginTitle">欢迎回来</h1>
+        <p class="login-copy">登录后可集中管理工具连接、工作区和聊天记录。</p>
       </div>
       <form id="loginForm">
-        <label for="token">管理 token</label>
-        <input id="token" type="password" autocomplete="current-password" autofocus>
-        <button id="saveToken" type="submit" class="login-primary">登录</button>
+        <label for="token">管理 Token</label>
+        <input id="token" type="password" autocomplete="current-password" placeholder="请输入管理 Token" aria-describedby="tokenHelp" autofocus>
+        <p id="tokenHelp" class="field-help">Token 只保存在当前浏览器中，不会显示在页面上。</p>
+        <button id="saveToken" type="submit" class="login-primary"><span>进入管理台</span><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>
       </form>
       <div class="login-divider"><span>或</span></div>
       <button id="oauthLogin" type="button" class="blue login-oauth">使用 OAuth 登录</button>
@@ -29,26 +32,28 @@
   </main>
   <div id="adminApp" class="app-shell hidden" aria-hidden="true">
     <header class="topbar">
-      <div class="brand"><button id="navToggle" class="secondary icon-btn" title="展开或收起导航">☰</button><div class="brand-mark">M</div><div><h1>MCP 管理台</h1><small>本地工具、会话与聊天持久化</small></div></div>
-      <div class="top-actions"><span id="authState" class="status-pill ok">已连接</span><span id="busyState" class="status-pill hidden">处理中</span><button id="showOutput" class="secondary">输出</button><button id="refresh" class="secondary">刷新</button><button id="logoutAdmin" class="secondary">退出登录</button></div>
+      <div class="brand"><button id="navToggle" class="secondary icon-btn" type="button" aria-label="展开或收起导航" aria-controls="sidebar" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button><div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 7.5 12 4l5 3.5v5L12 16l-5-3.5z"/><path d="m7 12.5-3 2v4L8 21l4-2.5V16m5-3.5 3 2v4L16 21l-4-2.5"/></svg></div><div><h1>MCP 管理台</h1><small>工具、工作区与聊天持久化</small></div></div>
+      <div class="top-actions"><span id="authState" class="status-pill ok">已连接</span><span id="busyState" class="status-pill hidden">处理中</span><button class="secondary top-action language-toggle" type="button" data-language-toggle data-i18n-skip aria-label="Switch to English" title="Switch to English"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.7 5.5 3.7 9S14.4 18.5 12 21c-2.4-2.5-3.7-5.5-3.7-9S9.6 5.5 12 3z"/></svg><span data-locale-label>EN</span></button><button id="showOutput" class="secondary top-action"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 9 5 12l3 3m8-6 3 3-3 3M13 6l-2 12"/></svg><span>输出</span></button><button id="refresh" class="secondary top-action"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg><span>刷新</span></button><button id="logoutAdmin" class="secondary top-action"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5m5 5H3m10-8h6a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6"/></svg><span>退出</span></button></div>
     </header>
     <aside id="sidebar" class="sidebar">
-      <div class="side-head"><span>工作区</span><button id="navClose" class="ghost side-close">关闭</button></div>
+      <div class="side-head"><span>功能导航</span><button id="navClose" class="ghost side-close" type="button" aria-label="关闭导航"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
       <nav class="nav-list" aria-label="管理台导航">
-        <button data-nav="overview"><span class="nav-icon">⌂</span><span class="nav-label">总览</span></button>
-        <button data-nav="manage"><span class="nav-icon">▣</span><span class="nav-label">工具连接</span></button>
-        <button data-nav="add"><span class="nav-icon">＋</span><span id="serverEditorNavLabel" class="nav-label">添加工具连接</span></button>
-        <button data-nav="persistence"><span class="nav-icon">◫</span><span class="nav-label">聊天记录与恢复</span></button>
-        <button data-nav="sessions"><span class="nav-icon">≡</span><span class="nav-label">活动会话</span></button>
-        <button data-nav="oauthAgents"><span class="nav-icon">◉</span><span class="nav-label">已授权客户端</span></button>
-        <button data-nav="signingKeys"><span class="nav-icon">⌁</span><span class="nav-label">登录签名密钥</span></button>
-        <button data-nav="usage"><span class="nav-icon">↯</span><span class="nav-label">活动日志</span></button>
-        <button data-nav="settings"><span class="nav-icon">⚙</span><span class="nav-label">设置</span></button>
-        <button data-nav="json"><span class="nav-icon">{}</span><span class="nav-label">开发者工具</span></button>
+        <span class="nav-group-label">常用</span>
+        <button data-nav="overview"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4zm10 7h6v-9h-6zM4 20h6v-3H4zm10-13h6V4h-6z"/></svg></span><span class="nav-label">总览</span></button>
+        <button data-nav="manage"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M7 7V4h10v3m-1 4v7m-8-7v7M5 7l1 13h12l1-13"/></svg></span><span class="nav-label">工具连接</span></button>
+        <button data-nav="add"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></span><span id="serverEditorNavLabel" class="nav-label">添加工具连接</span></button>
+        <button data-nav="persistence"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v11H9l-4 4zm4 4h6m-6 3h4"/></svg></span><span class="nav-label">聊天记录与恢复</span></button>
+        <button data-nav="sessions"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14v12H5zM8 10h8m-8 4h5"/></svg></span><span class="nav-label">活动会话</span></button>
+        <span class="nav-group-label">安全与系统</span>
+        <button data-nav="oauthAgents"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8m8 8 2 2 3-3"/></svg></span><span class="nav-label">已授权客户端</span></button>
+        <button data-nav="signingKeys"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 2 13.6 9.4M15 5l4 4M9 12a5 5 0 1 1-7 7 5 5 0 0 1 7-7z"/></svg></span><span class="nav-label">登录签名密钥</span></button>
+        <button data-nav="usage"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m5 14v-7m5 7V3"/></svg></span><span class="nav-label">活动日志</span></button>
+        <button data-nav="settings"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1z"/></svg></span><span class="nav-label">设置</span></button>
+        <button data-nav="json"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 9-3 3 3 3m8-6 3 3-3 3m-3-9-2 12"/></svg></span><span class="nav-label">开发者工具</span></button>
       </nav>
     </aside>
     <div id="navBackdrop" class="sidebar-backdrop"></div>
-    <main class="main">
+    <main id="mainContent" class="main" tabindex="-1">
       <section id="overview" class="view active" data-view="overview">
         <div class="section-head"><div><h2>总览</h2><p>服务状态和最近持久化情况集中在首页。</p></div><span id="endpointInfo" class="muted"></span></div>
         <div class="metrics">
@@ -71,8 +76,31 @@
       <section id="add" class="view" data-view="add">
         <div class="section-head"><div><h2 id="serverEditorTitle">添加工具连接</h2><p id="serverEditorHint">使用表单填写连接信息；JSON 仅在高级区域用于诊断。</p></div><button id="newServerConfig" class="secondary">新建连接</button></div>
         <div class="split wide">
-          <details class="surface" open><summary>配置向导</summary><div class="surface-body"><div class="row"><select id="templateSelect"><option value="filesystem">文件系统 MCP</option><option value="browser">浏览器 MCP</option><option value="github">GitHub MCP</option><option value="local">通用本地命令</option><option value="http">通用 HTTP MCP</option></select><button id="applyTemplate" class="secondary">套用模板</button><button id="refreshTemplates" class="secondary">刷新模板</button></div><div class="form-grid"><div><label for="wizardAlias">名称</label><input id="wizardAlias"></div><div><label for="wizardTransport">传输方式</label><select id="wizardTransport"><option value="stdio">本地命令 stdio</option><option value="http">HTTP URL</option></select></div><div class="full" data-stdio><label for="wizardCommand">命令</label><input id="wizardCommand"></div><div class="full" data-http><label for="wizardUrl">URL</label><input id="wizardUrl"></div><div class="full" data-stdio><label for="wizardArgs">参数</label><textarea id="wizardArgs"></textarea></div><div class="full" data-stdio><label for="wizardEnv">环境变量</label><textarea id="wizardEnv"></textarea></div><div class="full" data-http><label for="wizardHeaders">Headers</label><textarea id="wizardHeaders"></textarea></div><div><label for="wizardInclude">include_tools</label><textarea id="wizardInclude"></textarea></div><div><label for="wizardExclude">exclude_tools</label><textarea id="wizardExclude"></textarea></div><div><label for="wizardTimeout">timeout_ms</label><input id="wizardTimeout" inputmode="numeric"></div><label class="checkline"><input id="wizardEnabled" type="checkbox" checked>启用</label></div><div class="toolbar"><button id="syncJson" class="secondary">同步到 JSON</button><button id="syncWizard" class="secondary">从 JSON 读取</button></div></div></details>
-          <details class="surface"><summary>高级：配置 JSON</summary><div class="surface-body"><label for="serverConfig">配置 JSON</label><textarea id="serverConfig"></textarea><div class="toolbar"><button id="validateServer" class="secondary">校验格式</button><button id="formatJson" class="secondary">格式化</button><button id="planServer" class="secondary">预览变更</button><button id="installServer">保存并重载</button></div></div></details>
+          <details class="surface" open>
+            <summary>连接信息</summary>
+            <div class="surface-body">
+              <div class="template-picker">
+                <label for="templateSelect">先选择最接近的连接类型</label>
+                <div class="row"><select id="templateSelect"><option value="filesystem">文件与目录</option><option value="browser">浏览器工具</option><option value="github">GitHub</option><option value="local">其他本地工具</option><option value="http">其他远程工具</option></select><button id="applyTemplate" class="secondary">使用此模板</button><button id="refreshTemplates" class="secondary">刷新模板</button></div>
+                <p class="field-help">模板会自动填写常用配置，你只需检查并补充必要信息。</p>
+              </div>
+              <div class="form-grid">
+                <div><label for="wizardAlias">连接名称</label><input id="wizardAlias" placeholder="例如：实验资料库"></div>
+                <div><label for="wizardTransport">连接位置</label><select id="wizardTransport"><option value="stdio">这台电脑上的工具</option><option value="http">通过网址连接的工具</option></select></div>
+                <div class="full" data-stdio><label for="wizardCommand">启动命令</label><input id="wizardCommand" placeholder="模板通常会自动填写"><p class="field-help">如果不确定，请保留模板提供的内容。</p></div>
+                <div class="full" data-http><label for="wizardUrl">服务地址</label><input id="wizardUrl" type="url" placeholder="https://example.com/mcp"></div>
+                <div class="full" data-stdio><label for="wizardArgs">启动参数（每行一个）</label><textarea id="wizardArgs" placeholder="每行填写一个参数"></textarea></div>
+                <div class="full" data-stdio><label for="wizardEnv">环境变量（每行一个）</label><textarea id="wizardEnv" placeholder="例如 API_KEY=secret"></textarea><p class="field-help">敏感值建议使用“设置 → 凭据与密钥”保存。</p></div>
+                <div class="full" data-http><label for="wizardHeaders">请求头（每行一个）</label><textarea id="wizardHeaders" placeholder="例如 Authorization=Bearer ..."></textarea></div>
+                <div><label for="wizardInclude">只显示这些工具（可选）</label><textarea id="wizardInclude" placeholder="每行一个工具名称"></textarea></div>
+                <div><label for="wizardExclude">隐藏这些工具（可选）</label><textarea id="wizardExclude" placeholder="每行一个工具名称"></textarea></div>
+                <div><label for="wizardTimeout">等待时间（毫秒）</label><input id="wizardTimeout" type="number" min="100" step="100" inputmode="numeric"></div>
+                <label class="checkline"><input id="wizardEnabled" type="checkbox" checked> 保存后立即启用</label>
+              </div>
+              <div class="toolbar form-actions"><button id="saveWizard" type="button">保存连接</button><button id="syncJson" type="button" class="secondary">更新高级配置</button><button id="syncWizard" type="button" class="secondary">读取高级配置</button></div>
+            </div>
+          </details>
+          <details class="surface"><summary>高级选项：配置 JSON</summary><div class="surface-body"><p class="muted">仅建议熟悉 MCP 配置的用户直接编辑。普通添加流程无需展开此区域。</p><label for="serverConfig">配置 JSON</label><textarea id="serverConfig"></textarea><div class="toolbar"><button id="validateServer" class="secondary">校验格式</button><button id="formatJson" class="secondary">格式化</button><button id="planServer" class="secondary">预览变更</button><button id="installServer">保存高级配置</button></div></div></details>
         </div>
       </section>
 
@@ -99,7 +127,7 @@
         <details class="surface" open><summary>工具调用</summary><div class="surface-body"><div class="table-wrap compact-table"><table><thead><tr><th>时间</th><th>工具</th><th>结果</th><th>耗时</th><th>错误</th></tr></thead><tbody id="calls"></tbody></table></div></div></details>
       </section>
 
-      <section id="oauthAgents" class="view" data-view="oauthAgents">
+      <section id="oauthAgentsView" class="view" data-view="oauthAgents">
         <div class="section-head"><div><h2>OAuth 客户端与凭据</h2><p>连接标准 MCP 客户端、检查持久化状态，并撤销已签发授权。</p></div><button id="refreshOAuthAgents" class="secondary">刷新</button></div>
         <div class="session-summary oauth-summary"><div class="summary-item"><span class="mini-label">OAuth</span><strong id="oauthEnabledStatus">未启用</strong></div><div class="summary-item"><span class="mini-label">Secret Vault</span><strong id="oauthVaultStatus">未启用</strong><code id="oauthVaultPath"></code></div><div class="summary-item"><span class="mini-label">公开地址</span><strong id="oauthIssuerStatus">动态</strong></div><div class="summary-item"><span class="mini-label">已授权客户端</span><strong id="oauthClientCount">0</strong></div><div class="summary-item"><span class="mini-label">Refresh Family</span><strong id="oauthRefreshFamilyCount">0</strong></div></div>
         <section class="surface oauth-password-card"><div class="surface-body"><h3>OAuth Password</h3><p class="muted">用于新的 OAuth 授权页面登录；它与 Access Token、Refresh Token 和 signing key 相互独立。</p><div class="oauth-password-status-grid"><div><span class="mini-label">状态</span><strong id="oauthPasswordConfigured">正在读取…</strong></div><div><span class="mini-label">来源</span><strong id="oauthPasswordSource">-</strong></div><div><span class="mini-label">指纹</span><code id="oauthPasswordFingerprint">-</code></div><div><span class="mini-label">持久化</span><strong id="oauthPasswordPersisted">-</strong></div><div><span class="mini-label">Vault</span><strong id="oauthPasswordVault">-</strong></div><div><span class="mini-label">创建时间</span><strong id="oauthPasswordCreatedAt">-</strong></div></div><p id="oauthPasswordHint" class="settings-status">正在检查 OAuth Password…</p><div class="toolbar"><button id="generateOAuthPassword" type="button">生成并保存 OAuth Password</button><button id="rotateOAuthPassword" type="button" class="danger hidden">轮换 OAuth Password</button></div><section id="oauthPasswordOneTime" class="credential-result hidden" aria-live="assertive"><h3>新的 OAuth Password</h3><p class="risk-warning">此密码只显示一次，请立即保存。</p><div class="secret-input-row"><input id="oauthPasswordOneTimeValue" type="text" readonly autocomplete="off"><button id="copyOAuthPassword" type="button">复制</button><button id="clearOAuthPassword" type="button" class="secondary">关闭</button></div><p>指纹：<code id="oauthPasswordOneTimeFingerprint"></code></p></section></div></section>
@@ -111,7 +139,7 @@
         <details class="surface" open><summary>审计事件</summary><div class="surface-body"><pre id="oauthAudit" class="json-block">刷新后显示最近事件。</pre></div></details>
       </section>
 
-      <section id="signingKeys" class="view" data-view="signingKeys">
+      <section id="signingKeysView" class="view" data-view="signingKeys">
         <div class="section-head"><div><h2>登录签名密钥</h2><p>只显示密钥元数据。正常轮换会保留旧密钥以验证未过期的访问凭据。</p></div><div class="toolbar"><button id="rotateSigningKey" class="secondary">生成并激活新密钥</button><button id="refreshSigningKeys" class="secondary">刷新</button></div></div>
         <details class="surface" open><summary>密钥环</summary><div class="surface-body"><div class="table-wrap"><table><thead><tr><th>Key ID</th><th>算法</th><th>指纹</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="signingKeys"></tbody></table></div></div></details>
       </section>

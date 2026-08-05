@@ -821,6 +821,7 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("conversation-workspace", html)
         self.assertIn("chatWorkspaceEmpty", html)
         self.assertIn("busyState", html)
+        self.assertIn("data-language-toggle", html)
         self.assertIn("dirtyBadge", html)
         self.assertIn("chatReadLimit", html)
         self.assertIn("reloadSelectedConversation", html)
@@ -911,6 +912,7 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIn("showChatReader", js)
         self.assertIn("已读取会话正文", js)
         self.assertIn("SettingsPageState", js)
+        self.assertIn("initI18n", js)
         self.assertIn("renderWorkspaceEditor", js)
         self.assertIn("/api/admin/settings/validate", js)
         self.assertNotIn("settingsWorkspaceCatalog", html)
@@ -922,7 +924,7 @@ class McpAdminConfigTests(unittest.TestCase):
         self.assertIsNotNone(js_asset)
         self.assertIn("text/css", css_asset[1])
         self.assertIn("javascript", js_asset[1])
-        for asset_name in ("settings-model.js", "settings-copy.js", "workspace-editor.js", "settings-page.js"):
+        for asset_name in ("i18n.js", "settings-model.js", "settings-copy.js", "workspace-editor.js", "settings-page.js"):
             asset = admin_asset_response(asset_name)
             self.assertIsNotNone(asset)
             self.assertIn("javascript", asset[1])

@@ -7,7 +7,7 @@ const srcDir = path.join(root, 'webui', 'src');
 const outDir = path.join(root, 'coding_tools_mcp', 'webui_dist');
 const outFile = path.join(outDir, 'admin.html');
 const outCss = path.join(outDir, 'admin.css');
-const jsFiles = ['admin.js', 'settings-model.js', 'settings-copy.js', 'workspace-editor.js', 'settings-page.js'];
+const jsFiles = ['admin.js', 'i18n.js', 'settings-model.js', 'settings-copy.js', 'workspace-editor.js', 'settings-page.js'];
 
 const [html, css, modules] = await Promise.all([
   readFile(path.join(srcDir, 'admin.html'), 'utf8'),
