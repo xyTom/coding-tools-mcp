@@ -291,6 +291,20 @@ class SecretVaultTests(unittest.TestCase):
             self.assertTrue(vault.delete_secret("oauth-signing/key-a"))
             self.assertFalse(vault.delete_secret("oauth-signing/key-a"))
 
+    def test_legacy_record_without_cipher_metadata_remains_readable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "oauth-secrets.json"
+            vault = SecretVault(path, "test-master-key")
+            vault.set_secret("oauth-signing/key-a", "legacy-secret-value")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["secrets"]["oauth-signing/key-a"].pop("cipher")
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            self.assertEqual(
+                vault.get_secret("oauth-signing/key-a"),
+                "legacy-secret-value",
+            )
+
     def test_atomic_replace_failure_preserves_previous_vault(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "oauth-secrets.json"

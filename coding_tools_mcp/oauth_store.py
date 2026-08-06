@@ -25,6 +25,14 @@ class OAuthStoreError(RuntimeError):
     """OAuth persistence cannot safely serve an authorization decision."""
 
 
+class OAuthStoreWorkspaceAccessError(OAuthStoreError):
+    """A Client Workspace allowlist is empty or excludes the requested ID."""
+
+
+class OAuthStoreWorkspaceSelectionError(OAuthStoreError):
+    """A Client allows several Workspaces but this Grant did not select one."""
+
+
 class RefreshTokenClientMismatchError(OAuthStoreError):
     """A refresh token is bound to a different authenticated client."""
 
@@ -49,7 +57,7 @@ class RefreshTokenBinding:
 class OAuthAuthorizationStore:
     """SQLite-backed authorization metadata with fail-closed helpers."""
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, path: str | Path, *, pepper: bytes) -> None:
         if not isinstance(pepper, bytes) or not pepper:
@@ -151,6 +159,33 @@ class OAuthAuthorizationStore:
                     conn.execute("ALTER TABLE oauth_clients ADD COLUMN workspace_id TEXT")
                 if "workspace_id" not in grant_columns:
                     conn.execute("ALTER TABLE oauth_grants ADD COLUMN workspace_id TEXT")
+                conn.execute("PRAGMA user_version = 4")
+                current = 4
+            if current == 4:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS oauth_client_workspaces (
+                        client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+                        workspace_id TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        PRIMARY KEY(client_id, workspace_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS oauth_client_workspaces_workspace_idx "
+                    "ON oauth_client_workspaces(workspace_id, client_id)"
+                )
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO oauth_client_workspaces(
+                        client_id, workspace_id, created_at
+                    )
+                    SELECT client_id, workspace_id, updated_at
+                    FROM oauth_clients
+                    WHERE workspace_id IS NOT NULL AND workspace_id <> ''
+                    """
+                )
                 conn.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     @classmethod
@@ -401,6 +436,15 @@ class OAuthAuthorizationStore:
                         "workspace_id": workspace_id,
                     },
                 )
+                if workspace_id is not None:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO oauth_client_workspaces(
+                            client_id, workspace_id, created_at
+                        ) VALUES(?,?,?)
+                        """,
+                        (client_id, workspace_id, now),
+                    )
                 return
             if not bool(existing["enabled"]):
                 raise OAuthStoreError("OAuth client is disabled.")
@@ -424,6 +468,15 @@ class OAuthAuthorizationStore:
                     client_id,
                 ),
             )
+            if workspace_id is not None:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO oauth_client_workspaces(
+                        client_id, workspace_id, created_at
+                    ) VALUES(?,?,?)
+                    """,
+                    (client_id, workspace_id, now),
+                )
 
     def get_client(self, client_id: str) -> dict[str, Any] | None:
         with self._connection("client query") as conn:
@@ -431,33 +484,62 @@ class OAuthAuthorizationStore:
                 "SELECT * FROM oauth_clients WHERE client_id=?",
                 (client_id,),
             ).fetchone()
-        return self._client_payload(row) if row is not None else None
+            workspace_ids = self._client_workspace_ids(conn, client_id)
+        return (
+            self._client_payload(row, workspace_ids=workspace_ids)
+            if row is not None
+            else None
+        )
 
     def set_client_workspace(self, client_id: str, workspace_id: str) -> bool:
+        return self.set_client_workspaces(client_id, [workspace_id])
+
+    def set_client_workspaces(
+        self,
+        client_id: str,
+        workspace_ids: list[str] | tuple[str, ...],
+    ) -> bool:
         client_id = self.validate_client_id(client_id)
-        workspace_id = self.validate_workspace_id(workspace_id)
-        with self._transaction("client workspace binding", immediate=True) as conn:
+        if not isinstance(workspace_ids, (list, tuple)) or len(workspace_ids) > 256:
+            raise ValueError("OAuth Client Workspace access must contain at most 256 IDs.")
+        normalized = tuple(self.validate_workspace_id(item) for item in workspace_ids)
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("OAuth Client Workspace IDs must be unique.")
+        normalized = tuple(sorted(normalized))
+        with self._transaction("client workspace access update", immediate=True) as conn:
             row = conn.execute(
-                "SELECT enabled, revoked_at, workspace_id FROM oauth_clients WHERE client_id=?",
+                "SELECT enabled, revoked_at FROM oauth_clients WHERE client_id=?",
                 (client_id,),
             ).fetchone()
             if row is None:
                 return False
             if not bool(row["enabled"]) or row["revoked_at"] is not None:
                 raise OAuthStoreError("OAuth client is not active.")
-            if row["workspace_id"] == workspace_id:
+            existing = self._client_workspace_ids(conn, client_id)
+            if existing == normalized:
                 return True
             now = time.time()
             conn.execute(
+                "DELETE FROM oauth_client_workspaces WHERE client_id=?",
+                (client_id,),
+            )
+            conn.executemany(
+                """
+                INSERT INTO oauth_client_workspaces(client_id, workspace_id, created_at)
+                VALUES(?,?,?)
+                """,
+                ((client_id, workspace_id, now) for workspace_id in normalized),
+            )
+            conn.execute(
                 "UPDATE oauth_clients SET workspace_id=?, updated_at=? WHERE client_id=?",
-                (workspace_id, now, client_id),
+                (normalized[0] if len(normalized) == 1 else None, now, client_id),
             )
             self._audit(
                 conn,
-                "client_workspace_bound",
+                "client_workspaces_updated",
                 client_id=client_id,
                 actor_kind="admin",
-                details={"workspace_id": workspace_id},
+                details={"workspace_ids": list(normalized)},
             )
             return True
 
@@ -523,12 +605,20 @@ class OAuthAuthorizationStore:
             )
             return True
 
-    def create_grant(self, client_id: str, scopes: str) -> str:
+    def create_grant(
+        self,
+        client_id: str,
+        scopes: str,
+        *,
+        workspace_id: str | None = None,
+    ) -> str:
+        if workspace_id is not None:
+            workspace_id = self.validate_workspace_id(workspace_id)
         now = time.time()
         grant_id = str(uuid.uuid4())
         with self._transaction("grant creation", immediate=True) as conn:
             client = conn.execute(
-                "SELECT enabled, revoked_at, workspace_id FROM oauth_clients WHERE client_id=?",
+                "SELECT enabled, revoked_at FROM oauth_clients WHERE client_id=?",
                 (client_id,),
             ).fetchone()
             if (
@@ -537,9 +627,21 @@ class OAuthAuthorizationStore:
                 or client["revoked_at"] is not None
             ):
                 raise OAuthStoreError("OAuth client is not active.")
-            workspace_id = client["workspace_id"]
-            if not isinstance(workspace_id, str) or not workspace_id:
-                raise OAuthStoreError("OAuth client has no authorized Workspace binding.")
+            allowed_workspace_ids = self._client_workspace_ids(conn, client_id)
+            if not allowed_workspace_ids:
+                raise OAuthStoreWorkspaceAccessError(
+                    "OAuth client has no authorized Workspaces."
+                )
+            if workspace_id is None:
+                if len(allowed_workspace_ids) != 1:
+                    raise OAuthStoreWorkspaceSelectionError(
+                        "OAuth Workspace selection is required for this client."
+                    )
+                workspace_id = allowed_workspace_ids[0]
+            if workspace_id not in allowed_workspace_ids:
+                raise OAuthStoreWorkspaceAccessError(
+                    "Selected Workspace is not authorized for this OAuth client."
+                )
             conn.execute(
                 """
                 INSERT INTO oauth_grants(
@@ -1264,15 +1366,55 @@ class OAuthAuthorizationStore:
             rows = conn.execute(
                 "SELECT * FROM oauth_clients ORDER BY created_at DESC, client_id"
             ).fetchall()
-        return [self._client_payload(row) for row in rows]
+            workspace_rows = conn.execute(
+                """
+                SELECT client_id, workspace_id
+                FROM oauth_client_workspaces
+                ORDER BY client_id, workspace_id
+                """
+            ).fetchall()
+        workspace_ids_by_client: dict[str, list[str]] = {}
+        for workspace_row in workspace_rows:
+            workspace_ids_by_client.setdefault(
+                str(workspace_row["client_id"]), []
+            ).append(str(workspace_row["workspace_id"]))
+        return [
+            self._client_payload(
+                row,
+                workspace_ids=tuple(
+                    workspace_ids_by_client.get(str(row["client_id"]), [])
+                ),
+            )
+            for row in rows
+        ]
 
     @staticmethod
-    def _client_payload(row: sqlite3.Row) -> dict[str, Any]:
+    def _client_workspace_ids(
+        conn: sqlite3.Connection,
+        client_id: str,
+    ) -> tuple[str, ...]:
+        rows = conn.execute(
+            """
+            SELECT workspace_id FROM oauth_client_workspaces
+            WHERE client_id=? ORDER BY workspace_id
+            """,
+            (client_id,),
+        ).fetchall()
+        return tuple(str(row["workspace_id"]) for row in rows)
+
+    @staticmethod
+    def _client_payload(
+        row: sqlite3.Row,
+        *,
+        workspace_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
         item = dict(row)
+        item.pop("workspace_id", None)
         raw_redirects = item.pop("redirect_uris_json", None)
         item["redirect_uris"] = (
             json.loads(raw_redirects) if raw_redirects else [item["redirect_uri"]]
         )
+        item["workspace_ids"] = list(workspace_ids)
         return item
 
     def list_grants(self, client_id: str | None = None) -> list[dict[str, Any]]:

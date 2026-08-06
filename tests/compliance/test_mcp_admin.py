@@ -20,7 +20,8 @@ from coding_tools_mcp.admin import (
     document_revision,
     gateway_file_revision,
 )
-from coding_tools_mcp.oauth_store import OAuthAuthorizationStore
+from coding_tools_mcp.oauth import OAUTH_PASSWORD_SECRET, OAuthAuthorizationPassword
+from coding_tools_mcp.oauth_store import OAuthAuthorizationStore, OAuthStoreError
 from coding_tools_mcp.secret_vault import SecretVault
 from coding_tools_mcp.server import (
     MCPHandler,
@@ -58,6 +59,10 @@ class AdminServiceTests(unittest.TestCase):
         self.settings_path = self.root / "server-settings.json"
         self.gateway_path = self.root / "mcp-servers.json"
         self.vault = SecretVault(self.root / "server-secrets.json", "admin-test-master-key")
+        self.oauth_vault = SecretVault(
+            self.root / "oauth-secrets.json", "admin-test-master-key"
+        )
+        self.oauth_password = OAuthAuthorizationPassword("initial-authorize-password")
         self.store = ServerSettingsStore(self.settings_path)
         catalog = WorkspaceCatalog(
             [WorkspaceEntry("a", "A", self.workspace_a, enabled=True, default=True)],
@@ -122,6 +127,8 @@ class AdminServiceTests(unittest.TestCase):
             active_gateway_revision=gateway_file_revision(self.gateway_path),
             secret_vault=self.vault,
             oauth_store=self.oauth,
+            oauth_secret_vault=self.oauth_vault,
+            oauth_password=self.oauth_password,
             active_gateway_status=lambda: self.active_gateway_status,
         )
 
@@ -271,6 +278,85 @@ class AdminServiceTests(unittest.TestCase):
                 }
             )
 
+    def test_gateway_server_form_updates_are_atomic_and_preserve_hidden_credentials(self) -> None:
+        self.vault.set_secret("chemistry/token", "secret-canary")
+        created = self.service.save_gateway_server(
+            "chemistry",
+            {
+                "expected_revision": self.service.gateway_payload()["persisted_revision"],
+                "config": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "chemistry-mcp"],
+                    "enabled": True,
+                    "env": {"API_TOKEN": {"secret_ref": "chemistry/token"}},
+                    "expose_mode": "broker",
+                    "pinned_tools": ["search"],
+                },
+            },
+        )
+        updated = self.service.save_gateway_server(
+            "chemistry",
+            {
+                "expected_revision": created["persisted_revision"],
+                "config": {
+                    "enabled": False,
+                    "expose_mode": "direct",
+                    "pinned_tools": [],
+                },
+            },
+        )
+        raw = json.loads(self.gateway_path.read_text(encoding="utf-8"))
+        server = raw["servers"]["chemistry"]
+        self.assertFalse(server["enabled"])
+        self.assertEqual(server["expose_mode"], "direct")
+        self.assertEqual(server["command"], "npx")
+        self.assertEqual(
+            server["env"]["API_TOKEN"],
+            {"secret_ref": "chemistry/token"},
+        )
+        self.assertNotIn("chemistry/token", json.dumps(updated))
+        self.assertTrue(updated["restart_required"])
+
+        deleted = self.service.delete_gateway_server(
+            "chemistry",
+            {"expected_revision": updated["persisted_revision"]},
+        )
+        self.assertNotIn("chemistry", deleted["persisted"]["servers"])
+        self.assertEqual(deleted["affected_count"], 1)
+        with self.assertRaises(AdminConflictError):
+            self.service.save_gateway_server(
+                "chemistry",
+                {
+                    "expected_revision": created["persisted_revision"],
+                    "config": {"enabled": True},
+                },
+            )
+
+    def test_gateway_server_routes_support_webui_management(self) -> None:
+        revision = self.service.gateway_payload()["persisted_revision"]
+        saved = self.service.dispatch(
+            "PUT",
+            "/admin/api/gateway/servers/remote",
+            {
+                "expected_revision": revision,
+                "config": {
+                    "transport": "streamable_http",
+                    "url": "http://127.0.0.1:9000/mcp",
+                    "enabled": True,
+                    "expose_mode": "broker",
+                },
+            },
+            {},
+        )
+        deleted = self.service.dispatch(
+            "DELETE",
+            "/admin/api/gateway/servers/remote",
+            {"expected_revision": saved["persisted_revision"]},
+            {},
+        )
+        self.assertEqual(deleted["affected_count"], 1)
+
     def test_gateway_secret_resolver_is_vault_backed_and_fails_closed(self) -> None:
         snapshot = UpstreamConfigSnapshot(
             configs=(
@@ -391,6 +477,135 @@ class AdminServiceTests(unittest.TestCase):
         self.assertIn({"name": "service/key", "configured": True}, listed["secrets"])
         self.assertNotIn("vault-value-canary", json.dumps(listed))
 
+    def test_oauth_password_secret_rotates_active_authorization_immediately(self) -> None:
+        result = self.service.dispatch(
+            "PUT",
+            "/admin/api/secrets/oauth%2Fauthorization-password",
+            {"value": "rotated-authorize-password"},
+            {},
+        )
+
+        self.assertEqual(self.oauth_password.current(), "rotated-authorize-password")
+        self.assertEqual(
+            self.oauth_vault.get_secret(OAUTH_PASSWORD_SECRET),
+            "rotated-authorize-password",
+        )
+        self.assertNotIn(OAUTH_PASSWORD_SECRET, self.vault.list_names())
+        self.assertTrue(result["oauth_applied_immediately"])
+        self.assertNotIn("rotated-authorize-password", json.dumps(result))
+        self.assertIn(
+            {
+                "name": OAUTH_PASSWORD_SECRET,
+                "configured": True,
+                "usage": "oauth_authorization_password",
+                "takes_effect": "immediate",
+            },
+            self.service.secrets_payload()["secrets"],
+        )
+
+    def test_client_authorize_password_overrides_global_and_can_reset_to_fallback(self) -> None:
+        configured = self.service.dispatch(
+            "PUT",
+            "/admin/api/oauth/clients/agent-a/authorization-password",
+            {"value": "agent-a-authorize-password"},
+            {},
+        )
+
+        self.assertEqual(
+            self.oauth_password.current("agent-a"),
+            "agent-a-authorize-password",
+        )
+        self.assertEqual(
+            self.oauth_password.current("unconfigured-client"),
+            "initial-authorize-password",
+        )
+        self.assertTrue(configured["authorize_login"]["configured"])
+        self.assertNotIn("agent-a-authorize-password", json.dumps(configured))
+        client = next(
+            item
+            for item in self.service.oauth_payload("clients", {})["items"]
+            if item["client_id"] == "agent-a"
+        )
+        self.assertEqual(
+            client["authorize_login"],
+            {"configured": True, "mode": "client"},
+        )
+
+        reset = self.service.dispatch(
+            "DELETE",
+            "/admin/api/oauth/clients/agent-a/authorization-password",
+            {},
+            {},
+        )
+        self.assertEqual(reset["affected_count"], 1)
+        self.assertEqual(
+            self.oauth_password.current("agent-a"),
+            "initial-authorize-password",
+        )
+        self.assertEqual(
+            reset["authorize_login"],
+            {"configured": False, "mode": "global"},
+        )
+
+    def test_oauth_client_workspace_allowlist_applies_immediately(self) -> None:
+        self.oauth.upsert_client(
+            "unbound-agent",
+            redirect_uri="http://127.0.0.1/callback",
+            scopes="mcp",
+            workspace_id=None,
+        )
+        self.service.active_settings = {
+            **WorkspaceCatalog(
+                [
+                    WorkspaceEntry("a", "A", self.workspace_a, enabled=True, default=True),
+                    WorkspaceEntry("b", "B", self.workspace_b, enabled=True),
+                ],
+                "a",
+            ).settings_payload(),
+            "workspace": str(self.workspace_a),
+        }
+
+        result = self.service.dispatch(
+            "PUT",
+            "/admin/api/oauth/clients/unbound-agent/workspaces",
+            {"workspace_ids": ["a", "b"]},
+            {},
+        )
+
+        self.assertEqual(
+            result["workspace_access"],
+            {"configured": True, "workspace_ids": ["a", "b"]},
+        )
+        self.assertTrue(result["applied_immediately"])
+        self.assertEqual(
+            self.oauth.get_client("unbound-agent")["workspace_ids"], ["a", "b"]
+        )
+        grant_id = self.oauth.create_grant(
+            "unbound-agent", "mcp", workspace_id="a"
+        )
+        self.assertEqual(self.oauth.get_grant(grant_id)["workspace_id"], "a")
+
+        updated = self.service.dispatch(
+            "PUT",
+            "/admin/api/oauth/clients/unbound-agent/workspaces",
+            {"workspace_ids": ["b"]},
+            {},
+        )
+        self.assertEqual(updated["workspace_access"]["workspace_ids"], ["b"])
+        with self.assertRaisesRegex(OAuthStoreError, "not authorized"):
+            self.oauth.create_grant("unbound-agent", "mcp", workspace_id="a")
+        second_grant = self.oauth.create_grant("unbound-agent", "mcp")
+        self.assertEqual(self.oauth.get_grant(second_grant)["workspace_id"], "b")
+        self.assertEqual(self.oauth.get_grant(grant_id)["workspace_id"], "a")
+
+        with self.assertRaisesRegex(AdminServiceError, "unknown or disabled"):
+            self.service.dispatch(
+                "PUT",
+                "/admin/api/oauth/clients/unbound-agent/workspaces",
+                {"workspace_ids": ["missing"]},
+                {},
+            )
+
     def test_handler_source_contains_no_sql_or_gateway_reload(self) -> None:
         source = inspect.getsource(MCPHandler)
         self.assertNotRegex(source, r"\b(?:SELECT|INSERT|UPDATE|DELETE FROM|PRAGMA)\b")
@@ -401,7 +616,7 @@ class AdminServiceTests(unittest.TestCase):
 
 
 class AdminHTTPAuthenticationTests(unittest.TestCase):
-    def test_ordinary_mcp_bearer_is_not_admin_authentication(self) -> None:
+    def test_admin_shell_is_public_but_api_requires_dedicated_token(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             settings = ServerSettingsStore(root / "settings.json")
@@ -439,15 +654,13 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                         timeout=5,
                     )
                 self.assertEqual(denied.exception.code, 401)
-                with self.assertRaises(urllib.error.HTTPError) as page_denied:
-                    urllib.request.urlopen(
-                        urllib.request.Request(
-                            f"http://127.0.0.1:{server.server_address[1]}/admin",
-                            headers={"Authorization": "Bearer ordinary-mcp-token"},
-                        ),
-                        timeout=5,
-                    )
-                self.assertEqual(page_denied.exception.code, 401)
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_address[1]}/admin",
+                    timeout=5,
+                ) as response:
+                    page = response.read().decode("utf-8")
+                self.assertIn('data-build-source="i18n.js"', page)
+                self.assertIn('data-build-source="admin.js"', page)
                 before = service.settings_payload()["persisted_revision"]
                 with self.assertRaises(urllib.error.HTTPError) as write_denied:
                     urllib.request.urlopen(
@@ -488,16 +701,6 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                 ) as response:
                     payload = json.loads(response.read())
                 self.assertTrue(payload["ok"])
-                with urllib.request.urlopen(
-                    urllib.request.Request(
-                        f"http://127.0.0.1:{server.server_address[1]}/admin",
-                        headers={"Authorization": "Bearer dedicated-admin-token"},
-                    ),
-                    timeout=5,
-                ) as response:
-                    page = response.read().decode("utf-8")
-                self.assertIn('data-build-source="i18n.js"', page)
-                self.assertIn('data-build-source="admin.js"', page)
                 self.assertIn('data-language-toggle', page)
                 self.assertIn('McpI18n', page)
                 self.assertNotIn('src="./i18n.js"', page)

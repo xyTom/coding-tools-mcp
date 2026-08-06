@@ -404,11 +404,13 @@ class WorkspaceSessionBindingTests(unittest.TestCase):
                 ("http://127.0.0.1/callback",),
                 client_secret=None,
             )
-            self.assertIsNone(single_config.store.get_client("single-agent")["workspace_id"])
+            self.assertEqual(
+                single_config.store.get_client("single-agent")["workspace_ids"], []
+            )
             apply_oauth_workspace_bindings(single_config, single, {})
             self.assertEqual(
-                single_config.store.get_client("single-agent")["workspace_id"],
-                "first",
+                single_config.store.get_client("single-agent")["workspace_ids"],
+                ["first"],
             )
 
             multiple = WorkspaceCatalog(
@@ -432,7 +434,9 @@ class WorkspaceSessionBindingTests(unittest.TestCase):
                 client_secret=None,
             )
             apply_oauth_workspace_bindings(multi_config, multiple, {})
-            self.assertIsNone(multi_config.store.get_client("multi-agent")["workspace_id"])
+            self.assertEqual(
+                multi_config.store.get_client("multi-agent")["workspace_ids"], []
+            )
             with self.assertRaises(OAuthServiceError):
                 create_authorization_grant(
                     multi_config,
@@ -440,18 +444,38 @@ class WorkspaceSessionBindingTests(unittest.TestCase):
                     redirect_uri="http://127.0.0.1/callback",
                     scopes="mcp",
                 )
-            apply_oauth_workspace_bindings(
-                multi_config,
-                multiple,
-                {"multi-agent": "second"},
+            self.assertTrue(
+                multi_config.store.set_client_workspaces(
+                    "multi-agent", ["first", "second"]
+                )
             )
-            grant_id = create_authorization_grant(
+            with self.assertRaises(OAuthServiceError):
+                create_authorization_grant(
+                    multi_config,
+                    client_id="multi-agent",
+                    redirect_uri="http://127.0.0.1/callback",
+                    scopes="mcp",
+                )
+            first_grant = create_authorization_grant(
                 multi_config,
                 client_id="multi-agent",
                 redirect_uri="http://127.0.0.1/callback",
                 scopes="mcp",
+                workspace_id="first",
             )
-            self.assertEqual(multi_config.store.get_grant(grant_id)["workspace_id"], "second")
+            second_grant = create_authorization_grant(
+                multi_config,
+                client_id="multi-agent",
+                redirect_uri="http://127.0.0.1/callback",
+                scopes="mcp",
+                workspace_id="second",
+            )
+            self.assertEqual(
+                multi_config.store.get_grant(first_grant)["workspace_id"], "first"
+            )
+            self.assertEqual(
+                multi_config.store.get_grant(second_grant)["workspace_id"], "second"
+            )
 
     def test_startup_loader_reads_catalog_from_server_settings(self) -> None:
         with test_root() as root:

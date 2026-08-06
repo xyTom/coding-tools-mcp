@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { EN_MESSAGES, normalizeLocale, translateText } from '../src/i18n.js';
+import { EN_MESSAGES, initI18n, normalizeLocale, translateText } from '../src/i18n.js';
 
 test('locale normalization supports Chinese and English variants', () => {
   assert.equal(normalizeLocale('zh-CN'), 'zh-CN');
@@ -27,4 +28,113 @@ test('dynamic counts and editor titles translate without changing data', () => {
 test('technical and user-provided text without Chinese is unchanged', () => {
   assert.equal(translateText('https://example.com/mcp', 'en'), 'https://example.com/mcp');
   assert.equal(translateText('CODING_TOOLS_MCP_TOKEN', 'en'), 'CODING_TOOLS_MCP_TOKEN');
+});
+
+test('Admin HTML and critical dynamic Gateway copy have complete English coverage', async () => {
+  const html = await readFile(new URL('../src/admin.html', import.meta.url), 'utf8');
+  const visibleText = [...html.matchAll(/>([^<>]+)</g)]
+    .map((match) => match[1].trim())
+    .filter((value) => /[\u3400-\u9fff]/.test(value));
+  const attributes = [...html.matchAll(/(?:placeholder|title|aria-label)="([^"]+)"/g)]
+    .map((match) => match[1].trim())
+    .filter((value) => /[\u3400-\u9fff]/.test(value));
+  const dynamicCopy = [
+    '尚未添加 MCP 工具连接。',
+    '下次启动启用',
+    '下次启动禁用',
+    'Broker 按需暴露',
+    'Direct 全部直出',
+    '凭据值和内部引用不会显示；使用表单编辑时会保留未显示的凭据。',
+    '当前 Runtime 没有可用的上游工具暴露报告。',
+    '配置版本冲突；已刷新持久化状态，请检查表单后重新保存。',
+    'Authorize：专属密码',
+    'Authorize：全局密码',
+    '轮换专属密码',
+    '设置专属密码',
+    '改用全局密码',
+    '改用全局 OAuth 密码',
+    '未配置 Workspace 权限',
+    '允许的 Workspaces',
+    '保存 Workspace 权限',
+    '当前 Runtime 没有可授权的 Workspace。',
+    '更新 OAuth Client Workspace 权限',
+    '保存权限',
+  ];
+  const missing = [];
+  for (const source of new Set([...visibleText, ...attributes, ...dynamicCopy])) {
+    const translated = translateText(source, 'en');
+    if (/[\u3400-\u9fff]/.test(translated)) missing.push(source);
+  }
+  assert.deepEqual(missing, []);
+});
+
+test('language-toggle mutations settle instead of retriggering the observer forever', () => {
+  const pending = [];
+  let observerCallback;
+  const label = {
+    value: 'EN',
+    get textContent() { return this.value; },
+    set textContent(value) {
+      this.value = String(value);
+      pending.push({ type: 'childList', addedNodes: [] });
+    },
+  };
+  const attributes = new Map();
+  const button = {
+    addEventListener() {},
+    closest() { return null; },
+    querySelector() { return label; },
+    hasAttribute(name) { return attributes.has(name); },
+    getAttribute(name) { return attributes.get(name) ?? null; },
+    setAttribute(name, value) {
+      attributes.set(name, String(value));
+      pending.push({ type: 'attributes', target: button, addedNodes: [] });
+    },
+  };
+  const documentElement = {
+    nodeType: 1,
+    dataset: {},
+    querySelectorAll() { return []; },
+  };
+  const documentRef = {
+    nodeType: 9,
+    documentElement,
+    querySelectorAll(selector) { return selector === '[data-language-toggle]' ? [button] : []; },
+    createTreeWalker() { return { nextNode() { return null; } }; },
+    dispatchEvent() {},
+  };
+  class TestMutationObserver {
+    constructor(callback) { observerCallback = callback; }
+    observe() {}
+  }
+  const replacements = {
+    document: documentRef,
+    MutationObserver: TestMutationObserver,
+    CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options?.detail; } },
+    Node: { TEXT_NODE: 3, ELEMENT_NODE: 1, DOCUMENT_NODE: 9 },
+    NodeFilter: { SHOW_TEXT: 4 },
+    navigator: { language: 'zh-CN' },
+  };
+  const originals = new Map(
+    Object.keys(replacements).map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]),
+  );
+  try {
+    for (const [name, value] of Object.entries(replacements)) {
+      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+    }
+    initI18n();
+    let cycles = 0;
+    while (pending.length && cycles < 10) {
+      const batch = pending.splice(0);
+      observerCallback(batch);
+      cycles += 1;
+    }
+    assert.equal(pending.length, 0, 'observer callback must stop scheduling equivalent mutations');
+    assert.ok(cycles < 10, 'observer callback must settle before the safety limit');
+  } finally {
+    for (const [name, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+  }
 });

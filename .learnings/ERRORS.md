@@ -602,3 +602,352 @@ Set `PYTHONPATH` explicitly to the reviewed worktree when running external tempo
 - **Notes**: Set `PYTHONPATH` to `G:\LLM\coding-tools-mcp-broker-v6`; the reproduction script then ran successfully.
 
 ---
+
+## [ERR-20260806-001] powershell-foreach-pipeline-parser
+
+**Logged**: 2026-08-06T12:10:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A PowerShell HTTP probe piped directly from a `foreach` statement and failed to parse before sending requests.
+
+### Error
+
+```text
+ParserError: An empty pipe element is not allowed.
+```
+
+### Context
+
+- The probe attempted to format objects by placing `| Format-List` immediately after the closing `foreach` block.
+- No HTTP request ran and no application state changed.
+
+### Suggested Fix
+
+Collect loop output with `$results = @(foreach (...) { ... })`, then pipe `$results` in a separate statement.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: tests/compliance/test_mcp_admin.py
+
+### Resolution
+
+- **Resolved**: 2026-08-06T12:10:00+08:00
+- **Notes**: Rewrote the probe as collection followed by formatting; it reproduced the Admin WebUI 401 reliably.
+
+---
+
+## [ERR-20260806-002] npm-global-prefix-probe-denied
+
+**Logged**: 2026-08-06T12:28:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The PowerShell npm wrapper reported a denied global-prefix probe after the project-local WebUI build had already succeeded.
+
+### Error
+
+```text
+Test-Path: Access to the path 'C:\Users\YING\AppData\Roaming\npm\node_modules\npm\bin\npm-cli.js' is denied.
+```
+
+### Context
+
+- `npm --prefix webui run build` exited successfully and generated `coding_tools_mcp/webui_dist/admin.html`.
+- The restricted sandbox could not inspect the user-global npm installation.
+
+### Suggested Fix
+
+Use the project-local Node scripts and direct `node --test` commands for verification when global npm discovery is sandbox-restricted.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: webui/scripts/build.mjs
+
+### Resolution
+
+- **Resolved**: 2026-08-06T12:28:00+08:00
+- **Notes**: Verified the generated artifact and ran all 22 frontend tests directly with Node.
+
+---
+
+## [ERR-20260806-003] tmp-python-script-missing-repository-path
+
+**Logged**: 2026-08-06T14:35:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A temporary Python diagnostic under `.tmp` could not import the repository package.
+
+### Error
+
+```text
+ModuleNotFoundError: No module named 'coding_tools_mcp'
+```
+
+### Context
+
+- The script was launched by path as `python .tmp\diagnose_oauth_password_sources.py`.
+- Python placed `.tmp`, not the repository root, on `sys.path`.
+- The diagnostic did not reach application code and changed no runtime state.
+
+### Suggested Fix
+
+For repository-local temporary Python scripts, insert the repository root into `sys.path` or set a scoped `PYTHONPATH` before execution.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: .tmp/diagnose_oauth_password_sources.py
+- See Also: ERR-20260803-011
+
+### Resolution
+
+- **Resolved**: 2026-08-06T14:36:00+08:00
+- **Notes**: Updated the temporary script to insert its repository parent before importing `coding_tools_mcp`.
+
+---
+
+## [ERR-20260806-004] webui-i18n-split-inline-code
+
+**Logged**: 2026-08-06T15:10:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: frontend
+
+### Summary
+
+The WebUI English-coverage test split a help sentence around inline `<code>` and separately checked its placeholder.
+
+### Error
+
+```text
+Expected values to be strictly deep-equal:
+actual: ['使用名称', '保存后，当前运行中的 OAuth Authorize 页面会立即采用新密码；旧密码立即失效。', '例如 oauth/authorization-password']
+expected: []
+```
+
+### Context
+
+- `npm run test` failed only in the Admin HTML English-coverage check.
+- The translation table contained the visual full sentence, but DOM extraction treated text on either side of `<code>` as separate nodes.
+
+### Suggested Fix
+
+Add translations for each extracted text node and for placeholder attributes, not only for the visually combined sentence.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: webui/src/admin.html, webui/src/i18n.js, webui/tests/i18n.test.mjs
+
+### Resolution
+
+- **Resolved**: 2026-08-06T15:12:00+08:00
+- **Notes**: Added translations for both split text nodes and the placeholder; all 26 WebUI tests passed.
+
+---
+
+## [ERR-20260806-005] global-python-missing-mypy
+
+**Logged**: 2026-08-06T15:16:00+08:00
+**Priority**: low
+**Status**: wont_fix
+**Area**: tests
+
+### Summary
+
+The active global Python installation does not include the repository's declared `mypy` development dependency.
+
+### Error
+
+```text
+No module named mypy
+```
+
+### Context
+
+- Targeted Ruff checks passed.
+- `python -m mypy ...` used the global Python 3.12 installation.
+- No repository `.venv\Scripts\python.exe` was present, so there was no existing project environment to retry.
+
+### Suggested Fix
+
+Run the repository's documented development-environment installation before type checking, or use an existing environment that contains the locked development dependencies.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: pyproject.toml, Makefile
+
+### Resolution
+
+- **Resolved**: 2026-08-06T15:16:00+08:00
+- **Notes**: Dependency installation was outside this feature's scope; validation continued with Ruff and focused backend/frontend test suites.
+
+---
+
+## [ERR-20260806-006] pytest-collects-nested-fixture-project
+
+**Logged**: 2026-08-06T15:20:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+Bare repository-wide pytest collection treated a nested compliance fixture project as part of the main test suite.
+
+### Error
+
+```text
+tests/compliance/fixtures/tiny-python-project/tests/test_math_utils.py
+ModuleNotFoundError: No module named 'src'
+```
+
+### Context
+
+- `pytest -q` recursively collected the intentionally isolated tiny Python fixture.
+- The repository's documented test target uses `python -m unittest discover -s tests -p 'test_*.py'` instead.
+- Collection stopped before the main full suite ran.
+
+### Suggested Fix
+
+Use the Makefile/CI test entrypoint for full validation; reserve pytest for explicitly targeted test modules in this repository.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: Makefile, docs/ci-and-tests.md, tests/compliance/fixtures/tiny-python-project
+
+### Resolution
+
+- **Resolved**: 2026-08-06T15:20:00+08:00
+- **Notes**: Switched final validation to the repository-documented unittest discovery command.
+
+---
+
+## [ERR-20260806-007] full-tests-denied-system-npm-path
+
+**Logged**: 2026-08-06T15:22:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The documented full unittest suite could not inspect the system npm directory inside the restricted sandbox.
+
+### Error
+
+```text
+PermissionError: [WinError 5] Access denied: 'D:\YING\APPData\Roaming\npm'
+```
+
+### Context
+
+- Eleven runtime-helper tests errored and four dependent assertions failed before command execution.
+- Failures shared the same sandbox-denied system path and were unrelated to OAuth/Admin changes.
+
+### Suggested Fix
+
+When full runtime tests need read-only system executable roots, rerun the same documented command with the minimum approved non-sandbox permission.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: coding_tools_mcp/server.py, tests/compliance/test_runtime_helpers.py
+
+### Resolution
+
+- **Resolved**: 2026-08-06T15:24:00+08:00
+- **Notes**: The unchanged full command passed outside the restricted sandbox: 452 tests, 84 skipped.
+
+---
+
+## [ERR-20260806-008] codegraph-transport-closed
+
+**Logged**: 2026-08-06T15:35:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: backend
+
+### Summary
+
+CodeGraph closed its transport while exploring the OAuth/Admin client-password flow.
+
+### Error
+
+```text
+tool call failed for codegraph/codegraph_explore: Transport closed
+```
+
+### Context
+
+- The repository index exists, but the MCP transport was unavailable for this call.
+- No source or runtime state was changed by the failed lookup.
+
+### Suggested Fix
+
+Fall back to exact repository-native search and targeted file reads when the indexed transport is unavailable.
+
+### Metadata
+
+- Reproducible: unknown
+- Related Files: coding_tools_mcp/oauth.py, coding_tools_mcp/admin.py, coding_tools_mcp/oauth_store.py
+
+### Resolution
+
+- **Resolved**: 2026-08-06T15:35:00+08:00
+- **Notes**: Continued with `rg` and targeted PowerShell reads per the repository fallback rules.
+
+---
+
+## [ERR-20260806-009] preregistered-public-client-needs-explicit-none
+
+**Logged**: 2026-08-06T15:55:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+An OAuth integration test omitted the required keyword-only `client_secret` argument when registering a public Client.
+
+### Error
+
+```text
+TypeError: PersistentOAuthClientRegistry.add_preregistered() missing 1 required keyword-only argument: 'client_secret'
+```
+
+### Context
+
+- The second Client was intentionally public and should use `client_secret=None`.
+- The production implementation was not reached by this failing setup call.
+
+### Suggested Fix
+
+Pass `client_secret=None` explicitly for public pre-registered Clients so the intended authentication method is unambiguous.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: coding_tools_mcp/oauth.py, tests/test_oauth_integration.py
+
+### Resolution
+
+- **Resolved**: 2026-08-06T15:55:00+08:00
+- **Notes**: Added the explicit keyword argument and reran the focused OAuth/Admin tests.
+
+---

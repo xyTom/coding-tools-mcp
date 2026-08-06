@@ -16,6 +16,8 @@ import jwt
 from .oauth_store import (
     OAuthAuthorizationStore,
     OAuthStoreError,
+    OAuthStoreWorkspaceAccessError,
+    OAuthStoreWorkspaceSelectionError,
     RefreshTokenClientMismatchError,
 )
 from .secret_vault import SecretVault, SecretVaultError
@@ -33,6 +35,8 @@ OAUTH_GRANT_TYPES_SUPPORTED = (
     OAUTH_GRANT_TYPE_REFRESH_TOKEN,
 )
 OAUTH_RESPONSE_TYPES_SUPPORTED = ("code",)
+OAUTH_PASSWORD_SECRET = "oauth/authorization-password"
+OAUTH_CLIENT_PASSWORD_PREFIX = "oauth/client-authorization/"
 MAX_REDIRECT_URIS = 10
 MAX_REGISTERED_CLIENTS = 1_024
 MAX_PENDING_CODES = 256
@@ -45,7 +49,7 @@ class OAuthClient:
     token_endpoint_auth_method: str
     client_name: str | None = None
     secret_digest: str | None = None
-    workspace_id: str | None = None
+    workspace_ids: tuple[str, ...] = ()
     issued_at: int = field(default_factory=lambda: int(time.time()))
 
     def accepts_redirect(self, redirect_uri: str) -> bool:
@@ -228,13 +232,71 @@ class PersistentOAuthClientRegistry(OAuthClientRegistry):
             token_endpoint_auth_method=method,
             client_name=str(record.get("display_name") or client_id),
             secret_digest=digest,
-            workspace_id=(
-                str(record["workspace_id"])
-                if isinstance(record.get("workspace_id"), str) and record["workspace_id"]
-                else None
+            workspace_ids=tuple(
+                str(item)
+                for item in record.get("workspace_ids", [])
+                if isinstance(item, str) and item
             ),
             issued_at=int(created_at) if isinstance(created_at, (int, float)) else int(time.time()),
         )
+
+
+@dataclass
+class OAuthAuthorizationPassword:
+    """Thread-safe live value used by the OAuth authorization page."""
+
+    value: str = field(repr=False)
+    _client_values: dict[str, str] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, str) or not self.value:
+            raise ValueError("OAuth authorization password must be a non-empty string.")
+
+    def current(self, client_id: str | None = None) -> str:
+        with self._lock:
+            if client_id is not None and client_id in self._client_values:
+                return self._client_values[client_id]
+            return self.value
+
+    def rotate(self, value: str) -> None:
+        if not isinstance(value, str) or not value:
+            raise ValueError("OAuth authorization password must be a non-empty string.")
+        with self._lock:
+            self.value = value
+
+    def rotate_client(self, client_id: str, value: str) -> None:
+        if not isinstance(client_id, str) or not client_id:
+            raise ValueError("OAuth client_id must be a non-empty string.")
+        if not isinstance(value, str) or not value:
+            raise ValueError("OAuth authorization password must be a non-empty string.")
+        with self._lock:
+            self._client_values[client_id] = value
+
+    def reset_client(self, client_id: str) -> bool:
+        with self._lock:
+            return self._client_values.pop(client_id, None) is not None
+
+    def has_client(self, client_id: str) -> bool:
+        with self._lock:
+            return client_id in self._client_values
+
+
+def oauth_client_authorization_password_secret_ref(client_id: str) -> str:
+    if not isinstance(client_id, str) or not client_id:
+        raise ValueError("OAuth client_id must be a non-empty string.")
+    digest = hashlib.sha256(client_id.encode("utf-8")).hexdigest()
+    return f"{OAUTH_CLIENT_PASSWORD_PREFIX}{digest}"
 
 
 @dataclass(frozen=True)
@@ -242,6 +304,7 @@ class OAuthConfig:
     password: str
     server_url: str | None
     token_secret: bytes
+    authorization_password: OAuthAuthorizationPassword | None = None
     token_ttl: int = OAUTH_TOKEN_TTL_SECONDS
     registry: OAuthClientRegistry = field(default_factory=OAuthClientRegistry)
     store: OAuthAuthorizationStore | None = None
@@ -252,9 +315,22 @@ class OAuthConfig:
     pending_codes: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_codes_lock: threading.Lock = field(default_factory=threading.Lock)
 
+    def current_authorization_password(self, client_id: str | None = None) -> str:
+        if self.authorization_password is None:
+            return self.password
+        return self.authorization_password.current(client_id)
+
 
 class OAuthServiceError(RuntimeError):
     """Persistent OAuth state cannot safely complete the requested operation."""
+
+
+class OAuthWorkspaceAccessRequiredError(OAuthServiceError):
+    """The client has no Workspace allowlist configured by an Admin."""
+
+
+class OAuthWorkspaceSelectionError(OAuthServiceError):
+    """The requested Workspace is missing from or outside the Client allowlist."""
 
 
 def create_authorization_grant(
@@ -263,14 +339,36 @@ def create_authorization_grant(
     client_id: str,
     redirect_uri: str,
     scopes: str,
+    workspace_id: str | None = None,
 ) -> str:
     if config.store is None:
         raise OAuthServiceError("OAuth authorization store is not configured.")
     client = config.registry.get(client_id)
     if client is None or not client.accepts_redirect(redirect_uri):
         raise OAuthServiceError("OAuth client or redirect URI is not active.")
+    workspace_ids = client.workspace_ids
+    if not workspace_ids:
+        raise OAuthWorkspaceAccessRequiredError(
+            "OAuth client has no authorized Workspaces."
+        )
+    if workspace_id is None:
+        if len(workspace_ids) != 1:
+            raise OAuthWorkspaceSelectionError("Select a Workspace for this authorization.")
+        workspace_id = workspace_ids[0]
+    if workspace_id not in workspace_ids:
+        raise OAuthWorkspaceSelectionError(
+            "Selected Workspace is not authorized for this OAuth client."
+        )
     try:
-        return config.store.create_grant(client_id, scopes)
+        return config.store.create_grant(
+            client_id,
+            scopes,
+            workspace_id=workspace_id,
+        )
+    except OAuthStoreWorkspaceAccessError as exc:
+        raise OAuthWorkspaceSelectionError(str(exc)) from exc
+    except OAuthStoreWorkspaceSelectionError as exc:
+        raise OAuthWorkspaceSelectionError(str(exc)) from exc
     except (OAuthStoreError, ValueError) as exc:
         raise OAuthServiceError("OAuth authorization store is unavailable.") from exc
 
@@ -524,9 +622,18 @@ def initialize_signing_key_ring(
                 f"OAuth signing key {kid!r} cannot be loaded from Secret Vault."
             ) from exc
         fingerprint = hashlib.sha256(secret).hexdigest()
-        if record.get("fingerprint") != fingerprint or signing_key_id(secret) != kid:
+        legacy_signing_reference = f"oauth-signing/{kid}"
+        legacy_reference = reference in {
+            legacy_secret_ref,
+            legacy_signing_reference,
+        }
+        stored_fingerprint = record.get("fingerprint")
+        fingerprint_matches = stored_fingerprint == fingerprint or (
+            legacy_reference and stored_fingerprint == fingerprint[:16]
+        )
+        if not fingerprint_matches:
             raise OAuthServiceError(f"OAuth signing key {kid!r} metadata does not match its secret.")
-        if reference == legacy_secret_ref:
+        if legacy_reference:
             migrated_ref = signing_key_secret_ref(kid)
             vault.set_secret(migrated_ref, secret.hex())
             store.register_signing_key(
@@ -535,6 +642,8 @@ def initialize_signing_key_ring(
                 secret_ref=migrated_ref,
                 active=status == "active",
             )
+            if reference == legacy_signing_reference:
+                vault.delete_secret(reference)
         keys[kid] = secret
         if status == "active":
             active.append((kid, secret))

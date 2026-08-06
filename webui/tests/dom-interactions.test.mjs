@@ -6,8 +6,11 @@ import {
   confirmDestructive,
   createApiClient,
   handleSettingsSave,
+  renderOAuthItems,
   renderConversationDetail,
   renderConversationItems,
+  setPasswordVisibility,
+  setAuthenticationUi,
 } from '../src/admin.js';
 import '../src/settings-copy.js';
 import { hydrateSettings } from '../src/settings-model.js';
@@ -82,6 +85,10 @@ function tags(node) {
   return [node.tagName, ...node.children.flatMap(tags)];
 }
 
+function descendants(node) {
+  return [node, ...node.children.flatMap(descendants)];
+}
+
 test('conversation summary and detail render untrusted text without creating markup', () => {
   const documentRef = new FakeDocument();
   const list = new FakeNode(documentRef, 'div');
@@ -151,6 +158,105 @@ test('API client keeps Admin token in request header, never URL or storage', asy
   assert.equal(captured.url.includes('memory-only-token'), false);
   assert.equal(captured.options.headers.get('Authorization'), 'Bearer memory-only-token');
   assert.equal(captured.options.cache, 'no-store');
+});
+
+test('successful authentication hides and clears the password field until sign-out', () => {
+  const documentRef = new FakeDocument();
+  const form = documentRef.register('authForm', new FakeNode(documentRef, 'form'));
+  const connected = documentRef.register('authConnected', new FakeNode(documentRef, 'div'));
+  const token = documentRef.register('adminToken', new FakeNode(documentRef, 'input'));
+  token.value = 'memory-only-token';
+  connected.hidden = true;
+
+  setAuthenticationUi(documentRef, true);
+  assert.equal(form.hidden, true);
+  assert.equal(connected.hidden, false);
+  assert.equal(token.value, '');
+
+  setAuthenticationUi(documentRef, false);
+  assert.equal(form.hidden, false);
+  assert.equal(connected.hidden, true);
+});
+
+test('password visibility toggle updates type, label, and pressed state', () => {
+  const documentRef = new FakeDocument();
+  const input = new FakeNode(documentRef, 'input');
+  const toggle = new FakeNode(documentRef, 'button');
+  input.type = 'password';
+
+  setPasswordVisibility(input, toggle, true);
+  assert.equal(input.type, 'text');
+  assert.equal(toggle.textContent, '隐藏');
+  assert.equal(toggle.getAttribute('aria-pressed'), 'true');
+  assert.equal(toggle.getAttribute('aria-label'), '隐藏密码');
+
+  setPasswordVisibility(input, toggle, false);
+  assert.equal(input.type, 'password');
+  assert.equal(toggle.textContent, '显示');
+  assert.equal(toggle.getAttribute('aria-pressed'), 'false');
+});
+
+test('OAuth client cards expose dedicated-password rotate and global-fallback actions', () => {
+  const documentRef = new FakeDocument();
+  const root = new FakeNode(documentRef, 'div');
+  const calls = [];
+  renderOAuthItems(
+    root,
+    [{
+      client_id: 'client-a',
+      display_name: 'Client A',
+      authorize_login: { configured: true, mode: 'client' },
+    }],
+    'clients',
+    () => {},
+    (clientId, action) => calls.push([clientId, action]),
+  );
+
+  assert.match(root.textContent, /专属密码/);
+  assert.match(root.textContent, /轮换专属密码/);
+  assert.match(root.textContent, /改用全局密码/);
+  const buttons = descendants(root).filter((node) => node.tagName === 'BUTTON');
+  buttons.find((node) => node.textContent === '轮换专属密码').click();
+  buttons.find((node) => node.textContent === '改用全局密码').click();
+  assert.deepEqual(calls, [['client-a', 'configure'], ['client-a', 'reset']]);
+});
+
+test('OAuth client cards edit multiple allowed Workspaces immediately', () => {
+  const documentRef = new FakeDocument();
+  const root = new FakeNode(documentRef, 'div');
+  const calls = [];
+  renderOAuthItems(
+    root,
+    [{
+      client_id: 'client-unbound',
+      display_name: 'Unbound Client',
+      workspace_ids: ['ws-a'],
+      workspace_access: { configured: true, workspace_ids: ['ws-a'] },
+      authorize_login: { configured: false, mode: 'global' },
+    }],
+    'clients',
+    () => {},
+    () => {},
+    (clientId, workspaceId) => calls.push([clientId, workspaceId]),
+    [
+      { id: 'ws-a', name: 'Workspace A', enabled: true },
+      { id: 'ws-b', name: 'Workspace B', enabled: true },
+      { id: 'ws-disabled', name: 'Disabled', enabled: false },
+    ],
+  );
+
+  assert.match(root.textContent, /允许的 Workspaces/);
+  const checkboxes = descendants(root).filter(
+    (node) => node.tagName === 'INPUT' && node.type === 'checkbox',
+  );
+  assert.equal(checkboxes.length, 2);
+  assert.equal(checkboxes[0].checked, true);
+  checkboxes[1].checked = true;
+  const save = descendants(root).find(
+    (node) => node.tagName === 'BUTTON' && node.textContent === '保存 Workspace 权限',
+  );
+  save.click();
+  assert.deepEqual(calls, [['client-unbound', ['ws-a', 'ws-b']]]);
 });
 
 

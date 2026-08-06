@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -50,6 +52,52 @@ def oauth_root() -> Iterator[Path]:
 
 
 class SigningKeyLifecycleTests(unittest.TestCase):
+    def test_reopen_migrates_legacy_signing_key_reference_and_record(self) -> None:
+        with oauth_root() as root:
+            config, _created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password="synthetic-authorize-password",
+                server_url=ISSUER,
+                token_ttl=86_400,
+            )
+            kid = str(config.signing_kid)
+            current_ref = f"oauth/signing/{kid}"
+            legacy_ref = f"oauth-signing/{kid}"
+
+            vault_path = root / "oauth-secrets.json"
+            payload = json.loads(vault_path.read_text(encoding="utf-8"))
+            legacy_record = payload["secrets"].pop(current_ref)
+            legacy_record.pop("cipher")
+            payload["secrets"][legacy_ref] = legacy_record
+            vault_path.write_text(json.dumps(payload), encoding="utf-8")
+            with closing(sqlite3.connect(root / "oauth.sqlite3")) as connection:
+                connection.execute(
+                    "UPDATE oauth_signing_keys SET secret_ref=?, fingerprint=? WHERE kid=?",
+                    (
+                        legacy_ref,
+                        hashlib.sha256(config.token_secret).hexdigest()[:16],
+                        kid,
+                    ),
+                )
+                connection.commit()
+
+            reopened, _created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password="synthetic-authorize-password",
+                server_url=ISSUER,
+                token_ttl=86_400,
+            )
+
+            self.assertEqual(reopened.signing_kid, kid)
+            self.assertEqual(
+                reopened.store.list_signing_keys()[0]["secret_ref"],
+                current_ref,
+            )
+            self.assertIn(current_ref, reopened.secret_vault.list_names())
+            self.assertNotIn(legacy_ref, reopened.secret_vault.list_names())
+
     def test_rotation_reopen_and_emergency_revoke_preserve_key_boundaries(self) -> None:
         with oauth_root() as root:
             config, _created = build_persistent_oauth_config(

@@ -22,12 +22,18 @@
       <form id="authForm" class="auth-form" autocomplete="off">
       <div>
         <label for="adminToken">本次页面使用的 Admin token</label>
-        <input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required>
+        <div class="password-input-row">
+          <input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required>
+          <button id="adminTokenToggle" type="button" class="secondary password-toggle" data-password-toggle data-password-target="adminToken" aria-controls="adminToken" aria-pressed="false" aria-label="显示密码">显示</button>
+        </div>
         <p id="adminTokenHelp" class="help">仅保存在当前页面内存中；不会写入 URL、浏览器持久化存储、日志或服务器设置。</p>
-      </div>
-      <button type="submit">连接</button>
-      <button id="forgetToken" type="button" class="secondary">清除</button>
+       </div>
+       <button type="submit">连接</button>
       </form>
+      <div id="authConnected" class="auth-connected" hidden>
+        <span class="badge good">已连接</span>
+        <button id="forgetToken" type="button" class="secondary">退出</button>
+      </div>
     </div>
   </header>
 
@@ -97,26 +103,51 @@
       </section>
 
       <section id="section-gateway" class="page-section" aria-labelledby="gatewayTitle" hidden>
-        <div class="section-heading"><div><p class="eyebrow">Restart-only</p><h2 id="gatewayTitle">Gateway 配置</h2></div><button id="reloadGateway" type="button" class="secondary">刷新</button></div>
+        <div class="section-heading"><div><p class="eyebrow">重启后生效</p><h2 id="gatewayTitle">MCP 工具连接</h2><p class="muted">用表单添加和管理上游 MCP；所有变更仅影响新建 MCP 会话或服务重启后的 Runtime。</p></div><div class="button-row"><button id="newGatewayForm" type="button" class="secondary">新增连接</button><button id="reloadGateway" type="button" class="secondary">刷新</button></div></div>
         <div class="card-grid">
-          <article class="card"><h3>当前快照</h3><div id="gatewaySummary"></div></article>
-          <article class="card"><h3>保存状态</h3><p>Restart required：<strong id="gatewayRestartRequired">—</strong></p><p>Persisted revision：<code id="gatewayRevision">—</code></p><p class="muted">新 MCP Session/Runtime 或服务重启后生效；不会发送 list_changed，也没有 start、stop 或 reload 控件。</p></article>
-          <article class="card"><h3>上游上下文</h3><div id="gatewayExposureReport"></div></article>
+          <article class="card"><h3>生效状态</h3><p>需要重启：<strong id="gatewayRestartRequired">—</strong></p><p>配置版本：<code id="gatewayRevision">—</code></p><p class="muted">不会热启动、停止或重载当前 Runtime，也不会发送工具列表变更通知。</p></article>
+          <article class="card"><h3>当前 Runtime 工具分布</h3><div id="gatewayExposureReport"></div></article>
         </div>
-        <form id="gatewayForm" class="card" novalidate>
-          <div class="section-heading"><div><h3>Restart-only JSON</h3><p class="muted">新建 server 模板默认使用 broker exposure。</p></div><button id="newGatewayServer" type="button" class="secondary">新建 broker server 模板</button></div>
-          <label for="gatewayDocument">替换配置 JSON（仅限不含凭据的配置）</label>
-          <textarea id="gatewayDocument" rows="14" placeholder='{"servers":{}}' aria-describedby="gatewayHelp gatewayPreviewHelp"></textarea>
-          <p id="gatewayHelp" class="help">不会预填或显示任何上游凭据、摘要值或内部引用。含凭据的现有配置只能查看脱敏摘要；请通过受控配置流程维护。</p>
-          <div class="card" aria-live="polite"><h3>Exposure preview</h3><p id="gatewayPreviewHelp" class="help">按当前 Runtime 已发现的公开工具预览 direct、pinned 与 broker-only 差异；保存不会改变当前 Runtime。</p><div id="gatewayExposurePreview"></div></div>
-          <div class="button-row"><button type="submit">保存并标记重启</button><button id="clearGatewayDraft" type="button" class="secondary">清空草稿</button></div>
+        <div id="gatewaySummary" class="card-grid" aria-live="polite"></div>
+
+        <form id="gatewayServerForm" class="card form-grid" novalidate>
+          <div class="full section-heading"><div><h3 id="gatewayServerFormTitle">新增 MCP 连接</h3><p class="muted">Broker 模式只直接暴露固定工具和置顶工具；Direct 模式会直接暴露过滤后的全部工具。</p></div></div>
+          <div><label for="gatewayAlias">连接别名</label><input id="gatewayAlias" required pattern="[A-Za-z0-9_-]{1,64}" aria-describedby="gatewayAliasHelp"><p id="gatewayAliasHelp" class="help">1–64 位字母、数字、下划线或连字符；保存后不可直接改名。</p></div>
+          <div><label for="gatewayTransport">连接方式</label><select id="gatewayTransport"><option value="stdio">本地命令（stdio）</option><option value="streamable_http">远程网址（Streamable HTTP）</option></select></div>
+          <div class="full" data-gateway-stdio><label for="gatewayCommand">启动命令</label><input id="gatewayCommand" placeholder="npx 或 uvx"></div>
+          <div class="full" data-gateway-stdio><label for="gatewayArgs">启动参数（每行一个）</label><textarea id="gatewayArgs" rows="4" placeholder="-y&#10;@modelcontextprotocol/server-filesystem"></textarea></div>
+          <div class="full" data-gateway-stdio><label for="gatewayEnvironment">环境变量（每行 KEY=value）</label><textarea id="gatewayEnvironment" rows="4" placeholder="TDMS_USERNAME=user@example.com&#10;TDMS_PASSWORD=your-password&#10;CACHE_DIR=C:\\data" aria-describedby="gatewayEnvironmentHelp"></textarea><p id="gatewayEnvironmentHelp" class="help">可像普通 MCP 配置一样直接填写值；管理台读取时会遮蔽密码、Token 等敏感项并在后续编辑中保留。也可选用 <code>secret:Vault名称</code> 或 <code>env:变量名</code>。</p><p id="gatewayCredentialNotice" class="help"></p></div>
+          <div class="full" data-gateway-http hidden><label for="gatewayUrl">服务地址</label><input id="gatewayUrl" type="url" placeholder="https://example.com/mcp"></div>
+          <div data-gateway-http hidden><label for="gatewayAuthorizationEnv">Authorization 环境变量名（可选）</label><input id="gatewayAuthorizationEnv" placeholder="MCP_AUTH_TOKEN"></div>
+          <div><label for="gatewayExposeMode">工具暴露方式</label><select id="gatewayExposeMode"><option value="broker">Broker（推荐，按需搜索调用）</option><option value="direct">Direct（全部直接列出）</option></select></div>
+          <div><label for="gatewayTimeout">等待时间（毫秒）</label><input id="gatewayTimeout" type="number" min="1" value="30000"></div>
+          <div><label for="gatewayPinnedTools">Broker 置顶工具（每行一个）</label><textarea id="gatewayPinnedTools" rows="4"></textarea></div>
+          <div><label for="gatewayIncludeTools">只包含这些工具（每行一个）</label><textarea id="gatewayIncludeTools" rows="4"></textarea></div>
+          <div><label for="gatewayExcludeTools">排除这些工具（每行一个）</label><textarea id="gatewayExcludeTools" rows="4"></textarea></div>
+          <div><label for="gatewayTags">搜索标签（每行一个）</label><textarea id="gatewayTags" rows="4"></textarea></div>
+          <label class="checkline full"><input id="gatewayEnabled" type="checkbox" checked> 下次启动或新建 Runtime 时启用</label>
+          <p id="gatewayFormError" class="alert danger full" role="alert" hidden></p>
+          <div class="button-row full"><button type="submit">保存连接</button><button id="cancelGatewayEdit" type="button" class="secondary">取消编辑</button></div>
         </form>
+
+        <details id="gatewayAdvanced" class="card">
+          <summary>高级选项：整份配置 JSON</summary>
+          <form id="gatewayForm" class="stack" novalidate>
+            <p class="muted">用于诊断或批量替换不含凭据的配置。普通新增、编辑、启用和删除请使用上方表单与连接卡片。</p>
+            <div class="section-heading"><div><h3>整份配置 JSON</h3><p class="muted">示例默认使用 Broker 模式。</p></div><button id="newGatewayServer" type="button" class="secondary">载入 Broker 示例</button></div>
+            <label for="gatewayDocument">替换配置 JSON（仅限不含凭据的配置）</label>
+            <textarea id="gatewayDocument" rows="14" placeholder='{"servers":{}}' aria-describedby="gatewayHelp gatewayPreviewHelp"></textarea>
+            <p id="gatewayHelp" class="help">不会预填或显示任何上游凭据、摘要值或内部引用。含凭据的现有配置请使用表单逐项修改，以便保留隐藏字段。</p>
+            <div class="card" aria-live="polite"><h3>工具暴露预览</h3><p id="gatewayPreviewHelp" class="help">按当前 Runtime 已发现的公开工具预览 Direct、置顶与仅 Broker 可见的差异；保存不会改变当前 Runtime。</p><div id="gatewayExposurePreview"></div></div>
+            <div class="button-row"><button type="submit">替换配置并标记重启</button><button id="clearGatewayDraft" type="button" class="secondary">清空草稿</button></div>
+          </form>
+        </details>
       </section>
 
       <section id="section-oauth" class="page-section" aria-labelledby="oauthTitle" hidden>
         <div class="section-heading"><div><p class="eyebrow">Redacted</p><h2 id="oauthTitle">OAuth 管理</h2></div><button id="reloadOAuth" type="button" class="secondary">刷新</button></div>
         <div class="toolbar"><label for="oauthCollection">资源</label><select id="oauthCollection"><option value="clients">Clients</option><option value="grants">Grants</option><option value="tokens">Access Token metadata</option><option value="refresh-families">Refresh Families</option><option value="signing-keys">Signing Keys</option><option value="audit">Audit Events</option></select></div>
-        <p class="help">页面只显示脱敏元数据，不显示任何凭据、摘要值或内部引用。</p>
+        <p class="help">页面只显示脱敏元数据，不显示任何凭据、摘要值或内部引用。Client 可设置立即生效的专属 Authorize 密码；未设置时使用全局密码。</p>
         <div id="oauthList" class="stack"></div>
       </section>
 
@@ -124,8 +155,9 @@
         <div class="section-heading"><div><p class="eyebrow">Names only</p><h2 id="secretsTitle">Secret Vault</h2></div><button id="reloadSecrets" type="button" class="secondary">刷新</button></div>
         <div id="secretList" class="stack"></div>
         <form id="secretForm" class="card form-grid" autocomplete="off">
-          <div><label for="secretName">Secret 名称</label><input id="secretName" autocomplete="off" required></div>
-          <div><label for="secretValue">新值</label><input id="secretValue" type="password" autocomplete="new-password" required></div>
+          <div><label for="secretName">Secret 名称</label><input id="secretName" autocomplete="off" placeholder="例如 oauth/authorization-password" required></div>
+          <div><label for="secretValue">新值</label><div class="password-input-row"><input id="secretValue" type="password" autocomplete="new-password" required><button id="secretValueToggle" type="button" class="secondary password-toggle" data-password-toggle data-password-target="secretValue" aria-controls="secretValue" aria-pressed="false" aria-label="显示密码">显示</button></div></div>
+          <p class="help full">使用名称 <code>oauth/authorization-password</code> 保存后，当前运行中的 OAuth Authorize 页面会立即采用新密码；旧密码立即失效。</p>
           <div class="full"><button type="submit">设置或替换</button></div>
         </form>
       </section>
@@ -146,6 +178,21 @@
       <h2 id="confirmTitle">确认操作</h2>
       <p id="confirmMessage"></p>
       <div class="button-row end"><button value="cancel" class="secondary">取消</button><button id="confirmAccept" value="confirm" class="danger">确认</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="clientPasswordDialog" aria-labelledby="clientPasswordTitle" aria-describedby="clientPasswordHelp">
+    <form id="clientPasswordForm" class="dialog-card stack" autocomplete="off">
+      <h2 id="clientPasswordTitle">设置 Client 专属密码</h2>
+      <p>Client ID：<code id="clientPasswordClientId">—</code></p>
+      <p id="clientPasswordHelp" class="help">保存后立即生效，只影响这个 Client；未设置或重置后使用全局 OAuth Authorize 密码。</p>
+      <label for="clientPasswordValue">Client 专属密码</label>
+      <div class="password-input-row">
+        <input id="clientPasswordValue" type="password" autocomplete="new-password" required>
+        <button id="clientPasswordToggle" type="button" class="secondary password-toggle" data-password-toggle data-password-target="clientPasswordValue" aria-controls="clientPasswordValue" aria-pressed="false" aria-label="显示密码">显示</button>
+      </div>
+      <p id="clientPasswordError" class="alert danger" role="alert" hidden></p>
+      <div class="button-row end"><button id="clientPasswordCancel" type="button" class="secondary">取消</button><button type="submit">保存并立即生效</button></div>
     </form>
   </dialog>
 

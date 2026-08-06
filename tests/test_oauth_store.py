@@ -78,6 +78,7 @@ class OAuthStoreTests(unittest.TestCase):
     def test_schema_contains_every_required_metadata_table_and_reopens(self) -> None:
         expected = {
             "oauth_clients",
+            "oauth_client_workspaces",
             "oauth_grants",
             "oauth_access_tokens",
             "oauth_refresh_token_families",
@@ -176,7 +177,7 @@ class OAuthStoreTests(unittest.TestCase):
             self.assertIn("client_secret_digest", client_columns)
             self.assertEqual(version, OAuthAuthorizationStore.SCHEMA_VERSION)
 
-    def test_workspace_binding_migration_is_explicit_and_grants_freeze_it(self) -> None:
+    def test_client_workspace_allowlist_supports_multiple_choices_and_grants_freeze_one(self) -> None:
         with oauth_root() as root:
             path = root / "oauth.sqlite3"
             store = OAuthAuthorizationStore(path, pepper=PEPPER)
@@ -185,17 +186,44 @@ class OAuthStoreTests(unittest.TestCase):
                 redirect_uri="http://127.0.0.1/callback",
                 scopes="mcp",
             )
-            with self.assertRaisesRegex(OAuthStoreError, "no authorized Workspace binding"):
+            with self.assertRaisesRegex(OAuthStoreError, "no authorized Workspaces"):
                 store.create_grant("workspace-agent", "mcp")
-            self.assertTrue(store.set_client_workspace("workspace-agent", "workspace-a"))
-            grant_id = store.create_grant("workspace-agent", "mcp")
-            self.assertEqual(store.get_client("workspace-agent")["workspace_id"], "workspace-a")
+            self.assertTrue(
+                store.set_client_workspaces(
+                    "workspace-agent",
+                    ["workspace-a", "workspace-b"],
+                )
+            )
+            self.assertEqual(
+                store.get_client("workspace-agent")["workspace_ids"],
+                ["workspace-a", "workspace-b"],
+            )
+            with self.assertRaisesRegex(OAuthStoreError, "selection is required"):
+                store.create_grant("workspace-agent", "mcp")
+            grant_id = store.create_grant(
+                "workspace-agent", "mcp", workspace_id="workspace-a"
+            )
             self.assertEqual(store.get_grant(grant_id)["workspace_id"], "workspace-a")
 
-            self.assertTrue(store.set_client_workspace("workspace-agent", "workspace-b"))
-            second_grant = store.create_grant("workspace-agent", "mcp")
+            second_grant = store.create_grant(
+                "workspace-agent", "mcp", workspace_id="workspace-b"
+            )
             self.assertEqual(store.get_grant(grant_id)["workspace_id"], "workspace-a")
             self.assertEqual(store.get_grant(second_grant)["workspace_id"], "workspace-b")
+            self.assertTrue(
+                store.set_client_workspaces(
+                    "workspace-agent",
+                    ["workspace-b", "workspace-c"],
+                )
+            )
+            with self.assertRaisesRegex(OAuthStoreError, "not authorized"):
+                store.create_grant(
+                    "workspace-agent", "mcp", workspace_id="workspace-a"
+                )
+            third_grant = store.create_grant(
+                "workspace-agent", "mcp", workspace_id="workspace-c"
+            )
+            self.assertEqual(store.get_grant(third_grant)["workspace_id"], "workspace-c")
             with closing(sqlite3.connect(path)) as conn:
                 client_columns = {
                     row[1] for row in conn.execute("PRAGMA table_info(oauth_clients)")
@@ -203,10 +231,39 @@ class OAuthStoreTests(unittest.TestCase):
                 grant_columns = {
                     row[1] for row in conn.execute("PRAGMA table_info(oauth_grants)")
                 }
+                workspace_rows = conn.execute(
+                    "SELECT workspace_id FROM oauth_client_workspaces "
+                    "WHERE client_id='workspace-agent' ORDER BY workspace_id"
+                ).fetchall()
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
             self.assertIn("workspace_id", client_columns)
             self.assertIn("workspace_id", grant_columns)
+            self.assertEqual(workspace_rows, [("workspace-b",), ("workspace-c",)])
             self.assertEqual(version, OAuthAuthorizationStore.SCHEMA_VERSION)
+
+    def test_v4_single_workspace_column_migrates_into_client_allowlist(self) -> None:
+        with oauth_root() as root:
+            path = root / "oauth.sqlite3"
+            store = OAuthAuthorizationStore(path, pepper=PEPPER)
+            store.upsert_client(
+                "legacy-workspace-agent",
+                redirect_uri="http://127.0.0.1/callback",
+                scopes="mcp",
+                workspace_id="legacy-workspace",
+            )
+            with closing(sqlite3.connect(path, isolation_level=None)) as conn:
+                conn.execute("DROP TABLE oauth_client_workspaces")
+                conn.execute("PRAGMA user_version = 4")
+
+            migrated = OAuthAuthorizationStore(path, pepper=PEPPER)
+            self.assertEqual(
+                migrated.get_client("legacy-workspace-agent")["workspace_ids"],
+                ["legacy-workspace"],
+            )
+            grant_id = migrated.create_grant("legacy-workspace-agent", "mcp")
+            self.assertEqual(
+                migrated.get_grant(grant_id)["workspace_id"], "legacy-workspace"
+            )
 
     def test_confidential_client_metadata_round_trips_without_plaintext_secret(self) -> None:
         with oauth_root() as root:

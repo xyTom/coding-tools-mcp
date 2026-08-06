@@ -4,7 +4,13 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { containsCredentialControl, gatewayExposurePreview, gatewayServerTemplate, sanitizeAdminValue } from '../src/admin.js';
+import {
+  containsCredentialControl,
+  gatewayExposurePreview,
+  gatewayServerFromForm,
+  gatewayServerTemplate,
+  sanitizeAdminValue,
+} from '../src/admin.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -39,6 +45,39 @@ test('new Gateway server template defaults to restart-only broker exposure', () 
   assert.equal(template.servers.chemistry.expose_mode, 'broker');
   assert.deepEqual(template.servers.chemistry.pinned_tools, []);
   assert.deepEqual(template.tool_search.custom_synonyms, {});
+});
+
+test('Gateway form builds broker and startup-enable configuration without requiring JSON', () => {
+  const result = gatewayServerFromForm({
+    alias: 'chemistry',
+    transport: 'stdio',
+    command: 'npx',
+    args: '-y\n@scope/chemistry-mcp',
+    environment: 'CACHE_DIR=C:\\data\nAPI_TOKEN=secret:chemistry/token\nPROFILE=env:USERPROFILE',
+    enabled: true,
+    exposeMode: 'broker',
+    pinnedTools: 'search_sds\nsearch_literature',
+    includeTools: '',
+    excludeTools: 'delete_record',
+    tags: 'chemistry\nliterature',
+    timeoutMs: '45000',
+  });
+  assert.equal(result.alias, 'chemistry');
+  assert.deepEqual(result.config.args, ['-y', '@scope/chemistry-mcp']);
+  assert.deepEqual(result.config.env, {
+    CACHE_DIR: 'C:\\data',
+    API_TOKEN: { secret_ref: 'chemistry/token' },
+    PROFILE: { env_ref: 'USERPROFILE' },
+  });
+  assert.equal(result.config.enabled, true);
+  assert.equal(result.config.expose_mode, 'broker');
+  assert.deepEqual(result.config.pinned_tools, ['search_sds', 'search_literature']);
+  assert.equal(result.config.timeout_ms, 45000);
+});
+
+test('Gateway form rejects invalid aliases and environment rows early', () => {
+  assert.throws(() => gatewayServerFromForm({ alias: 'bad alias', transport: 'streamable_http', url: 'https://example.test/mcp' }), /alias/i);
+  assert.throws(() => gatewayServerFromForm({ alias: 'valid', transport: 'stdio', command: 'uvx', environment: 'MISSING_SEPARATOR' }), /KEY=value/);
 });
 
 test('Gateway exposure preview consumes the real aggregate backend contract', () => {
@@ -106,4 +145,13 @@ test('HTML labels controls, links errors, and includes narrow-screen layout', as
   assert.match(html, /id="settingsConflict"[^>]*role="alert"/);
   assert.match(css, /@media\s*\(max-width:\s*560px\)/);
   assert.match(css, /min-height:\s*44px/);
+  assert.match(html, /id="gatewayServerForm"/);
+  assert.match(html, /id="gatewayExposeMode"/);
+  assert.match(html, /id="gatewayEnabled"/);
+  assert.match(html, /id="gatewayAdvanced"/);
+  assert.match(html, /oauth\/authorization-password/);
+  assert.match(html, /id="clientPasswordDialog"/);
+  assert.match(html, /id="clientPasswordValue"[^>]*type="password"/);
+  assert.match(html, /data-password-toggle/);
+  assert.doesNotMatch(html, /<h3>Restart-only JSON<\/h3>/);
 });

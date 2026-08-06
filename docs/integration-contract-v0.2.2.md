@@ -77,6 +77,12 @@ must never describe this switch as safe or genuinely read-only.
   changes apply only to new sessions. Existing sessions retain their frozen
   Runtime and root until closed; new sessions targeting a missing or disabled
   Workspace fail closed rather than falling back to another root.
+- In a multi-Workspace server, each OAuth Client has an Admin-managed allowlist
+  containing one or more active Workspace IDs. With several allowed IDs, each
+  Authorize request selects the Workspace copied into that new Grant. Replacing
+  the allowlist takes effect immediately for later authorizations; the Client is
+  not permanently bound to one Workspace, and existing Grants retain their
+  stored Workspace identity.
 - stdio keeps one explicit default Workspace because it has no OAuth Agent
   identity.
 
@@ -194,7 +200,7 @@ must never describe this switch as safe or genuinely read-only.
 ## Admin WebUI
 
 - `webui/src/**` is the sole editable frontend source. Packaged files under `coding_tools_mcp/webui_dist/**` are recreated only by the formal build.
-- The page consumes the dedicated-Admin Phase 08/09 API. It does not bypass authentication, settings/Gateway revisions, Workspace IDs, or conversation pagination.
+- The public `/admin` login shell contains no server data; after token entry it consumes the dedicated-Admin Phase 08/09 API. It does not bypass API authentication, settings/Gateway revisions, Workspace IDs, or conversation pagination.
 - The Admin token is kept in page memory only and is never placed in URLs or browser persistent storage.
 - No legacy tool-profile UI/state/serialization exists. Safe mode does not claim to hide mutation tools; fake-readonly annotations are presented only as a dangerous non-security compatibility override.
 - Stale settings writes preserve the user draft, refresh the persisted revision, and present a conflict instead of silently overwriting. Gateway writes remain restart-only.

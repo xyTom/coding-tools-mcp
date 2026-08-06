@@ -19,11 +19,41 @@ class TranscriptStoreError(RuntimeError):
 
 MAX_PAGE_SIZE = 200
 MAX_CONTENT_CHARS = 2_000_000
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 5
+
+LEGACY_TRANSCRIPT_TABLES = {
+    "chat_conversations": "legacy_transcript_chat_conversations",
+    "chat_messages": "legacy_transcript_chat_messages",
+    "chat_context_entries": "legacy_transcript_chat_context_entries",
+}
 
 
 def _now() -> float:
     return time.time()
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')}
+
+
+def _preserve_legacy_transcript_tables(conn: sqlite3.Connection) -> None:
+    existing_tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    for current_name, legacy_name in LEGACY_TRANSCRIPT_TABLES.items():
+        if current_name not in existing_tables:
+            continue
+        if "workspace_id" in _table_columns(conn, current_name):
+            continue
+        if legacy_name in existing_tables:
+            raise TranscriptStoreError(
+                f"Cannot preserve legacy transcript table {current_name!r}: "
+                f"destination {legacy_name!r} already exists."
+            )
+        conn.execute(f'ALTER TABLE "{current_name}" RENAME TO "{legacy_name}"')
+        existing_tables.remove(current_name)
+        existing_tables.add(legacy_name)
 
 
 def _require_id(value: Any, field: str) -> str:
@@ -115,6 +145,7 @@ class TranscriptStore:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version > SCHEMA_VERSION:
                 raise TranscriptStoreError("Transcript database was written by a newer version.")
+            _preserve_legacy_transcript_tables(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_conversations(

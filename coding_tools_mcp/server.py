@@ -55,13 +55,17 @@ from .oauth import (
     OAUTH_GRANT_TYPES_SUPPORTED,
     OAUTH_MAX_BODY_BYTES,
     OAUTH_RESPONSE_TYPES_SUPPORTED,
+    OAUTH_PASSWORD_SECRET,
     MAX_PENDING_CODES,
     OAUTH_TOKEN_TTL_SECONDS,
     OAuthClientAuthenticationError,
+    OAuthAuthorizationPassword,
     OAuthConfig,
     OAuthIdentity,
     OAuthInvalidGrantError,
     OAuthServiceError,
+    OAuthWorkspaceAccessRequiredError,
+    OAuthWorkspaceSelectionError,
     PersistentOAuthClientRegistry,
     authenticate_access_token,
     create_access_token,
@@ -69,6 +73,7 @@ from .oauth import (
     exchange_refresh_token,
     initialize_signing_key_ring,
     issue_refresh_token,
+    oauth_client_authorization_password_secret_ref,
     valid_pkce_challenge,
     verify_pkce,
 )
@@ -5423,13 +5428,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                     status=403,
                 )
                 return
-            if not self._is_admin_authorized():
-                self.send_json(
-                    {"error": {"code": "admin_auth_required", "message": "Admin authentication is required"}},
-                    status=401,
-                    extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-admin"'},
-                )
-                return
             body = admin_console_html().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -5823,16 +5821,42 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         code_challenge_method: str,
         state: str,
         resource: str,
+        workspace_ids: tuple[str, ...] = (),
+        selected_workspace_id: str = "",
         error: str = "",
     ) -> str:
         def esc(v: str) -> str:
             return html.escape(v, quote=True)
         error_block = f'<p style="color:red">{html.escape(error)}</p>' if error else ""
+        if len(workspace_ids) == 1:
+            workspace_id = workspace_ids[0]
+            workspace_control = (
+                f"<p>Workspace: <strong>{esc(workspace_id)}</strong></p>"
+                f"<input type='hidden' name='workspace_id' value='{esc(workspace_id)}'>"
+            )
+        elif workspace_ids:
+            options = ["<option value=''>Select a Workspace</option>"]
+            for workspace_id in workspace_ids:
+                selected = " selected" if workspace_id == selected_workspace_id else ""
+                options.append(
+                    f"<option value='{esc(workspace_id)}'{selected}>{esc(workspace_id)}</option>"
+                )
+            workspace_control = (
+                "<label>Workspace<select name='workspace_id' required>"
+                + "".join(options)
+                + "</select></label>"
+            )
+        else:
+            workspace_control = (
+                "<p style='color:red'>This Client has no authorized Workspaces. "
+                "Configure its Workspace access in Admin Console, then reload.</p>"
+            )
+        disabled = " disabled" if not workspace_ids else ""
         return (
             "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
             "<title>Authorize MCP Server</title>"
             "<style>body{font-family:sans-serif;max-width:380px;margin:4rem auto;padding:1rem}"
-            "input{width:100%;padding:.5rem;margin:.4rem 0;box-sizing:border-box}"
+            "input,select{width:100%;padding:.5rem;margin:.4rem 0;box-sizing:border-box}"
             "button{width:100%;padding:.7rem;background:#0066cc;color:#fff;border:none;cursor:pointer}</style>"
             "</head><body>"
             f"<h2>Authorize Coding Tools MCP</h2>"
@@ -5846,8 +5870,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             f"<input type='hidden' name='code_challenge_method' value='{esc(code_challenge_method)}'>"
             f"<input type='hidden' name='state' value='{esc(state)}'>"
             f"<input type='hidden' name='resource' value='{esc(resource)}'>"
+            f"{workspace_control}"
             "<label>Password<input type='password' name='password' autocomplete='current-password' required></label>"
-            "<button type='submit'>Authorize</button>"
+            f"<button type='submit'{disabled}>Authorize</button>"
             "</form></body></html>"
         )
 
@@ -5905,6 +5930,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         self._send_html(self._oauth_login_page(
             client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
             code_challenge_method=code_challenge_method, state=state, resource=resource,
+            workspace_ids=client.workspace_ids,
         ))
 
     def handle_oauth_authorize_post(self) -> None:
@@ -5927,11 +5953,15 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         state = _p("state")
         resource = _p("resource")
         password = _p("password")
+        workspace_id = _p("workspace_id")
+        workspace_ids: tuple[str, ...] = ()
 
         def fail(error: str, status: int = 400) -> None:
             self._send_html(self._oauth_login_page(
                 client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
                 code_challenge_method=code_challenge_method, state=state, resource=resource,
+                workspace_ids=workspace_ids,
+                selected_workspace_id=workspace_id,
                 error=error,
             ), status=status)
 
@@ -5944,13 +5974,17 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if client is None or not redirect_allowed:
             fail("Invalid client or redirect URI")
             return
+        workspace_ids = client.workspace_ids
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
             fail("Invalid PKCE parameters")
             return
         if resource.rstrip("/") != self.oauth_base_url():
             fail("Invalid resource")
             return
-        if not secrets.compare_digest(password, cfg.password):
+        if not secrets.compare_digest(
+            password,
+            cfg.current_authorization_password(client_id),
+        ):
             fail("Invalid password", status=401)
             return
         try:
@@ -5959,7 +5993,18 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 client_id=client_id,
                 redirect_uri=redirect_uri,
                 scopes="mcp",
+                workspace_id=workspace_id or None,
             )
+        except OAuthWorkspaceAccessRequiredError:
+            fail(
+                "OAuth client has no authorized Workspaces. "
+                "Configure its Workspace access in Admin Console and retry.",
+                status=409,
+            )
+            return
+        except OAuthWorkspaceSelectionError as exc:
+            fail(str(exc), status=400)
+            return
         except OAuthServiceError:
             fail("OAuth authorization store is unavailable", status=503)
             return
@@ -6301,7 +6346,6 @@ def build_runtime(
 AUTH_MODE_CHOICES = ("bearer", "noauth", "oauth")
 OAUTH_DB_FILENAME = "oauth.sqlite3"
 OAUTH_SECRET_VAULT_FILENAME = "oauth-secrets.json"
-OAUTH_PASSWORD_SECRET = "oauth/authorization-password"
 OAUTH_TOKEN_SECRET = "oauth/token-secret"
 OAUTH_REFRESH_PEPPER_SECRET = "oauth/refresh-pepper"
 
@@ -6409,11 +6453,26 @@ def build_persistent_oauth_config(
             client_secret=client_secret,
             workspace_id=client_workspace_id,
         )
+    authorization_password = OAuthAuthorizationPassword(resolved_password)
+    vault_names = set(vault.list_names())
+    for stored_client in store.list_clients():
+        stored_client_id = str(stored_client.get("client_id") or "")
+        if not stored_client_id:
+            continue
+        password_reference = oauth_client_authorization_password_secret_ref(
+            stored_client_id
+        )
+        if password_reference in vault_names:
+            authorization_password.rotate_client(
+                stored_client_id,
+                vault.get_secret(password_reference),
+            )
     return (
         OAuthConfig(
             password=resolved_password,
             server_url=server_url,
             token_secret=active_secret,
+            authorization_password=authorization_password,
             token_ttl=token_ttl,
             registry=registry,
             store=store,
@@ -6539,7 +6598,7 @@ def apply_oauth_workspace_bindings(
     if len(enabled) == 1:
         default_id = catalog.default_id
         for client in config.store.list_clients():
-            if not client.get("workspace_id"):
+            if not client.get("workspace_ids"):
                 if not config.store.set_client_workspace(str(client["client_id"]), default_id):
                     raise OAuthServiceError(
                         "OAuth client could not be migrated to the sole enabled Workspace."
@@ -6865,6 +6924,12 @@ def run_http(args: argparse.Namespace) -> int:
                 active_gateway_revision=active_gateway_revision,
                 secret_vault=server_vault,
                 oauth_store=oauth_config.store if oauth_config is not None else None,
+                oauth_secret_vault=(
+                    oauth_config.secret_vault if oauth_config is not None else None
+                ),
+                oauth_password=(
+                    oauth_config.authorization_password if oauth_config is not None else None
+                ),
                 active_gateway_status=runtime.upstream_manager.status_payload,
                 transcript_store=TranscriptStore(config_dir / TRANSCRIPT_DB_FILENAME),
                 session_scanner=CodexSessionScanner(),

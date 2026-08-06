@@ -1604,7 +1604,10 @@ def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
     if timeout_ms <= 0:
         raise UpstreamConfigError(f"Upstream {alias!r} timeout_ms must be positive.")
     command = _optional_str(value.get("command"))
-    args = _string_tuple(value.get("args"), field_name="args", alias=alias)
+    args = tuple(
+        _strip_matching_outer_quotes(arg)
+        for arg in _string_tuple(value.get("args"), field_name="args", alias=alias)
+    )
     if transport == "stdio":
         validate_stdio_launch(alias, command, args)
     elif not _optional_str(value.get("url")):
@@ -2024,6 +2027,12 @@ def validate_stdio_launch(alias: str, command: str | None, args: tuple[str, ...]
             raise UpstreamConfigError(
                 f"Upstream {alias!r} args[{index}] cannot contain shell control syntax."
             )
+
+
+def _strip_matching_outer_quotes(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    return value
 
 
 def base_upstream_environment() -> dict[str, str]:

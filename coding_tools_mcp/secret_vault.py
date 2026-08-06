@@ -164,7 +164,7 @@ def decrypt_value(record: dict[str, Any], master_key: str) -> str:
     if (
         record.get("version") != RECORD_VERSION
         or record.get("kdf") != KDF_NAME
-        or record.get("cipher") != CIPHER_NAME
+        or record.get("cipher", CIPHER_NAME) != CIPHER_NAME
     ):
         raise SecretVaultError("Secret record uses an unsupported format.")
     try:

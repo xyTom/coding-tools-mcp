@@ -75,6 +75,87 @@ function gatewayServerTemplate(alias = 'new-upstream') {
   };
 }
 
+function lineValues(value) {
+  return String(value || '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+}
+
+function argumentLineValues(value) {
+  return lineValues(value).map((item) => {
+    const first = item[0];
+    return item.length >= 2 && first === item[item.length - 1] && (first === '"' || first === "'")
+      ? item.slice(1, -1)
+      : item;
+  });
+}
+
+function parseGatewayEnvironment(value) {
+  const result = {};
+  for (const row of lineValues(value)) {
+    const separator = row.indexOf('=');
+    if (separator <= 0) throw new Error(`环境变量必须使用 KEY=value 格式：${row}`);
+    const key = row.slice(0, separator).trim();
+    const raw = row.slice(separator + 1).trim();
+    if (!key) throw new Error(`环境变量必须使用 KEY=value 格式：${row}`);
+    if (raw.startsWith('secret:')) {
+      const secretRef = raw.slice('secret:'.length).trim();
+      if (!secretRef) throw new Error(`Secret 引用不能为空：${key}`);
+      result[key] = { secret_ref: secretRef };
+    } else if (raw.startsWith('env:')) {
+      const envRef = raw.slice('env:'.length).trim();
+      if (!envRef) throw new Error(`环境变量引用不能为空：${key}`);
+      result[key] = { env_ref: envRef };
+    } else {
+      result[key] = raw;
+    }
+  }
+  return result;
+}
+
+function gatewayServerFromForm(values = {}) {
+  const alias = String(values.alias || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(alias) || alias.includes('__')) {
+    throw new Error('连接 alias 必须是 1–64 位字母、数字、下划线或连字符，且不能包含双下划线。');
+  }
+  const transport = values.transport === 'streamable_http' ? 'streamable_http' : 'stdio';
+  const timeoutMs = Number(values.timeoutMs || 30000);
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) throw new Error('等待时间必须是正整数。');
+  const config = {
+    transport,
+    enabled: values.enabled !== false,
+    expose_mode: values.exposeMode === 'direct' ? 'direct' : 'broker',
+    pinned_tools: lineValues(values.pinnedTools),
+    include_tools: lineValues(values.includeTools),
+    exclude_tools: lineValues(values.excludeTools),
+    tags: lineValues(values.tags),
+    timeout_ms: timeoutMs,
+  };
+  if (transport === 'stdio') {
+    config.command = String(values.command || '').trim();
+    if (!config.command) throw new Error('本地 stdio 连接必须填写启动命令。');
+    config.args = argumentLineValues(values.args);
+    const environment = parseGatewayEnvironment(values.environment);
+    if (Object.keys(environment).length) config.env = environment;
+  } else {
+    config.url = String(values.url || '').trim();
+    if (!config.url) throw new Error('远程 Streamable HTTP 连接必须填写服务地址。');
+    const authorizationEnv = String(values.authorizationEnv || '').trim();
+    if (authorizationEnv) config.authorization_env = authorizationEnv;
+  }
+  return { alias, config };
+}
+
+function setAuthenticationUi(documentRef, authenticated) {
+  const form = documentRef.getElementById('authForm');
+  const connected = documentRef.getElementById('authConnected');
+  const token = documentRef.getElementById('adminToken');
+  if (form) form.hidden = Boolean(authenticated);
+  if (connected) connected.hidden = !authenticated;
+  if (authenticated && token) {
+    token.value = '';
+    setPasswordVisibility(token, documentRef.getElementById('adminTokenToggle'), false);
+  }
+}
+
 function gatewayExposurePreview(documentValue, activeStatus = {}) {
   const servers = documentValue?.servers && typeof documentValue.servers === 'object'
     ? documentValue.servers
@@ -108,21 +189,21 @@ function renderGatewayExposurePreview(container, preview) {
   const documentRef = container.ownerDocument || document;
   container.replaceChildren();
   if (!preview.length) {
-    container.append(createNode(documentRef, 'p', { className: 'muted', text: '草稿中没有 Gateway server。' }));
+    container.append(createNode(documentRef, 'p', { className: 'muted', text: '草稿中没有 MCP 工具连接。' }));
     return;
   }
   for (const item of preview) {
     const card = createNode(documentRef, 'article', { className: 'card' });
-    const directText = item.catalog_known ? String(item.direct_count) : 'unknown';
-    const brokerText = item.catalog_known ? String(item.broker_only_count) : 'unknown';
-    const catalogText = item.catalog_known ? String(item.catalog_count) : 'unknown';
+    const directText = item.catalog_known ? String(item.direct_count) : '未知';
+    const brokerText = item.catalog_known ? String(item.broker_only_count) : '未知';
+    const catalogText = item.catalog_known ? String(item.catalog_count) : '未知';
     card.append(
       createNode(documentRef, 'h4', { text: `${item.alias} · ${item.mode}` }),
-      createNode(documentRef, 'p', { text: `Active Runtime direct count: ${directText}` }),
-      createNode(documentRef, 'p', { text: `Active Runtime broker-only count: ${brokerText}` }),
-      createNode(documentRef, 'p', { text: `Active Runtime catalog count: ${catalogText}` }),
-      createNode(documentRef, 'p', { className: 'muted', text: `Configured pins: ${item.configured_pins.join(', ') || '无'}；include: ${item.configured_include.join(', ') || '全部'}；exclude: ${item.configured_exclude.join(', ') || '无'}` }),
-      createNode(documentRef, 'p', { className: 'muted', text: 'Active Runtime 仅提供聚合计数；草稿过滤结果需在新 MCP session/Runtime 或服务重启后确认。' }),
+      createNode(documentRef, 'p', { text: `当前 Runtime Direct 工具数：${directText}` }),
+      createNode(documentRef, 'p', { text: `当前 Runtime 仅 Broker 可见工具数：${brokerText}` }),
+      createNode(documentRef, 'p', { text: `当前 Runtime 工具目录总数：${catalogText}` }),
+      createNode(documentRef, 'p', { className: 'muted', text: `配置的置顶工具：${item.configured_pins.join(', ') || '无'}；包含：${item.configured_include.join(', ') || '全部'}；排除：${item.configured_exclude.join(', ') || '无'}` }),
+      createNode(documentRef, 'p', { className: 'muted', text: '当前 Runtime 仅提供聚合计数；草稿过滤结果需在新 MCP 会话/Runtime 或服务重启后确认。' }),
     );
     container.append(card);
   }
@@ -157,6 +238,26 @@ function createNode(documentRef, tag, options = {}) {
   if (options.type) node.type = options.type;
   if (options.id) node.id = options.id;
   return node;
+}
+
+function setPasswordVisibility(input, toggle, visible) {
+  if (!input || !toggle) return;
+  input.type = visible ? 'text' : 'password';
+  toggle.textContent = visible ? '隐藏' : '显示';
+  toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
+  toggle.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码');
+}
+
+function wirePasswordVisibilityToggles(documentRef) {
+  for (const toggle of documentRef.querySelectorAll('[data-password-toggle]')) {
+    const input = documentRef.getElementById(toggle.dataset.passwordTarget || '');
+    if (!input) continue;
+    setPasswordVisibility(input, toggle, false);
+    toggle.addEventListener('click', () => {
+      setPasswordVisibility(input, toggle, input.type === 'password');
+      input.focus();
+    });
+  }
 }
 
 function appendDefinitionList(documentRef, container, value) {
@@ -252,7 +353,15 @@ function renderConversationDetail(container, payload, handlers = {}) {
   container.append(contextPager);
 }
 
-function renderOAuthItems(container, items, collection, onAction) {
+function renderOAuthItems(
+  container,
+  items,
+  collection,
+  onAction,
+  onClientPassword,
+  onClientWorkspaces,
+  workspaces = [],
+) {
   const documentRef = container.ownerDocument || document;
   container.replaceChildren();
   if (!items?.length) {
@@ -274,6 +383,20 @@ function renderOAuthItems(container, items, collection, onAction) {
     const item = sanitizeAdminValue(original);
     const card = createNode(documentRef, 'article', { className: 'card' });
     card.append(createNode(documentRef, 'h3', { text: String(item?.[idKey] || `${collection} item`) }));
+    if (collection === 'clients') {
+      const clientMode = item?.authorize_login?.mode === 'client';
+      card.append(createNode(documentRef, 'span', {
+        className: `badge ${clientMode ? 'good' : ''}`.trim(),
+        text: clientMode ? 'Authorize：专属密码' : 'Authorize：全局密码',
+      }));
+      const workspaceIds = Array.isArray(item?.workspace_access?.workspace_ids)
+        ? item.workspace_access.workspace_ids.map(String)
+        : Array.isArray(item?.workspace_ids) ? item.workspace_ids.map(String) : [];
+      card.append(createNode(documentRef, 'span', {
+        className: `badge ${workspaceIds.length ? 'good' : 'danger'}`,
+        text: workspaceIds.length ? `允许 Workspace：${workspaceIds.length} 个` : '未配置 Workspace 权限',
+      }));
+    }
     appendDefinitionList(documentRef, card, item);
     if (Object.values(item || {}).some((value) => value && typeof value === 'object')) {
       const details = createNode(documentRef, 'details');
@@ -287,6 +410,66 @@ function renderOAuthItems(container, items, collection, onAction) {
       const button = createNode(documentRef, 'button', { type: 'button', className: action === 'enable' || action === 'activate' ? 'secondary' : 'danger', text: action });
       button.addEventListener('click', () => onAction?.(collection, String(item?.[idKey] || ''), action, button));
       actions.append(button);
+    }
+    if (collection === 'clients') {
+      const clientId = String(item?.[idKey] || '');
+      const clientMode = item?.authorize_login?.mode === 'client';
+      const workspaceIds = new Set(
+        Array.isArray(item?.workspace_access?.workspace_ids)
+          ? item.workspace_access.workspace_ids.map(String)
+          : Array.isArray(item?.workspace_ids) ? item.workspace_ids.map(String) : [],
+      );
+      const access = createNode(documentRef, 'fieldset', { className: 'oauth-workspace-access' });
+      access.append(createNode(documentRef, 'legend', { text: '允许的 Workspaces' }));
+      const checkboxes = [];
+      for (const workspace of workspaces.filter((candidate) => candidate?.enabled !== false)) {
+        const checkbox = createNode(documentRef, 'input', { type: 'checkbox' });
+        checkbox.value = String(workspace.id || '');
+        checkbox.checked = workspaceIds.has(checkbox.value);
+        const label = createNode(documentRef, 'label', { className: 'checkline' });
+        label.append(
+          checkbox,
+          createNode(documentRef, 'span', {
+            text: `${workspace.name || workspace.id} (${workspace.id})`,
+          }),
+        );
+        access.append(label);
+        checkboxes.push(checkbox);
+      }
+      const saveWorkspaceAccess = createNode(documentRef, 'button', {
+        type: 'button',
+        className: 'secondary',
+        text: '保存 Workspace 权限',
+      });
+      saveWorkspaceAccess.disabled = checkboxes.length === 0;
+      saveWorkspaceAccess.addEventListener('click', () => {
+        const selected = checkboxes
+          .filter((checkbox) => checkbox.checked)
+          .map((checkbox) => String(checkbox.value));
+        onClientWorkspaces?.(clientId, selected, saveWorkspaceAccess);
+      });
+      if (!checkboxes.length) {
+        access.append(createNode(documentRef, 'p', {
+          className: 'muted',
+          text: '当前 Runtime 没有可授权的 Workspace。',
+        }));
+      }
+      access.append(saveWorkspaceAccess);
+      card.append(access);
+      const configure = createNode(documentRef, 'button', {
+        type: 'button',
+        className: 'secondary',
+        text: clientMode ? '轮换专属密码' : '设置专属密码',
+      });
+      configure.addEventListener('click', () => onClientPassword?.(clientId, 'configure', configure));
+      actions.append(configure);
+      if (clientMode) {
+        const reset = createNode(documentRef, 'button', {
+          type: 'button', className: 'secondary', text: '改用全局密码',
+        });
+        reset.addEventListener('click', () => onClientPassword?.(clientId, 'reset', reset));
+        actions.append(reset);
+      }
     }
     if (actions.childNodes.length) card.append(actions);
     container.append(card);
@@ -352,8 +535,9 @@ function initAdminApp(documentRef = document) {
   const settingsPage = globalThis.McpSettingsPage;
   const state = {
     token: '', settings: null, workspaces: [], workspaceRevision: '', gateway: null,
-    gatewayRevision: '', conversationPage: 1, conversationTotal: 0,
+    gatewayRevision: '', editingGatewayAlias: '', conversationPage: 1, conversationTotal: 0,
     selectedConversation: null, messagePage: 1, contextPage: 1,
+    clientPasswordClientId: '', clientPasswordReturnFocus: null,
   };
   const api = createApiClient(() => state.token);
   const byId = (id) => documentRef.getElementById(id);
@@ -363,6 +547,138 @@ function initAdminApp(documentRef = document) {
     if (!box) return;
     box.textContent = message;
     box.className = `status ${kind}`.trim();
+  }
+
+  function clientPasswordError(message = '') {
+    const box = byId('clientPasswordError');
+    box.textContent = message;
+    box.hidden = !message;
+  }
+
+  function closeClientPasswordDialog({ restoreFocus = true } = {}) {
+    const dialog = byId('clientPasswordDialog');
+    const returnFocus = state.clientPasswordReturnFocus;
+    byId('clientPasswordValue').value = '';
+    setPasswordVisibility(
+      byId('clientPasswordValue'),
+      byId('clientPasswordToggle'),
+      false,
+    );
+    clientPasswordError();
+    state.clientPasswordClientId = '';
+    state.clientPasswordReturnFocus = null;
+    if (dialog?.open) dialog.close();
+    if (restoreFocus && returnFocus && typeof returnFocus.focus === 'function') {
+      returnFocus.focus();
+    }
+  }
+
+  function openClientPasswordDialog(clientId, returnFocus) {
+    state.clientPasswordClientId = clientId;
+    state.clientPasswordReturnFocus = returnFocus;
+    byId('clientPasswordClientId').textContent = clientId;
+    byId('clientPasswordValue').value = '';
+    setPasswordVisibility(
+      byId('clientPasswordValue'),
+      byId('clientPasswordToggle'),
+      false,
+    );
+    clientPasswordError();
+    byId('clientPasswordDialog').showModal();
+    byId('clientPasswordValue').focus();
+  }
+
+  function updateGatewayTransportFields() {
+    const isStdio = byId('gatewayTransport').value === 'stdio';
+    for (const node of documentRef.querySelectorAll('[data-gateway-stdio]')) node.hidden = !isStdio;
+    for (const node of documentRef.querySelectorAll('[data-gateway-http]')) node.hidden = isStdio;
+  }
+
+  function gatewayFormError(message = '') {
+    const box = byId('gatewayFormError');
+    box.textContent = message;
+    box.hidden = !message;
+  }
+
+  function resetGatewayServerForm({ focus = false } = {}) {
+    state.editingGatewayAlias = '';
+    byId('gatewayServerForm').reset();
+    byId('gatewayAlias').disabled = false;
+    byId('gatewayTransport').value = 'stdio';
+    byId('gatewayExposeMode').value = 'broker';
+    byId('gatewayTimeout').value = '30000';
+    byId('gatewayEnabled').checked = true;
+    byId('gatewayServerFormTitle').textContent = '新增 MCP 连接';
+    byId('gatewayCredentialNotice').textContent = '';
+    gatewayFormError();
+    updateGatewayTransportFields();
+    if (focus) byId('gatewayAlias').focus();
+  }
+
+  function editableEnvironment(config) {
+    const rows = [];
+    const preserved = [];
+    for (const [key, value] of Object.entries(config?.env || {})) {
+      if (typeof value === 'string' && value !== '<redacted>') rows.push(`${key}=${value}`);
+      else preserved.push(key);
+    }
+    return { rows, preserved };
+  }
+
+  function editGatewayServer(alias, config) {
+    state.editingGatewayAlias = alias;
+    byId('gatewayServerFormTitle').textContent = `编辑 MCP 连接：${alias}`;
+    byId('gatewayAlias').value = alias;
+    byId('gatewayAlias').disabled = true;
+    byId('gatewayTransport').value = config.transport === 'stdio' ? 'stdio' : 'streamable_http';
+    byId('gatewayCommand').value = config.command || '';
+    byId('gatewayArgs').value = Array.isArray(config.args) ? config.args.join('\n') : '';
+    byId('gatewayUrl').value = config.url || '';
+    byId('gatewayAuthorizationEnv').value = config.authorization_env === '<redacted>' ? '' : (config.authorization_env || '');
+    byId('gatewayExposeMode').value = config.expose_mode === 'broker' ? 'broker' : 'direct';
+    byId('gatewayPinnedTools').value = Array.isArray(config.pinned_tools) ? config.pinned_tools.join('\n') : '';
+    byId('gatewayIncludeTools').value = Array.isArray(config.include_tools) ? config.include_tools.join('\n') : '';
+    byId('gatewayExcludeTools').value = Array.isArray(config.exclude_tools) ? config.exclude_tools.join('\n') : '';
+    byId('gatewayTags').value = Array.isArray(config.tags) ? config.tags.join('\n') : '';
+    byId('gatewayTimeout').value = String(config.timeout_ms || 30000);
+    byId('gatewayEnabled').checked = config.enabled !== false;
+    const environment = editableEnvironment(config);
+    byId('gatewayEnvironment').value = environment.rows.join('\n');
+    byId('gatewayCredentialNotice').textContent = environment.preserved.length
+      ? `将保留 ${environment.preserved.length} 个未显示的凭据引用：${environment.preserved.join('、')}`
+      : '';
+    gatewayFormError();
+    updateGatewayTransportFields();
+    byId('gatewayServerForm').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    byId('gatewayCommand').focus();
+  }
+
+  function readGatewayServerForm() {
+    return gatewayServerFromForm({
+      alias: state.editingGatewayAlias || byId('gatewayAlias').value,
+      transport: byId('gatewayTransport').value,
+      command: byId('gatewayCommand').value,
+      args: byId('gatewayArgs').value,
+      environment: byId('gatewayEnvironment').value,
+      url: byId('gatewayUrl').value,
+      authorizationEnv: byId('gatewayAuthorizationEnv').value,
+      exposeMode: byId('gatewayExposeMode').value,
+      pinnedTools: byId('gatewayPinnedTools').value,
+      includeTools: byId('gatewayIncludeTools').value,
+      excludeTools: byId('gatewayExcludeTools').value,
+      tags: byId('gatewayTags').value,
+      timeoutMs: byId('gatewayTimeout').value,
+      enabled: byId('gatewayEnabled').checked,
+    });
+  }
+
+  async function saveGatewayServer(alias, config) {
+    const payload = await api.request(`/gateway/servers/${encodeURIComponent(alias)}`, {
+      method: 'PUT',
+      body: { expected_revision: state.gatewayRevision, config },
+    });
+    renderGateway(payload);
+    return payload;
   }
 
   function showSection(name) {
@@ -466,17 +782,52 @@ function initAdminApp(documentRef = document) {
     summary.replaceChildren();
     const servers = payload.persisted?.servers || {};
     const aliases = Object.keys(servers);
-    if (!aliases.length) summary.append(createNode(documentRef, 'p', { className: 'muted', text: '没有持久化 Gateway server。' }));
+    if (!aliases.length) summary.append(createNode(documentRef, 'p', { className: 'muted', text: '尚未添加 MCP 工具连接。' }));
     for (const alias of aliases) {
       const raw = servers[alias] || {};
-      const item = createNode(documentRef, 'article', { className: 'card' });
+      const item = createNode(documentRef, 'article', { className: 'card gateway-server-card' });
       const mode = raw.expose_mode || 'direct';
       const pins = Array.isArray(raw.pinned_tools) ? raw.pinned_tools : [];
+      const enabled = raw.enabled !== false;
+      const badges = createNode(documentRef, 'p');
+      badges.append(
+        createNode(documentRef, 'span', { className: `badge ${enabled ? 'good' : 'danger'}`, text: enabled ? '下次启动启用' : '下次启动禁用' }),
+        createNode(documentRef, 'span', { className: `badge ${mode === 'broker' ? 'good' : ''}`, text: mode === 'broker' ? 'Broker 按需暴露' : 'Direct 全部直出' }),
+      );
+      const actions = createNode(documentRef, 'div', { className: 'button-row' });
+      const edit = createNode(documentRef, 'button', { type: 'button', className: 'secondary', text: '编辑' });
+      edit.addEventListener('click', () => editGatewayServer(alias, raw));
+      const toggle = createNode(documentRef, 'button', { type: 'button', className: 'secondary', text: enabled ? '下次启动禁用' : '下次启动启用' });
+      toggle.addEventListener('click', async () => {
+        try {
+          await saveGatewayServer(alias, { enabled: !enabled });
+          status(`MCP 连接 ${alias} 已设为下次启动${enabled ? '禁用' : '启用'}；当前 Runtime 不变。`);
+        } catch (error) { status(error.message, 'danger'); }
+      });
+      const remove = createNode(documentRef, 'button', { type: 'button', className: 'danger', text: '删除' });
+      remove.addEventListener('click', async () => {
+        const accepted = await confirmDestructive(documentRef, {
+          title: '删除 MCP 连接',
+          message: `连接别名：${alias}\n影响：从持久化配置中删除；当前 Runtime 保持不变，新建 Runtime 或重启后不再加载。`,
+          confirmLabel: '删除', returnFocus: remove,
+        });
+        if (!accepted) return;
+        try {
+          const result = await api.request(`/gateway/servers/${encodeURIComponent(alias)}`, {
+            method: 'DELETE', body: { expected_revision: state.gatewayRevision },
+          });
+          renderGateway(result);
+          if (state.editingGatewayAlias === alias) resetGatewayServerForm();
+          status(`MCP 连接 ${alias} 已从持久化配置删除；当前 Runtime 不变。`);
+        } catch (error) { status(error.message, 'danger'); }
+      });
+      actions.append(edit, toggle, remove);
       item.append(
-        createNode(documentRef, 'h4', { text: alias }),
-        createNode(documentRef, 'p', { text: `Transport: ${raw.transport || 'unknown'} · Enabled: ${raw.enabled !== false}` }),
-        createNode(documentRef, 'p', { text: `Exposure: ${mode} · Pinned: ${pins.length}` }),
-        createNode(documentRef, 'p', { className: 'muted', text: 'Credential fields are configured but intentionally hidden.' }),
+        createNode(documentRef, 'h3', { text: alias }),
+        badges,
+        createNode(documentRef, 'p', { text: `连接方式：${raw.transport || '未知'} · Broker 置顶工具：${pins.length}` }),
+        createNode(documentRef, 'p', { className: 'muted', text: '凭据值和内部引用不会显示；使用表单编辑时会保留未显示的凭据。' }),
+        actions,
       );
       summary.append(item);
     }
@@ -485,15 +836,15 @@ function initAdminApp(documentRef = document) {
     exposureRoot.replaceChildren();
     const report = payload.active_status?.exposure_report;
     if (!report) {
-      exposureRoot.append(createNode(documentRef, 'p', { className: 'muted', text: '当前 Runtime 没有可用的上游 exposure report。' }));
+      exposureRoot.append(createNode(documentRef, 'p', { className: 'muted', text: '当前 Runtime 没有可用的上游工具暴露报告。' }));
     } else {
       exposureRoot.append(
-        createNode(documentRef, 'p', { text: `Direct: ${report.direct?.count || 0} tools / ${report.direct?.definition_bytes || 0} bytes` }),
-        createNode(documentRef, 'p', { text: `Catalog: ${report.catalog?.count || 0} total / ${report.catalog?.broker_only_count || 0} broker-only` }),
-        createNode(documentRef, 'p', { className: 'muted', text: '仅统计 upstream public definitions；不包含本地或 Admin 工具。' }),
+        createNode(documentRef, 'p', { text: `Direct 直接暴露：${report.direct?.count || 0} 个工具 / ${report.direct?.definition_bytes || 0} 字节` }),
+        createNode(documentRef, 'p', { text: `Broker 目录：共 ${report.catalog?.count || 0} 个 / 其中 ${report.catalog?.broker_only_count || 0} 个仅 Broker 可见` }),
+        createNode(documentRef, 'p', { className: 'muted', text: '仅统计上游公开工具定义；不包含本地工具或 Admin 工具。' }),
       );
       for (const item of report.largest_public_definitions || []) {
-        exposureRoot.append(createNode(documentRef, 'p', { className: 'muted', text: `${item.name}: ${item.definition_bytes} bytes${item.direct ? ' · direct' : ' · broker-only'}` }));
+        exposureRoot.append(createNode(documentRef, 'p', { className: 'muted', text: `${item.name}：${item.definition_bytes} 字节${item.direct ? ' · Direct' : ' · 仅 Broker'}` }));
       }
     }
     updateGatewayExposurePreview();
@@ -514,7 +865,38 @@ function initAdminApp(documentRef = document) {
       const result = await api.request(`/oauth/${encodeURIComponent(resource)}/${encodeURIComponent(id)}/${encodeURIComponent(action)}`, { method: 'POST', body: {} });
       status(`OAuth ${action} 完成，实际影响数量：${result.affected_count || 0}。`);
       await loadOAuth();
-    });
+    }, async (clientId, action, button) => {
+      if (action === 'configure') {
+        openClientPasswordDialog(clientId, button);
+        return;
+      }
+      const accepted = await confirmDestructive(documentRef, {
+        title: '改用全局 OAuth 密码',
+        message: `Client ID: ${clientId}\n影响：立即删除这个 Client 的专属密码覆盖，并改用全局 OAuth Authorize 密码。`,
+        confirmLabel: '改用全局密码', returnFocus: button,
+      });
+      if (!accepted) return;
+      const result = await api.request(`/oauth/clients/${encodeURIComponent(clientId)}/authorization-password`, { method: 'DELETE' });
+      status(`Client ${clientId} 已立即改用全局 OAuth Authorize 密码；实际影响数量：${result.affected_count || 0}。`);
+      await loadOAuth();
+    }, async (clientId, workspaceIds, button) => {
+      if (!workspaceIds.length) {
+        status('请至少允许该 OAuth Client 访问一个 Workspace。', 'danger');
+        return;
+      }
+      const accepted = await confirmDestructive(documentRef, {
+        title: '更新 OAuth Client Workspace 权限',
+        message: `Client ID: ${clientId}\n允许的 Workspace IDs: ${workspaceIds.join(', ')}\n影响：立即用于后续 OAuth 授权；已有 Grant 和 Token 的 Workspace 保持不变。`,
+        confirmLabel: '保存权限', returnFocus: button,
+      });
+      if (!accepted) return;
+      const result = await api.request(`/oauth/clients/${encodeURIComponent(clientId)}/workspaces`, {
+        method: 'PUT', body: { workspace_ids: workspaceIds },
+      });
+      status(`Client ${clientId} 的 Workspace 权限已更新并立即生效；下次 Authorize 可重新选择。`);
+      await loadOAuth();
+      return result;
+    }, state.workspaces);
     return payload;
   }
 
@@ -525,6 +907,14 @@ function initAdminApp(documentRef = document) {
     for (const item of payload.secrets || []) {
       const card = createNode(documentRef, 'article', { className: 'card' });
       card.append(createNode(documentRef, 'strong', { text: item.name }));
+      if (item.usage === 'oauth_authorization_password') {
+        card.append(
+          createNode(documentRef, 'span', { className: 'badge good', text: 'OAuth Authorize · 立即生效' }),
+          createNode(documentRef, 'p', { className: 'muted', text: '这是当前授权页密码。为避免锁定 OAuth，请直接替换，不支持删除。' }),
+        );
+        root.append(card);
+        continue;
+      }
       const remove = createNode(documentRef, 'button', { type: 'button', className: 'danger', text: '删除' });
       remove.addEventListener('click', async () => {
         const accepted = await confirmDestructive(documentRef, {
@@ -620,12 +1010,19 @@ function initAdminApp(documentRef = document) {
   byId('authForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     state.token = byId('adminToken').value;
-    try { await refreshAll(); } catch (error) { status(error.message, 'danger'); }
+    try {
+      await refreshAll();
+      setAuthenticationUi(documentRef, true);
+    } catch (error) {
+      setAuthenticationUi(documentRef, false);
+      status(error.message, 'danger');
+    }
   });
   byId('forgetToken').addEventListener('click', () => {
     state.token = '';
-    byId('adminToken').value = '';
+    setAuthenticationUi(documentRef, false);
     status('Admin token 已从页面内存清除。');
+    byId('adminToken').focus();
   });
   byId('refreshAll').addEventListener('click', () => refreshAll().catch((error) => status(error.message, 'danger')));
   byId('reloadSettings').addEventListener('click', () => loadSettings().then(() => status('Settings 已重新读取。')).catch((error) => status(error.message, 'danger')));
@@ -654,6 +1051,29 @@ function initAdminApp(documentRef = document) {
     } catch (error) { status(error.message, 'danger'); }
   });
   byId('reloadGateway').addEventListener('click', () => loadGateway().catch((error) => status(error.message, 'danger')));
+  byId('newGatewayForm').addEventListener('click', () => resetGatewayServerForm({ focus: true }));
+  byId('gatewayTransport').addEventListener('change', updateGatewayTransportFields);
+  byId('cancelGatewayEdit').addEventListener('click', () => resetGatewayServerForm());
+  byId('gatewayServerForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    gatewayFormError();
+    try {
+      const { alias, config } = readGatewayServerForm();
+      const editing = Boolean(state.editingGatewayAlias);
+      if (!editing && state.gateway?.persisted?.servers?.[alias]) {
+        throw new Error(`连接 alias ${alias} 已存在；请从连接卡片选择编辑。`);
+      }
+      await saveGatewayServer(alias, config);
+      resetGatewayServerForm();
+      status(`MCP 连接 ${alias} 已${editing ? '更新' : '添加'}；新建 MCP Session/Runtime 或服务重启后生效。`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        await loadGateway();
+        gatewayFormError('配置版本冲突；已刷新持久化状态，请检查表单后重新保存。');
+      } else gatewayFormError(error.message);
+      status(error.message, 'danger');
+    }
+  });
   byId('newGatewayServer').addEventListener('click', () => {
     byId('gatewayDocument').value = JSON.stringify(gatewayServerTemplate(), null, 2);
     updateGatewayExposurePreview();
@@ -680,6 +1100,24 @@ function initAdminApp(documentRef = document) {
   });
   byId('oauthCollection').addEventListener('change', () => loadOAuth().catch((error) => status(error.message, 'danger')));
   byId('reloadOAuth').addEventListener('click', () => loadOAuth().catch((error) => status(error.message, 'danger')));
+  byId('clientPasswordCancel').addEventListener('click', () => closeClientPasswordDialog());
+  byId('clientPasswordForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const clientId = state.clientPasswordClientId;
+    const value = byId('clientPasswordValue').value;
+    try {
+      await api.request(`/oauth/clients/${encodeURIComponent(clientId)}/authorization-password`, {
+        method: 'PUT', body: { value },
+      });
+      closeClientPasswordDialog();
+      status(`Client ${clientId} 的专属 OAuth Authorize 密码已保存并立即生效。`);
+      await loadOAuth();
+    } catch (error) {
+      byId('clientPasswordValue').value = '';
+      setPasswordVisibility(byId('clientPasswordValue'), byId('clientPasswordToggle'), false);
+      clientPasswordError(error.message);
+    }
+  });
   byId('reloadSecrets').addEventListener('click', () => loadSecrets().catch((error) => status(error.message, 'danger')));
   byId('secretForm').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -688,7 +1126,10 @@ function initAdminApp(documentRef = document) {
     try {
       const result = await api.request(`/secrets/${encodeURIComponent(name)}`, { method: 'PUT', body: { value } });
       byId('secretValue').value = '';
-      status(`Secret ${name} 已配置；实际影响数量：${result.affected_count || 0}。`);
+      setPasswordVisibility(byId('secretValue'), byId('secretValueToggle'), false);
+      status(result.oauth_applied_immediately
+        ? 'OAuth Authorize 密码已更新并立即生效；旧密码已失效。'
+        : `Secret ${name} 已配置；实际影响数量：${result.affected_count || 0}。`);
       await loadSecrets();
     } catch (error) { byId('secretValue').value = ''; status(error.message, 'danger'); }
   });
@@ -698,6 +1139,10 @@ function initAdminApp(documentRef = document) {
   byId('conversationPrev').addEventListener('click', () => { if (state.conversationPage > 1) { state.conversationPage -= 1; loadConversations().catch((error) => status(error.message, 'danger')); } });
   byId('conversationNext').addEventListener('click', () => { state.conversationPage += 1; loadConversations().catch((error) => status(error.message, 'danger')); });
 
+  resetGatewayServerForm();
+  wirePasswordVisibilityToggles(documentRef);
+  setAuthenticationUi(documentRef, false);
+
   return { state, api, refreshAll, loadSettings, loadWorkspaces, loadGateway, loadOAuth, loadSecrets, loadConversations, loadConversationDetail, showSection };
 }
 
@@ -705,6 +1150,7 @@ globalThis.McpAdminApp = {
   ApiError,
   sanitizeAdminValue,
   containsCredentialControl,
+  gatewayServerFromForm,
   gatewayServerTemplate,
   gatewayExposurePreview,
   createApiClient,
@@ -713,6 +1159,8 @@ globalThis.McpAdminApp = {
   renderOAuthItems,
   confirmDestructive,
   handleSettingsSave,
+  setPasswordVisibility,
+  setAuthenticationUi,
   initAdminApp,
 };
 
@@ -720,4 +1168,4 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => initAdminApp(document));
 }
 
-export { ApiError, sanitizeAdminValue, containsCredentialControl, gatewayServerTemplate, gatewayExposurePreview, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, initAdminApp };
+export { ApiError, sanitizeAdminValue, containsCredentialControl, gatewayServerFromForm, gatewayServerTemplate, gatewayExposurePreview, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, setPasswordVisibility, setAuthenticationUi, initAdminApp };

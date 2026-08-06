@@ -8,11 +8,17 @@ import os
 import re
 import tempfile
 import threading
+import urllib.parse
 from pathlib import Path
 from typing import Any, Callable
 
 from .codex_sessions import CodexSessionError, CodexSessionScanner, ScanPolicy
-from .oauth_store import OAuthAuthorizationStore
+from .oauth import (
+    OAUTH_PASSWORD_SECRET,
+    OAuthAuthorizationPassword,
+    oauth_client_authorization_password_secret_ref,
+)
+from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
 from .secret_vault import SecretVault, SecretVaultError
 from .settings_definition import (
     SECRET_REFERENCE_FIELDS,
@@ -202,17 +208,6 @@ def _validate_gateway_document(document: dict[str, Any], vault: SecretVault) -> 
                 raise AdminUnavailableError(
                     f"Gateway secret_ref {ref!r} cannot be resolved."
                 ) from exc
-        env = value.get("env")
-        if isinstance(env, dict):
-            for env_name, env_value in env.items():
-                if (
-                    isinstance(env_name, str)
-                    and SENSITIVE_KEY_RE.search(env_name)
-                    and isinstance(env_value, str)
-                ):
-                    raise AdminServiceError(
-                        f"Sensitive Gateway environment value {env_name!r} must use env_ref or secret_ref."
-                    )
         headers = value.get("headers")
         if isinstance(headers, dict):
             for header_name, header_value in headers.items():
@@ -252,6 +247,8 @@ class AdminService:
         active_gateway_revision: str,
         secret_vault: SecretVault,
         oauth_store: OAuthAuthorizationStore | None = None,
+        oauth_secret_vault: SecretVault | None = None,
+        oauth_password: OAuthAuthorizationPassword | None = None,
         active_gateway_status: Callable[[], dict[str, Any]] | None = None,
         transcript_store: TranscriptStore | None = None,
         session_scanner: CodexSessionScanner | None = None,
@@ -263,6 +260,8 @@ class AdminService:
         self.active_gateway_revision = active_gateway_revision
         self.secret_vault = secret_vault
         self.oauth_store = oauth_store
+        self.oauth_secret_vault = oauth_secret_vault
+        self.oauth_password = oauth_password
         self.active_gateway_status = active_gateway_status
         self.transcript_store = transcript_store
         self.session_scanner = session_scanner or CodexSessionScanner()
@@ -395,37 +394,131 @@ class AdminService:
             _atomic_write_json(self.gateway_path, normalized)
         return self.gateway_payload()
 
+    def save_gateway_server(self, alias: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Create or patch one persisted Gateway server without exposing hidden credentials."""
+        expected = body.get("expected_revision")
+        config = body.get("config")
+        if not isinstance(expected, str) or not expected:
+            raise AdminServiceError("expected_revision is required.")
+        if not isinstance(config, dict):
+            raise AdminServiceError("config must be an object.")
+        with self._gateway_lock:
+            current = _read_gateway_document(self.gateway_path)
+            if not _constant_equal(expected, document_revision(current)):
+                raise AdminConflictError(
+                    "Gateway configuration changed after this page was loaded; reload before saving."
+                )
+            servers = current.setdefault("servers", {})
+            existed = alias in servers
+            existing = servers.get(alias, {})
+            if not isinstance(existing, dict):
+                raise AdminServiceError(f"Gateway server {alias!r} is not an object.")
+            merged = {**existing, **_json_copy(config)}
+            if isinstance(existing.get("env"), dict) and isinstance(config.get("env"), dict):
+                merged["env"] = {**existing["env"], **_json_copy(config["env"])}
+            servers[alias] = merged
+            normalized = _validate_gateway_document(current, self.secret_vault)
+            _atomic_write_json(self.gateway_path, normalized)
+        payload = self.gateway_payload()
+        payload["server_alias"] = alias
+        payload["created"] = not existed
+        payload["affected_count"] = 1
+        return payload
+
+    def delete_gateway_server(self, alias: str, body: dict[str, Any]) -> dict[str, Any]:
+        expected = body.get("expected_revision")
+        if not isinstance(expected, str) or not expected:
+            raise AdminServiceError("expected_revision is required.")
+        with self._gateway_lock:
+            current = _read_gateway_document(self.gateway_path)
+            if not _constant_equal(expected, document_revision(current)):
+                raise AdminConflictError(
+                    "Gateway configuration changed after this page was loaded; reload before saving."
+                )
+            servers = current.setdefault("servers", {})
+            existed = alias in servers
+            if existed:
+                del servers[alias]
+                normalized = _validate_gateway_document(current, self.secret_vault)
+                _atomic_write_json(self.gateway_path, normalized)
+        payload = self.gateway_payload()
+        payload["server_alias"] = alias
+        payload["affected_count"] = 1 if existed else 0
+        return payload
+
     def secrets_payload(self) -> dict[str, Any]:
         if not self.secret_vault.enabled():
             raise AdminUnavailableError("Server Secret Vault is not enabled.")
         try:
             names = self.secret_vault.list_names()
+            oauth_password_configured = bool(
+                self.oauth_secret_vault is not None
+                and self.oauth_secret_vault.enabled()
+                and OAUTH_PASSWORD_SECRET in self.oauth_secret_vault.list_names()
+            )
         except SecretVaultError as exc:
             raise AdminUnavailableError(str(exc)) from exc
+        secrets_payload = [
+            {"name": name, "configured": True}
+            for name in names
+            if name != OAUTH_PASSWORD_SECRET
+        ]
+        if oauth_password_configured:
+            secrets_payload.append(
+                {
+                    "name": OAUTH_PASSWORD_SECRET,
+                    "configured": True,
+                    "usage": "oauth_authorization_password",
+                    "takes_effect": "immediate",
+                }
+            )
         return {
             "ok": True,
             "vault_enabled": self.secret_vault.enabled(),
-            "secrets": [{"name": name, "configured": True} for name in names],
+            "secrets": sorted(secrets_payload, key=lambda item: str(item["name"])),
         }
 
     def set_secret(self, name: str, body: dict[str, Any]) -> dict[str, Any]:
         value = body.get("value")
         if not isinstance(value, str) or not value:
             raise AdminServiceError("Secret value must be a non-empty string.")
+        oauth_password_secret = name == OAUTH_PASSWORD_SECRET
         try:
-            existed = name in self.secret_vault.list_names()
-            self.secret_vault.set_secret(name, value)
+            if oauth_password_secret:
+                if self.oauth_secret_vault is None or self.oauth_password is None:
+                    raise AdminUnavailableError(
+                        "OAuth authorization password management is not available."
+                    )
+                existed = OAUTH_PASSWORD_SECRET in self.oauth_secret_vault.list_names()
+                self.oauth_secret_vault.set_secret(OAUTH_PASSWORD_SECRET, value)
+                self.oauth_password.rotate(value)
+            else:
+                existed = name in self.secret_vault.list_names()
+                self.secret_vault.set_secret(name, value)
         except SecretVaultError as exc:
             raise AdminUnavailableError(str(exc)) from exc
-        return {
+        result = {
             "ok": True,
             "name": name,
             "configured": True,
             "created": not existed,
             "affected_count": 1,
         }
+        if oauth_password_secret:
+            result.update(
+                {
+                    "usage": "oauth_authorization_password",
+                    "takes_effect": "immediate",
+                    "oauth_applied_immediately": True,
+                }
+            )
+        return result
 
     def delete_secret(self, name: str) -> dict[str, Any]:
+        if name == OAUTH_PASSWORD_SECRET:
+            raise AdminServiceError(
+                "The active OAuth authorization password cannot be deleted; replace it instead."
+            )
         try:
             deleted = self.secret_vault.delete_secret(name)
         except SecretVaultError as exc:
@@ -454,7 +547,140 @@ class AdminService:
         else:
             raise AdminNotFoundError("Unknown OAuth collection.")
         redacted = [_redact_oauth_item(item) for item in items]
+        if collection == "clients":
+            for item in redacted:
+                identifier = str(item.get("client_id") or "")
+                workspace_ids = item.get("workspace_ids")
+                configured = bool(
+                    identifier
+                    and self.oauth_password is not None
+                    and self.oauth_password.has_client(identifier)
+                )
+                item["authorize_login"] = {
+                    "configured": configured,
+                    "mode": "client" if configured else "global",
+                }
+                normalized_workspace_ids = (
+                    [value for value in workspace_ids if isinstance(value, str) and value]
+                    if isinstance(workspace_ids, list)
+                    else []
+                )
+                item["workspace_access"] = {
+                    "configured": bool(normalized_workspace_ids),
+                    "workspace_ids": normalized_workspace_ids,
+                }
         return {"ok": True, "items": redacted, "count": len(redacted)}
+
+    def set_oauth_client_workspaces(
+        self,
+        client_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        workspace_ids = body.get("workspace_ids")
+        if (
+            not isinstance(workspace_ids, list)
+            or not 1 <= len(workspace_ids) <= 256
+            or any(not isinstance(value, str) or not value for value in workspace_ids)
+        ):
+            raise AdminServiceError(
+                "workspace_ids must contain between 1 and 256 non-empty strings."
+            )
+        if len(set(workspace_ids)) != len(workspace_ids):
+            raise AdminServiceError("workspace_ids must not contain duplicates.")
+        try:
+            catalog = WorkspaceCatalog.from_settings(
+                self.active_settings,
+                self.fallback_workspace,
+            )
+            for workspace_id in workspace_ids:
+                catalog.get(workspace_id)
+        except WorkspaceCatalogError as exc:
+            raise AdminServiceError(
+                "Workspace is unknown or disabled in the active server configuration."
+            ) from exc
+
+        store = self._require_oauth_store()
+        client = store.get_client(client_id)
+        if client is None:
+            raise AdminNotFoundError("OAuth client is not present.")
+        previous_workspace_ids = client.get("workspace_ids")
+        try:
+            applied = store.set_client_workspaces(client_id, workspace_ids)
+        except (OAuthStoreError, ValueError) as exc:
+            raise AdminServiceError(str(exc)) from exc
+        if not applied:
+            raise AdminNotFoundError("OAuth client is not present.")
+        updated = store.get_client(client_id)
+        normalized_workspace_ids = (
+            list(updated.get("workspace_ids", [])) if updated is not None else []
+        )
+        return {
+            "ok": True,
+            "client_id": client_id,
+            "workspace_access": {
+                "configured": True,
+                "workspace_ids": normalized_workspace_ids,
+            },
+            "affected_count": (
+                0
+                if previous_workspace_ids == normalized_workspace_ids
+                else 1
+            ),
+            "applied_immediately": True,
+        }
+
+    def set_oauth_client_password(
+        self,
+        client_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        value = body.get("value")
+        if not isinstance(value, str) or not value:
+            raise AdminServiceError("OAuth client password must be a non-empty string.")
+        store = self._require_oauth_store()
+        if store.get_client(client_id) is None:
+            raise AdminNotFoundError("OAuth client is not present.")
+        if self.oauth_secret_vault is None or self.oauth_password is None:
+            raise AdminUnavailableError(
+                "OAuth client password management is not available."
+            )
+        reference = oauth_client_authorization_password_secret_ref(client_id)
+        try:
+            existed = reference in self.oauth_secret_vault.list_names()
+            self.oauth_secret_vault.set_secret(reference, value)
+            self.oauth_password.rotate_client(client_id, value)
+        except SecretVaultError as exc:
+            raise AdminUnavailableError(str(exc)) from exc
+        return {
+            "ok": True,
+            "client_id": client_id,
+            "created": not existed,
+            "affected_count": 1,
+            "takes_effect": "immediate",
+            "authorize_login": {"configured": True, "mode": "client"},
+        }
+
+    def reset_oauth_client_password(self, client_id: str) -> dict[str, Any]:
+        store = self._require_oauth_store()
+        if store.get_client(client_id) is None:
+            raise AdminNotFoundError("OAuth client is not present.")
+        if self.oauth_secret_vault is None or self.oauth_password is None:
+            raise AdminUnavailableError(
+                "OAuth client password management is not available."
+            )
+        reference = oauth_client_authorization_password_secret_ref(client_id)
+        try:
+            deleted = self.oauth_secret_vault.delete_secret(reference)
+            removed = self.oauth_password.reset_client(client_id)
+        except SecretVaultError as exc:
+            raise AdminUnavailableError(str(exc)) from exc
+        return {
+            "ok": True,
+            "client_id": client_id,
+            "affected_count": 1 if deleted or removed else 0,
+            "takes_effect": "immediate",
+            "authorize_login": {"configured": False, "mode": "global"},
+        }
 
     def oauth_action(self, resource: str, identifier: str, action: str) -> dict[str, Any]:
         store = self._require_oauth_store()
@@ -775,7 +1001,7 @@ class AdminService:
         query: dict[str, str],
     ) -> dict[str, Any]:
         relative = path.removeprefix(ADMIN_API_PREFIX).strip("/")
-        parts = [part for part in relative.split("/") if part]
+        parts = [urllib.parse.unquote(part) for part in relative.split("/") if part]
         if method == "GET" and parts == ["status"]:
             return self.status_payload()
         if method == "GET" and parts == ["settings"]:
@@ -788,6 +1014,11 @@ class AdminService:
             return self.gateway_payload()
         if method == "PUT" and parts == ["gateway"]:
             return self.save_gateway(body)
+        if len(parts) == 3 and parts[:2] == ["gateway", "servers"]:
+            if method == "PUT":
+                return self.save_gateway_server(parts[2], body)
+            if method == "DELETE":
+                return self.delete_gateway_server(parts[2], body)
         if method == "GET" and parts == ["secrets"]:
             return self.secrets_payload()
         if len(parts) == 2 and parts[0] == "secrets" and method == "PUT":
@@ -807,6 +1038,16 @@ class AdminService:
             return self.workspace_check(parts[1])
         if len(parts) == 2 and parts[0] == "oauth" and method == "GET":
             return self.oauth_payload(parts[1], query)
+        if (
+            len(parts) == 4
+            and parts[:2] == ["oauth", "clients"]
+        ):
+            if parts[3] == "authorization-password" and method == "PUT":
+                return self.set_oauth_client_password(parts[2], body)
+            if parts[3] == "authorization-password" and method == "DELETE":
+                return self.reset_oauth_client_password(parts[2])
+            if parts[3] == "workspaces" and method == "PUT":
+                return self.set_oauth_client_workspaces(parts[2], body)
         if len(parts) == 4 and parts[0] == "oauth" and method == "POST":
             return self.oauth_action(parts[1], parts[2], parts[3])
         if method == "GET" and parts == ["chat", "conversations"]:

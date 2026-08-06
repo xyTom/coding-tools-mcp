@@ -5,9 +5,10 @@ import inspect
 import io
 import json
 import os
+import sqlite3
 import sys
 import unittest
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -77,6 +78,80 @@ class ChatPersistenceTests(unittest.TestCase):
             reopened.conversation_detail("a", "reopen")["messages"][0]["content"],
             "persisted",
         )
+
+    def test_legacy_v4_tables_are_preserved_before_current_schema_is_created(self) -> None:
+        legacy_path = self.root / "legacy-transcripts.sqlite3"
+        with closing(sqlite3.connect(legacy_path)) as connection, connection:
+            connection.executescript(
+                """
+                CREATE TABLE sessions(
+                    session_id TEXT PRIMARY KEY,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    request_count INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE events(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE TABLE chat_conversations(
+                    conversation_id TEXT PRIMARY KEY,
+                    title TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE chat_messages(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    message_id TEXT,
+                    role TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    content TEXT NOT NULL
+                );
+                CREATE TABLE chat_context_entries(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    entry_id TEXT,
+                    kind TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    content TEXT NOT NULL
+                );
+                INSERT INTO sessions(session_id, first_seen, last_seen, request_count)
+                VALUES('legacy-session', '2026-01-01', '2026-01-02', 3);
+                INSERT INTO events(session_id, timestamp, event_type, payload_json)
+                VALUES('legacy-session', '2026-01-02', 'tool', '{}');
+                PRAGMA user_version=4;
+                """
+            )
+
+        migrated = TranscriptStore(legacy_path)
+        migrated.record_messages(
+            "a",
+            "current-conversation",
+            [{"message_id": "current-message", "role": "user", "content": "current"}],
+        )
+
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            table_names = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertIn("legacy_transcript_chat_conversations", table_names)
+            self.assertIn("legacy_transcript_chat_messages", table_names)
+            self.assertIn("legacy_transcript_chat_context_entries", table_names)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 1)
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(chat_conversations)")
+            }
+            self.assertIn("workspace_id", columns)
 
     def test_summary_pagination_omits_full_content_until_detail(self) -> None:
         for index in range(5):

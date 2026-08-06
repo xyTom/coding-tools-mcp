@@ -20,7 +20,9 @@ from pathlib import Path
 from typing import Iterator
 from unittest.mock import patch
 
+from coding_tools_mcp.admin import AdminService, document_revision
 from coding_tools_mcp.oauth import (
+    OAUTH_PASSWORD_SECRET,
     PersistentOAuthClientRegistry,
     authenticate_access_token,
     create_access_token,
@@ -29,12 +31,15 @@ from coding_tools_mcp.oauth import (
     validate_access_token,
 )
 from coding_tools_mcp.oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from coding_tools_mcp.secret_vault import SecretVault
 from coding_tools_mcp.server import (
     MCPHandler,
     Runtime,
     RuntimeHTTPServer,
     build_persistent_oauth_config,
 )
+from coding_tools_mcp.settings_store import ServerSettingsStore
+from coding_tools_mcp.workspace_catalog import WorkspaceCatalog
 
 
 PEPPER = b"phase-05-registry-pepper" * 2
@@ -289,6 +294,320 @@ class BearerFailClosedTests(unittest.TestCase):
 
 
 class PersistentOAuthCompositionTests(unittest.TestCase):
+    def test_authorize_selects_one_workspace_from_live_client_allowlist(self) -> None:
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+                return None
+
+        with oauth_root() as root:
+            config, _created = build_persistent_oauth_config(
+                root,
+                master_key="workspace-selection-master-key",
+                password="workspace-selection-password",
+                server_url=None,
+                token_ttl=86_400,
+                registration_workspace_id=None,
+            )
+            config.registry.add_preregistered(
+                "multi-workspace-agent",
+                ("http://127.0.0.1/callback",),
+                client_secret=None,
+                workspace_id="workspace-a",
+            )
+            assert config.store is not None
+            config.store.set_client_workspaces(
+                "multi-workspace-agent",
+                ["workspace-a", "workspace-b"],
+            )
+            runtime = Runtime(root, oauth_config=config, transport="http")
+            server = RuntimeHTTPServer(
+                ("127.0.0.1", 0),
+                MCPHandler,
+                runtime,
+                lambda: Runtime(root, oauth_config=config, transport="http"),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            opener = urllib.request.build_opener(NoRedirect)
+
+            def authorize(workspace_id: str = "") -> tuple[int, str]:
+                body = urllib.parse.urlencode(
+                    {
+                        "client_id": "multi-workspace-agent",
+                        "redirect_uri": "http://127.0.0.1/callback",
+                        "code_challenge": "A" * 43,
+                        "code_challenge_method": "S256",
+                        "state": "state-workspace-selection",
+                        "resource": base,
+                        "workspace_id": workspace_id,
+                        "password": "workspace-selection-password",
+                    }
+                ).encode("ascii")
+                request = urllib.request.Request(
+                    f"{base}/oauth/authorize",
+                    data=body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                )
+                try:
+                    with opener.open(request, timeout=5) as response:
+                        return response.status, response.read().decode("utf-8")
+                except urllib.error.HTTPError as exc:
+                    return exc.code, exc.read().decode("utf-8")
+
+            try:
+                query = urllib.parse.urlencode(
+                    {
+                        "response_type": "code",
+                        "client_id": "multi-workspace-agent",
+                        "redirect_uri": "http://127.0.0.1/callback",
+                        "code_challenge": "A" * 43,
+                        "code_challenge_method": "S256",
+                        "state": "state-workspace-selection",
+                        "resource": base,
+                    }
+                )
+                with urllib.request.urlopen(
+                    f"{base}/oauth/authorize?{query}", timeout=5
+                ) as response:
+                    login_page = response.read().decode("utf-8")
+                self.assertIn("name='workspace_id'", login_page)
+                self.assertIn("workspace-a", login_page)
+                self.assertIn("workspace-b", login_page)
+
+                missing_status, missing_page = authorize()
+                self.assertEqual(missing_status, 400)
+                self.assertIn("Select a Workspace", missing_page)
+                self.assertEqual(authorize("workspace-b")[0], 302)
+                first_grant = config.store.list_grants("multi-workspace-agent")[0]
+                self.assertEqual(first_grant["workspace_id"], "workspace-b")
+
+                config.store.set_client_workspaces(
+                    "multi-workspace-agent", ["workspace-a"]
+                )
+                self.assertEqual(authorize("workspace-b")[0], 400)
+                self.assertEqual(authorize("workspace-a")[0], 302)
+                grants = config.store.list_grants("multi-workspace-agent")
+                self.assertEqual(grants[0]["workspace_id"], "workspace-a")
+                self.assertEqual(grants[1]["workspace_id"], "workspace-b")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+    def test_secret_vault_http_update_rotates_live_authorize_password(self) -> None:
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+                return None
+
+        with oauth_root() as root:
+            config, _created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password="initial-authorize-password",
+                server_url=None,
+                token_ttl=86_400,
+                client_id="live-rotation-agent",
+                redirect_uris=("http://127.0.0.1/callback",),
+            )
+            config.registry.add_preregistered(
+                "global-fallback-agent",
+                ("http://127.0.0.1/callback",),
+                client_secret=None,
+            )
+            assert config.store is not None
+            config.store.upsert_client(
+                "workspace-binding-agent",
+                redirect_uri="http://127.0.0.1/callback",
+                scopes="mcp",
+                workspace_id=None,
+            )
+            settings = ServerSettingsStore(root / "server-settings.json")
+            settings.write({"workspace": str(root)})
+            active_workspace_id = WorkspaceCatalog.from_settings(
+                {"workspace": str(root)}, root
+            ).default_id
+            server_vault = SecretVault(root / "server-secrets.json", "synthetic-master-key")
+            assert config.authorization_password is not None
+            service = AdminService(
+                settings_store=settings,
+                active_settings={"workspace": str(root)},
+                fallback_workspace=root,
+                gateway_path=root / "mcp-servers.json",
+                active_gateway_revision=document_revision({"servers": {}}),
+                secret_vault=server_vault,
+                oauth_store=config.store,
+                oauth_secret_vault=config.secret_vault,
+                oauth_password=config.authorization_password,
+            )
+            runtime = Runtime(root, oauth_config=config, transport="http")
+            server = RuntimeHTTPServer(
+                ("127.0.0.1", 0),
+                MCPHandler,
+                runtime,
+                lambda: Runtime(root, oauth_config=config, transport="http"),
+                admin_service=service,
+                admin_token="dedicated-admin-token",
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            opener = urllib.request.build_opener(NoRedirect)
+
+            def authorize(
+                password: str,
+                client_id: str = "live-rotation-agent",
+            ) -> int:
+                body = urllib.parse.urlencode(
+                    {
+                        "client_id": client_id,
+                        "redirect_uri": "http://127.0.0.1/callback",
+                        "code_challenge": "A" * 43,
+                        "code_challenge_method": "S256",
+                        "state": "state-live-rotation",
+                        "resource": base,
+                        "password": password,
+                    }
+                ).encode("ascii")
+                request = urllib.request.Request(
+                    f"{base}/oauth/authorize",
+                    data=body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                )
+                try:
+                    opener.open(request, timeout=5)
+                except urllib.error.HTTPError as exc:
+                    return exc.code
+                raise AssertionError("OAuth authorize unexpectedly returned without redirect or error.")
+
+            try:
+                self.assertEqual(
+                    authorize(
+                        "initial-authorize-password",
+                        "workspace-binding-agent",
+                    ),
+                    409,
+                )
+                workspace_client_id = urllib.parse.quote(
+                    "workspace-binding-agent", safe=""
+                )
+                workspace_request = urllib.request.Request(
+                    f"{base}/admin/api/oauth/clients/{workspace_client_id}/workspaces",
+                    data=json.dumps({"workspace_ids": [active_workspace_id]}).encode(
+                        "utf-8"
+                    ),
+                    headers={
+                        "Authorization": "Bearer dedicated-admin-token",
+                        "Content-Type": "application/json",
+                    },
+                    method="PUT",
+                )
+                with urllib.request.urlopen(workspace_request, timeout=5) as response:
+                    workspace_binding = json.loads(response.read())
+                self.assertTrue(workspace_binding["applied_immediately"])
+                self.assertEqual(
+                    authorize(
+                        "initial-authorize-password",
+                        "workspace-binding-agent",
+                    ),
+                    302,
+                )
+
+                self.assertEqual(authorize("initial-authorize-password"), 302)
+                secret_name = urllib.parse.quote(OAUTH_PASSWORD_SECRET, safe="")
+                rotate_request = urllib.request.Request(
+                    f"{base}/admin/api/secrets/{secret_name}",
+                    data=json.dumps({"value": "rotated-authorize-password"}).encode("utf-8"),
+                    headers={
+                        "Authorization": "Bearer dedicated-admin-token",
+                        "Content-Type": "application/json",
+                    },
+                    method="PUT",
+                )
+                with urllib.request.urlopen(rotate_request, timeout=5) as response:
+                    rotated = json.loads(response.read())
+                self.assertTrue(rotated["oauth_applied_immediately"])
+                self.assertEqual(authorize("initial-authorize-password"), 401)
+                self.assertEqual(authorize("rotated-authorize-password"), 302)
+
+                client_id = urllib.parse.quote("live-rotation-agent", safe="")
+                client_password_request = urllib.request.Request(
+                    f"{base}/admin/api/oauth/clients/{client_id}/authorization-password",
+                    data=json.dumps({"value": "client-only-authorize-password"}).encode(
+                        "utf-8"
+                    ),
+                    headers={
+                        "Authorization": "Bearer dedicated-admin-token",
+                        "Content-Type": "application/json",
+                    },
+                    method="PUT",
+                )
+                with urllib.request.urlopen(client_password_request, timeout=5) as response:
+                    client_password = json.loads(response.read())
+                self.assertEqual(
+                    client_password["authorize_login"],
+                    {"configured": True, "mode": "client"},
+                )
+                self.assertEqual(authorize("rotated-authorize-password"), 401)
+                self.assertEqual(authorize("client-only-authorize-password"), 302)
+                self.assertEqual(
+                    authorize(
+                        "rotated-authorize-password",
+                        "global-fallback-agent",
+                    ),
+                    302,
+                )
+
+                reopened_with_override, _ = build_persistent_oauth_config(
+                    root,
+                    master_key="synthetic-master-key",
+                    password="rotated-authorize-password",
+                    server_url=None,
+                    token_ttl=86_400,
+                    client_id="live-rotation-agent",
+                    redirect_uris=("http://127.0.0.1/callback",),
+                )
+                self.assertEqual(
+                    reopened_with_override.current_authorization_password(
+                        "live-rotation-agent"
+                    ),
+                    "client-only-authorize-password",
+                )
+
+                reset_request = urllib.request.Request(
+                    f"{base}/admin/api/oauth/clients/{client_id}/authorization-password",
+                    headers={"Authorization": "Bearer dedicated-admin-token"},
+                    method="DELETE",
+                )
+                with urllib.request.urlopen(reset_request, timeout=5) as response:
+                    reset = json.loads(response.read())
+                self.assertEqual(
+                    reset["authorize_login"],
+                    {"configured": False, "mode": "global"},
+                )
+                self.assertEqual(authorize("rotated-authorize-password"), 302)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            reopened, password_created = build_persistent_oauth_config(
+                root,
+                master_key="synthetic-master-key",
+                password=None,
+                server_url=None,
+                token_ttl=86_400,
+                client_id="live-rotation-agent",
+                redirect_uris=("http://127.0.0.1/callback",),
+            )
+            self.assertFalse(password_created)
+            self.assertEqual(
+                reopened.current_authorization_password(),
+                "rotated-authorize-password",
+            )
+
     def test_dcr_client_persists_across_runtime_rebuild_with_supported_grants(self) -> None:
         with oauth_root() as root:
             config, created = build_persistent_oauth_config(

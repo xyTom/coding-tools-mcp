@@ -100,13 +100,14 @@ Client/Grant state, and signing-key ring remain intact.
 
 ### Workspace mapping
 
-- If exactly one Workspace is enabled, old unbound Clients are assigned to that
-  sole default.
+- If exactly one Workspace is enabled, old Clients with an empty allowlist are
+  allowed to authorize that sole default.
 - If multiple Workspaces are enabled, configure
   `oauth_client_workspace_bindings` or
-  `CODING_TOOLS_MCP_OAUTH_WORKSPACE_ID` for a pre-registered Client.
-- A Grant copies the Client Workspace at authorization time; changing the Client
-  mapping does not rewrite existing Grants.
+  `CODING_TOOLS_MCP_OAUTH_WORKSPACE_ID` as a single-Workspace startup default,
+  or use the Admin WebUI/API to allow several Workspaces for a Client.
+- A Grant copies the Workspace selected at authorization time. Replacing the
+  Client allowlist does not rewrite existing Grants or Tokens.
 - Missing or disabled mappings reject Grant/Session creation.
 
 ### Refresh and signing keys
@@ -139,9 +140,10 @@ and a valid master key.
 
 ## Admin WebUI and token separation
 
-The Admin WebUI at `/admin` requires a dedicated Admin token. An MCP static
-bearer or OAuth access token is never promoted to Admin. The browser token is
-kept in page memory and sent only in the request header.
+The Admin WebUI login shell at `/admin` is public so the browser can accept a
+dedicated Admin token. Every `/admin/api` request requires that token; an MCP
+static bearer or OAuth access token is never promoted to Admin. The browser
+token is kept in page memory and sent only in the request header.
 
 Settings/Gateway writes use an expected revision. A stale `409` must be resolved
 explicitly; the WebUI preserves the draft and refreshes the persisted revision.

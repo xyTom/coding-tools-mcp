@@ -30,3 +30,65 @@ At the start of a dirty-worktree review, record SHA-256 hashes for every relevan
 - Last-Seen: 2026-08-02
 
 ---
+
+## [LRN-20260806-001] best_practice
+
+**Logged**: 2026-08-06T12:00:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+
+Merging divergent persistence implementations requires startup tests against real legacy schema and encrypted-record fixtures.
+
+### Details
+
+The merged branch passed fresh-database tests but rejected valid state written by the pre-merge branch. Legacy OAuth records omitted the newer `cipher` metadata, used truncated signing-key fingerprints, and referenced `oauth-signing/...`; the transcript database used schema version 4 with table names that collided with the replacement workspace-partitioned schema.
+
+### Suggested Action
+
+Before merging persistence rewrites, capture sanitized legacy fixtures and require restart/migration tests. Keep schema versions monotonic across both histories, preserve conflicting legacy tables before creating replacements, and migrate cryptographic metadata only after verifying the legacy record with its original integrity checks.
+
+### Metadata
+
+- Source: error
+- Related Files: coding_tools_mcp/oauth.py, coding_tools_mcp/secret_vault.py, coding_tools_mcp/transcript.py
+- Tags: migration, sqlite, oauth, secret-vault, merge
+- Pattern-Key: persistence.test_legacy_state_before_merge
+- Recurrence-Count: 1
+- First-Seen: 2026-08-06
+- Last-Seen: 2026-08-06
+
+---
+
+## [LRN-20260806-002] best_practice
+
+**Logged**: 2026-08-06T12:30:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: frontend
+
+### Summary
+
+MutationObserver callbacks must make idempotent DOM writes to avoid browser main-thread starvation.
+
+### Details
+
+The Admin WebUI observer watched `title` and `aria-label`, then unconditionally rewrote those attributes and a language-toggle text node at the end of every callback. Each callback queued another callback indefinitely, so the HTTP response completed while navigation and browser control timed out.
+
+### Suggested Action
+
+Before writing observed text or attributes, compare the current and desired values. Add a bounded fake-observer regression that proves the mutation queue settles after initialization.
+
+### Metadata
+
+- Source: error
+- Related Files: webui/src/i18n.js, webui/tests/i18n.test.mjs
+- Tags: mutation-observer, browser-freeze, idempotence, webui
+- Pattern-Key: frontend.mutation_observer_idempotent_writes
+- Recurrence-Count: 1
+- First-Seen: 2026-08-06
+- Last-Seen: 2026-08-06
+
+---

@@ -78,10 +78,10 @@ creating a Grant. See [Remote MCP](remote-mcp.md).
 
 ## Dedicated Admin access
 
-The Admin WebUI at `/admin` and API at `/admin/api` require a separate Admin
-token. Do not place that token in an MCP client configuration, URL, or persistent
-browser storage. Ordinary MCP bearer and OAuth credentials receive `401` from
-Admin endpoints.
+The Admin WebUI login shell at `/admin` is public, while every API request under
+`/admin/api` requires a separate Admin token. Do not place that token in an MCP
+client configuration, URL, or persistent browser storage. Ordinary MCP bearer
+and OAuth credentials receive `401` from Admin API endpoints.
 
 ## Upstream Gateway tools
 

@@ -2,7 +2,7 @@
 
 ``webui/src/**`` is the only editable frontend source. The packaged HTML is
 created by ``npm --prefix webui run build`` and is intentionally self-contained
-so the authenticated ``/admin`` route does not need a second static-file router.
+so the public ``/admin`` login shell does not need a second static-file router.
 """
 
 from __future__ import annotations

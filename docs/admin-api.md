@@ -26,8 +26,10 @@ All responses use `Cache-Control: no-store`, apply the same validated allowed-or
 | PUT | `/admin/api/settings` | Save settings with `expected_revision`. |
 | GET | `/admin/api/gateway` | Active status plus redacted persisted Gateway config. |
 | PUT | `/admin/api/gateway` | Persist Gateway config with `expected_revision`; restart only. |
+| PUT | `/admin/api/gateway/servers/{alias}` | Create or patch one server with `expected_revision`; hidden credential fields are preserved. |
+| DELETE | `/admin/api/gateway/servers/{alias}` | Remove one persisted server with `expected_revision`; current Runtime is unchanged. |
 | GET | `/admin/api/secrets` | List configured Secret Vault names without values. |
-| PUT | `/admin/api/secrets/{name}` | Set one Vault value; the value is never returned. |
+| PUT | `/admin/api/secrets/{name}` | Set one Vault value; the value is never returned. The reserved name `oauth/authorization-password` rotates the running OAuth authorization-page password immediately. |
 | DELETE | `/admin/api/secrets/{name}` | Delete one Vault value idempotently. |
 | GET | `/admin/api/workspaces` | List the persisted validated Workspace Catalog. |
 | POST | `/admin/api/workspaces` | Add a Workspace with `expected_revision`. |
@@ -36,6 +38,9 @@ All responses use `Cache-Control: no-store`, apply the same validated allowed-or
 | GET | `/admin/api/workspaces/{id}/check` | Check only a catalog Workspace ID; arbitrary paths are not accepted. |
 | GET | `/admin/api/oauth/{collection}` | List redacted Clients, Grants, Tokens, Refresh Families, Signing Keys, or Audit Events. |
 | POST | `/admin/api/oauth/{resource}/{id}/{action}` | Perform an exact-ID idempotent OAuth action. |
+| PUT | `/admin/api/oauth/clients/{client_id}/authorization-password` | Set or rotate one Client's dedicated Authorize password; takes effect immediately. |
+| DELETE | `/admin/api/oauth/clients/{client_id}/authorization-password` | Remove the Client override and immediately fall back to the global Authorize password. |
+| PUT | `/admin/api/oauth/clients/{client_id}/workspaces` | Replace an active Client's Workspace allowlist using `workspace_ids`; subsequent OAuth authorizations use it immediately. |
 | GET | `/admin/api/chat/conversations` | Paginated conversation summaries; optional registered `workspace_id`. |
 | GET | `/admin/api/chat/conversations/{workspace_id}/{conversation_id}` | Explicit paginated message/context detail. |
 | POST | `/admin/api/chat/conversations/{workspace_id}/{conversation_id}/messages` | Record messages in one registered Workspace. |
@@ -91,9 +96,41 @@ Settings responses distinguish:
 
 Gateway writes only update `mcp-servers.json`; they never start, stop, or reload an upstream server. Existing Runtime and Session tool snapshots remain unchanged and `restart_required` becomes true.
 
+The per-server routes back the normal WebUI form and management cards. `enabled`
+means “load for a newly constructed Runtime / after service restart,” not an
+immediate lifecycle action. `expose_mode=broker` keeps filtered tools in the
+Broker catalog and directly exposes only pinned tools; `direct` directly exposes
+the complete filtered set.
+
 ## Secret boundary
 
 Responses never include client-secret digests, bearer or refresh token plaintext, signing-key secret references, Vault values, or upstream credentials. Gateway `secret_ref` entries are accepted only when the server Secret Vault is enabled and the reference resolves. Startup and Admin validation fail closed otherwise.
+
+`oauth/authorization-password` is a reserved Secret Vault name. A successful
+`PUT` persists the replacement in the encrypted OAuth Vault and swaps the
+thread-safe password used by the running `/oauth/authorize` handler before the
+response returns. The old password therefore stops working immediately; access
+tokens, refresh tokens, Grants, and signing keys are unchanged. This active
+secret cannot be deleted through the Admin API and must be replaced instead.
+Names containing `/` are sent as URL-encoded path segments.
+
+OAuth Client records expose only an `authorize_login` status object with
+`mode=client|global` and a boolean `configured`; no password or Vault reference
+is returned. A Client-specific password is encrypted under a deterministic,
+non-reversible Vault reference derived from the exact `client_id`. The
+authorization handler checks the dedicated Client password first and falls back
+to `oauth/authorization-password` when no override is configured. Rotating or
+resetting an override is immediate and does not revoke Grants, access tokens,
+refresh tokens, or signing keys.
+
+OAuth Client records also expose a redacted `workspace_access` status containing
+only allowed Workspace IDs. In a multi-Workspace server, dynamic registration
+remains fail-closed and may create a Client with an empty allowlist. A correct
+Authorize password for such a Client returns an actionable `409`. An Admin can
+`PUT` `{"workspace_ids":["a","b"]}` to replace the allowlist without a restart.
+When more than one Workspace is allowed, the Authorize page requires one choice
+for that Grant. Later authorizations by the same Client may choose another
+allowed Workspace. Existing Grants and Tokens retain their stored Workspace.
 
 ## Chat and session persistence
 
