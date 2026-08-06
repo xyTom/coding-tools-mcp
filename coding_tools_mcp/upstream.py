@@ -37,6 +37,12 @@ from .upstream_search import (
 
 DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 DEFAULT_TIMEOUT_MS = 30_000
+DEFAULT_CREDENTIAL_POLICY = "local"
+CREDENTIAL_POLICIES = frozenset({"local", "strict"})
+SENSITIVE_ENV_NAME_RE = re.compile(
+    r"PASSWORD|PASSWD|TOKEN|SECRET|KEY|CREDENTIAL|AUTH",
+    re.I,
+)
 MAX_RESPONSE_BYTES = 1_048_576
 MAX_UPSTREAM_RESULT_DEPTH = 64
 MAX_TOOL_NAME_CHARS = 512
@@ -507,6 +513,7 @@ class UpstreamConfigSnapshot:
 
     configs: tuple[UpstreamServerConfig, ...] = ()
     custom_synonyms: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    credential_policy: str = DEFAULT_CREDENTIAL_POLICY
     source: str | None = None
 
     @classmethod
@@ -1554,19 +1561,27 @@ def load_upstream_config_snapshot(path: str | Path) -> UpstreamConfigSnapshot:
     if "servers" in raw:
         servers = raw.get("servers")
         custom_synonyms = parse_tool_search_config(raw.get("tool_search"))
+        credential_policy = parse_credential_policy(raw.get("credential_policy"))
     else:
         if "tool_search" in raw:
             raise UpstreamConfigError(
                 "Upstream config with tool_search must contain a servers object."
             )
+        if "credential_policy" in raw:
+            raise UpstreamConfigError(
+                "Upstream config with credential_policy must contain a servers object."
+            )
         servers = raw
         custom_synonyms = {}
+        credential_policy = DEFAULT_CREDENTIAL_POLICY
     if not isinstance(servers, dict):
         raise UpstreamConfigError("Upstream config must contain a servers object.")
     configs = tuple(parse_server_config(alias, value) for alias, value in servers.items())
+    validate_credential_policy(credential_policy, configs)
     return UpstreamConfigSnapshot(
         configs=configs,
         custom_synonyms=custom_synonyms,
+        credential_policy=credential_policy,
         source=str(config_path.resolve(strict=False)),
     )
 
@@ -1681,6 +1696,36 @@ def parse_server_config(alias: str, value: Any) -> UpstreamServerConfig:
         tool_policy=tool_policy,
         timeout_ms=timeout_ms,
     )
+
+
+def parse_credential_policy(value: Any) -> str:
+    if value is None:
+        return DEFAULT_CREDENTIAL_POLICY
+    if not isinstance(value, str) or value not in CREDENTIAL_POLICIES:
+        raise UpstreamConfigError(
+            "credential_policy must be local or strict."
+        )
+    return value
+
+
+def is_sensitive_env_name(name: str) -> bool:
+    return bool(SENSITIVE_ENV_NAME_RE.search(str(name)))
+
+
+def validate_credential_policy(
+    policy: str,
+    configs: Iterable[UpstreamServerConfig],
+) -> None:
+    normalized = parse_credential_policy(policy)
+    if normalized != "strict":
+        return
+    for config in configs:
+        for name, value in config.env.items():
+            if is_sensitive_env_name(name) and isinstance(value, str):
+                raise UpstreamConfigError(
+                    f"Upstream {config.alias!r} sensitive environment field {name!r} "
+                    "must use env_ref or secret_ref when credential_policy is strict."
+                )
 
 
 def parse_tool_search_config(value: Any) -> dict[str, tuple[str, ...]]:

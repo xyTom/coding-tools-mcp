@@ -8,7 +8,9 @@ import os
 import re
 import tempfile
 import threading
+import time
 import urllib.parse
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,8 +34,11 @@ from .telemetry import telemetry_mode
 from .transcript import TranscriptStore, TranscriptStoreError, WorkspaceScope
 from .upstream import (
     UpstreamConfigError,
+    is_sensitive_env_name,
     parse_server_config,
     parse_tool_search_config,
+    parse_credential_policy,
+    validate_credential_policy,
 )
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 
@@ -87,14 +92,25 @@ def _redact(value: Any, *, key: str = "") -> Any:
         return {"configured": bool(value)}
     if isinstance(value, dict):
         if "secret_ref" in value:
-            return {"source": "secret_ref", "configured": bool(value.get("secret_ref"))}
+            return {
+                "source": "secret_vault",
+                "configured": bool(value.get("secret_ref")),
+            }
         if "env_ref" in value:
-            return {"source": "env_ref", "configured": bool(value.get("env_ref"))}
+            ref = value.get("env_ref")
+            return {
+                "source": "system_environment",
+                "configured": bool(ref),
+                "available": bool(isinstance(ref, str) and os.environ.get(ref)),
+            }
         return {str(child): _redact(item, key=str(child)) for child, item in value.items()}
     if isinstance(value, list):
         return [_redact(item, key=key) for item in value]
     if SENSITIVE_KEY_RE.search(key):
-        return "<redacted>" if value not in (None, "") else value
+        return {
+            "source": "local_config",
+            "configured": value not in (None, ""),
+        }
     return value
 
 
@@ -138,7 +154,7 @@ def _atomic_write_json(path: Path, document: dict[str, Any]) -> None:
 
 def _read_gateway_document(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"servers": {}}
+        return {"servers": {}, "credential_policy": "local"}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
@@ -151,20 +167,64 @@ def _read_gateway_document(path: Path) -> dict[str, Any]:
         servers = raw.get("servers")
         if not isinstance(servers, dict):
             raise AdminServiceError("Gateway configuration must contain a servers object.")
-        result: dict[str, Any] = {"servers": _json_copy(servers)}
+        result: dict[str, Any] = {
+            "servers": _json_copy(servers),
+            "credential_policy": parse_credential_policy(raw.get("credential_policy")),
+        }
         if "tool_search" in raw:
             tool_search = raw.get("tool_search")
             if not isinstance(tool_search, dict):
                 raise AdminServiceError("tool_search must be an object.")
             result["tool_search"] = _json_copy(tool_search)
         return result
-    return {"servers": _json_copy(raw)}
+    return {"servers": _json_copy(raw), "credential_policy": "local"}
 
 
 
 
 def gateway_file_revision(path: str | Path) -> str:
     return document_revision(_read_gateway_document(Path(path).expanduser()))
+
+
+def _gateway_credential_sources(
+    document: dict[str, Any], vault: SecretVault
+) -> dict[str, dict[str, dict[str, Any]]]:
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    servers = document.get("servers")
+    if not isinstance(servers, dict):
+        return result
+    for alias, server in servers.items():
+        if not isinstance(alias, str) or not isinstance(server, dict):
+            continue
+        env = server.get("env")
+        if not isinstance(env, dict):
+            continue
+        items: dict[str, dict[str, Any]] = {}
+        for name, value in env.items():
+            if not isinstance(name, str):
+                continue
+            source = "local_config"
+            status = "configured"
+            if isinstance(value, dict) and isinstance(value.get("secret_ref"), str):
+                source = "secret_vault"
+                try:
+                    vault.get_secret(value["secret_ref"])
+                except SecretVaultError:
+                    status = "unavailable"
+            elif isinstance(value, dict) and isinstance(value.get("env_ref"), str):
+                source = "system_environment"
+                if value["env_ref"] not in os.environ:
+                    status = "missing"
+            elif not isinstance(value, str) or not value:
+                status = "invalid"
+            items[name] = {
+                "source": source,
+                "status": status,
+                "sensitive": is_sensitive_env_name(name),
+            }
+        if items:
+            result[alias] = items
+    return result
 
 def _secret_refs(value: Any) -> list[str]:
     refs: list[str] = []
@@ -186,14 +246,16 @@ def _validate_gateway_document(document: dict[str, Any], vault: SecretVault) -> 
         raise AdminServiceError("Gateway configuration must contain a servers object.")
     try:
         custom_synonyms = parse_tool_search_config(document.get("tool_search"))
+        credential_policy = parse_credential_policy(document.get("credential_policy"))
     except UpstreamConfigError as exc:
         raise AdminServiceError(str(exc)) from exc
     normalized: dict[str, Any] = {}
+    parsed_configs = []
     for alias, value in servers.items():
         if not isinstance(alias, str) or not isinstance(value, dict):
             raise AdminServiceError("Gateway server entries must use string aliases and object values.")
         try:
-            parse_server_config(alias, value)
+            parsed_configs.append(parse_server_config(alias, value))
         except UpstreamConfigError as exc:
             raise AdminServiceError(str(exc)) from exc
         refs = _secret_refs(value)
@@ -224,7 +286,11 @@ def _validate_gateway_document(document: dict[str, Any], vault: SecretVault) -> 
                         "Sensitive Gateway headers cannot be persisted as plaintext."
                     )
         normalized[alias] = _json_copy(value)
-    result: dict[str, Any] = {"servers": normalized}
+    validate_credential_policy(credential_policy, parsed_configs)
+    result: dict[str, Any] = {
+        "servers": normalized,
+        "credential_policy": credential_policy,
+    }
     if "tool_search" in document:
         result["tool_search"] = {
             "custom_synonyms": {
@@ -267,6 +333,10 @@ class AdminService:
         self.session_scanner = session_scanner or CodexSessionScanner()
         self._settings_lock = threading.Lock()
         self._gateway_lock = threading.Lock()
+        self._credential_audit_lock = threading.Lock()
+        self.credential_audit_path = self.gateway_path.with_name(
+            f"{self.gateway_path.stem}-credential-audit.jsonl"
+        )
 
     def status_payload(self) -> dict[str, Any]:
         mode = telemetry_mode()
@@ -366,6 +436,8 @@ class AdminService:
         return {
             "ok": True,
             "persisted": _redact(document),
+            "credential_policy": document.get("credential_policy", "local"),
+            "credential_sources": _gateway_credential_sources(document, self.secret_vault),
             "persisted_revision": revision,
             "active_revision": self.active_gateway_revision,
             "pending_restart": revision != self.active_gateway_revision,
@@ -391,6 +463,26 @@ class AdminService:
                     "Gateway configuration changed after this page was loaded; reload before saving."
                 )
             normalized = _validate_gateway_document(document, self.secret_vault)
+            _atomic_write_json(self.gateway_path, normalized)
+        return self.gateway_payload()
+
+    def save_gateway_credential_policy(self, body: dict[str, Any]) -> dict[str, Any]:
+        expected = body.get("expected_revision")
+        policy = body.get("credential_policy")
+        if not isinstance(expected, str) or not expected:
+            raise AdminServiceError("expected_revision is required.")
+        try:
+            normalized_policy = parse_credential_policy(policy)
+        except UpstreamConfigError as exc:
+            raise AdminServiceError(str(exc)) from exc
+        with self._gateway_lock:
+            current = _read_gateway_document(self.gateway_path)
+            if not _constant_equal(expected, document_revision(current)):
+                raise AdminConflictError(
+                    "Gateway configuration changed after this page was loaded; reload before saving."
+                )
+            current["credential_policy"] = normalized_policy
+            normalized = _validate_gateway_document(current, self.secret_vault)
             _atomic_write_json(self.gateway_path, normalized)
         return self.gateway_payload()
 
@@ -445,6 +537,171 @@ class AdminService:
         payload["server_alias"] = alias
         payload["affected_count"] = 1 if existed else 0
         return payload
+
+    def import_mcp_json(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Import standard MCP client configuration without echoing credential values."""
+        expected = body.get("expected_revision")
+        if not isinstance(expected, str) or not expected:
+            raise AdminServiceError("expected_revision is required.")
+        source = body.get("document", body)
+        if not isinstance(source, dict):
+            raise AdminServiceError("MCP import document must be an object.")
+        servers = source.get("mcpServers")
+        if not isinstance(servers, dict):
+            raise AdminServiceError("MCP import requires an mcpServers object.")
+        overwrite = body.get("overwrite", False)
+        if not isinstance(overwrite, bool):
+            raise AdminServiceError("overwrite must be a boolean.")
+        converted: dict[str, Any] = {}
+        for alias, value in servers.items():
+            if not isinstance(alias, str) or not isinstance(value, dict):
+                raise AdminServiceError("MCP server entries must be objects.")
+            item = _json_copy(value)
+            declared_type = item.pop("type", None)
+            if "command" in item or declared_type == "stdio":
+                item["transport"] = "stdio"
+            elif "url" in item or declared_type in {"http", "streamable_http", "sse"}:
+                item["transport"] = "streamable_http"
+            else:
+                raise AdminServiceError(f"MCP server {alias!r} needs command or url.")
+            item.setdefault("enabled", True)
+            item.setdefault("expose_mode", "broker")
+            converted[alias] = item
+        with self._gateway_lock:
+            current = _read_gateway_document(self.gateway_path)
+            if not _constant_equal(expected, document_revision(current)):
+                raise AdminConflictError(
+                    "Gateway configuration changed after this page was loaded; reload before importing."
+                )
+            existing_servers = current.setdefault("servers", {})
+            conflicts = sorted(set(existing_servers) & set(converted))
+            if conflicts and not overwrite:
+                raise AdminConflictError(
+                    "MCP import contains existing aliases; enable overwrite or rename them: "
+                    + ", ".join(conflicts)
+                )
+            policy_value = body.get(
+                "credential_policy",
+                source.get("credential_policy", current.get("credential_policy")),
+            )
+            current["credential_policy"] = parse_credential_policy(policy_value)
+            existing_servers.update(converted)
+            normalized = _validate_gateway_document(current, self.secret_vault)
+            _atomic_write_json(self.gateway_path, normalized)
+        payload = self.gateway_payload()
+        payload["imported_aliases"] = sorted(converted)
+        payload["overwritten_aliases"] = conflicts
+        payload["affected_count"] = len(converted)
+        return payload
+
+    def reveal_gateway_credential(self, alias: str, name: str) -> dict[str, Any]:
+        value, source = self._resolve_gateway_credential(alias, name)
+        self._record_credential_audit(
+            "gateway_credential_revealed",
+            alias=alias,
+            name=name,
+            source=source,
+        )
+        return {
+            "ok": True,
+            "server_alias": alias,
+            "environment_name": name,
+            "source": source,
+            "value": value,
+            "expires_in_seconds": 30,
+        }
+
+    def audit_gateway_credential_copy(self, alias: str, name: str) -> dict[str, Any]:
+        _value, source = self._resolve_gateway_credential(alias, name)
+        event = self._record_credential_audit(
+            "gateway_credential_copied",
+            alias=alias,
+            name=name,
+            source=source,
+        )
+        return {"ok": True, "audit_event_id": event["event_id"]}
+
+    def gateway_credential_audit_payload(self, query: dict[str, str]) -> dict[str, Any]:
+        try:
+            limit = max(1, min(int(query.get("limit", "100")), 500))
+        except ValueError as exc:
+            raise AdminServiceError("credential audit limit must be an integer.") from exc
+        if not self.credential_audit_path.exists():
+            return {"ok": True, "items": [], "count": 0}
+        try:
+            lines = self.credential_audit_path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise AdminUnavailableError(f"Could not read credential audit log: {exc}") from exc
+        items: list[dict[str, Any]] = []
+        for line in reversed(lines[-limit:]):
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                items.append(item)
+        return {"ok": True, "items": items, "count": len(items)}
+
+    def _resolve_gateway_credential(self, alias: str, name: str) -> tuple[str, str]:
+        document = _read_gateway_document(self.gateway_path)
+        servers = document.get("servers", {})
+        server = servers.get(alias) if isinstance(servers, dict) else None
+        if not isinstance(server, dict):
+            raise AdminNotFoundError("Gateway server is not present.")
+        env = server.get("env")
+        if not isinstance(env, dict) or name not in env:
+            raise AdminNotFoundError("Gateway environment credential is not present.")
+        configured = env[name]
+        if isinstance(configured, str):
+            if not configured:
+                raise AdminUnavailableError("Gateway credential is configured with an empty value.")
+            return configured, "local_config"
+        if not isinstance(configured, dict):
+            raise AdminUnavailableError("Gateway credential configuration is invalid.")
+        secret_ref = configured.get("secret_ref")
+        if isinstance(secret_ref, str) and secret_ref:
+            try:
+                return self.secret_vault.get_secret(secret_ref), "secret_vault"
+            except SecretVaultError as exc:
+                raise AdminUnavailableError(str(exc)) from exc
+        env_ref = configured.get("env_ref")
+        if isinstance(env_ref, str) and env_ref:
+            resolved = os.environ.get(env_ref)
+            if resolved is None:
+                raise AdminUnavailableError("Referenced system environment variable is not set.")
+            return resolved, "system_environment"
+        raise AdminUnavailableError("Gateway credential reference is invalid.")
+
+    def _record_credential_audit(
+        self,
+        event_type: str,
+        *,
+        alias: str,
+        name: str,
+        source: str,
+    ) -> dict[str, Any]:
+        event = {
+            "event_id": str(uuid.uuid4()),
+            "timestamp": time.time(),
+            "event_type": event_type,
+            "actor_kind": "admin",
+            "server_alias": alias,
+            "environment_name": name,
+            "source": source,
+        }
+        encoded = json.dumps(event, ensure_ascii=True, sort_keys=True) + "\n"
+        with self._credential_audit_lock:
+            try:
+                self.credential_audit_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.credential_audit_path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if os.name != "nt":
+                    self.credential_audit_path.chmod(0o600)
+            except OSError as exc:
+                raise AdminUnavailableError(f"Could not write credential audit log: {exc}") from exc
+        return event
 
     def secrets_payload(self) -> dict[str, Any]:
         if not self.secret_vault.enabled():
@@ -1014,6 +1271,28 @@ class AdminService:
             return self.gateway_payload()
         if method == "PUT" and parts == ["gateway"]:
             return self.save_gateway(body)
+        if method == "POST" and parts == ["gateway", "import-mcp-json"]:
+            return self.import_mcp_json(body)
+        if len(parts) == 4 and parts[:2] == ["gateway", "credentials"]:
+            if method == "GET" and parts[3] == "reveal":
+                name = query.get("name")
+                if not name:
+                    raise AdminServiceError("name is required.")
+                return self.reveal_gateway_credential(parts[2], name)
+        if method == "GET" and parts == ["gateway", "credential-audit"]:
+            return self.gateway_credential_audit_payload(query)
+        if method == "PUT" and parts == ["gateway", "credential-policy"]:
+            return self.save_gateway_credential_policy(body)
+        if method == "GET" and parts == ["gateway", "credential-audit"]:
+            return self.gateway_credential_audit_payload(query)
+        if (
+            len(parts) == 4
+            and parts[:2] == ["gateway", "credentials"]
+        ):
+            if method == "GET" and parts[3] == "reveal":
+                return self.reveal_gateway_credential(parts[2], query.get("name", ""))
+            if method == "POST" and parts[3] == "copy":
+                return self.audit_gateway_credential_copy(parts[2], body.get("name", ""))
         if len(parts) == 3 and parts[:2] == ["gateway", "servers"]:
             if method == "PUT":
                 return self.save_gateway_server(parts[2], body)

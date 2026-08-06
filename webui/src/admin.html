@@ -107,6 +107,7 @@
         <div class="card-grid">
           <article class="card"><h3>生效状态</h3><p>需要重启：<strong id="gatewayRestartRequired">—</strong></p><p>配置版本：<code id="gatewayRevision">—</code></p><p class="muted">不会热启动、停止或重载当前 Runtime，也不会发送工具列表变更通知。</p></article>
           <article class="card"><h3>当前 Runtime 工具分布</h3><div id="gatewayExposureReport"></div></article>
+          <article class="card"><h3>凭据安全策略</h3><label for="gatewayCredentialPolicy">策略</label><select id="gatewayCredentialPolicy"><option value="local">本地 MCP 模式（推荐个人使用）</option><option value="strict">严格安全模式</option></select><button id="saveGatewayCredentialPolicy" type="button" class="secondary">保存策略</button><div id="gatewayCredentialSources"></div></article>
         </div>
         <div id="gatewaySummary" class="card-grid" aria-live="polite"></div>
 

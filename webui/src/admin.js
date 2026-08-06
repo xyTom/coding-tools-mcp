@@ -776,6 +776,15 @@ function initAdminApp(documentRef = document) {
   function renderGateway(payload) {
     state.gateway = payload;
     state.gatewayRevision = payload.persisted_revision || '';
+    const policy = byId('gatewayCredentialPolicy');
+    if (policy) policy.value = payload.credential_policy || 'local';
+    const sources = byId('gatewayCredentialSources');
+    if (sources) {
+      sources.replaceChildren();
+      for (const [alias, entries] of Object.entries(payload.credential_sources || {})) {
+        sources.append(createNode(documentRef, 'p', { text: `${alias}: ${Object.entries(entries).map(([name, item]) => `${name}=${item.source}`).join(', ')}` }));
+      }
+    }
     byId('gatewayRestartRequired').textContent = payload.restart_required ? '是' : '否';
     byId('gatewayRevision').textContent = state.gatewayRevision || '—';
     const summary = byId('gatewaySummary');
@@ -1051,6 +1060,19 @@ function initAdminApp(documentRef = document) {
     } catch (error) { status(error.message, 'danger'); }
   });
   byId('reloadGateway').addEventListener('click', () => loadGateway().catch((error) => status(error.message, 'danger')));
+  byId('saveGatewayCredentialPolicy')?.addEventListener('click', async () => {
+    try {
+      const result = await api.request('/gateway/credential-policy', {
+        method: 'PUT',
+        body: {
+          expected_revision: state.gatewayRevision,
+          credential_policy: byId('gatewayCredentialPolicy').value,
+        },
+      });
+      renderGateway(result);
+      status('凭据安全策略已保存。');
+    } catch (error) { status(error.message, 'danger'); }
+  });
   byId('newGatewayForm').addEventListener('click', () => resetGatewayServerForm({ focus: true }));
   byId('gatewayTransport').addEventListener('change', updateGatewayTransportFields);
   byId('cancelGatewayEdit').addEventListener('click', () => resetGatewayServerForm());
