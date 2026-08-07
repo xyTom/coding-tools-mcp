@@ -148,12 +148,49 @@ function setAuthenticationUi(documentRef, authenticated) {
   const form = documentRef.getElementById('authForm');
   const connected = documentRef.getElementById('authConnected');
   const token = documentRef.getElementById('adminToken');
+  const openButton = documentRef.getElementById('openAuthDialog');
+  const environmentLabel = documentRef.getElementById('environmentLabel');
+  const environmentDot = documentRef.getElementById('environmentDot');
   if (form) form.hidden = Boolean(authenticated);
   if (connected) connected.hidden = !authenticated;
+  if (openButton) openButton.hidden = Boolean(authenticated);
+  if (environmentLabel) environmentLabel.textContent = authenticated ? '真实数据 · 已连接' : '未连接';
+  if (environmentDot) environmentDot.className = `status-dot ${authenticated ? 'good' : 'warning'}`;
   if (authenticated && token) {
     token.value = '';
     setPasswordVisibility(token, documentRef.getElementById('adminTokenToggle'), false);
   }
+}
+
+function resolveTheme(preference) {
+  if (preference === 'light' || preference === 'dark') return preference;
+  return globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function applyThemePreference(documentRef, preference) {
+  const next = ['system', 'light', 'dark'].includes(preference) ? preference : 'system';
+  const resolved = resolveTheme(next);
+  documentRef.documentElement.dataset.themePreference = next;
+  documentRef.documentElement.dataset.theme = resolved;
+  documentRef.documentElement.style.colorScheme = resolved;
+  const select = documentRef.getElementById('themeSelect');
+  if (select) select.value = next;
+  const use = documentRef.querySelector('#themePickerIcon use');
+  if (use) use.setAttribute('href', next === 'light' ? '#i-sun' : next === 'dark' ? '#i-moon' : '#i-monitor');
+  const meta = documentRef.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = resolved === 'dark' ? '#080d1b' : '#f4f7fb';
+  const picker = documentRef.getElementById('themePicker');
+  if (picker) picker.title = next === 'system' ? '界面主题：跟随系统' : next === 'dark' ? '界面主题：夜间模式' : '界面主题：日间模式';
+  return next;
+}
+
+function initThemeControls(documentRef) {
+  let preference = applyThemePreference(documentRef, 'system');
+  const select = documentRef.getElementById('themeSelect');
+  select?.addEventListener('change', () => { preference = applyThemePreference(documentRef, select.value); });
+  const media = globalThis.matchMedia?.('(prefers-color-scheme: dark)');
+  media?.addEventListener?.('change', () => { if (preference === 'system') applyThemePreference(documentRef, 'system'); });
+  return preference;
 }
 
 function gatewayExposurePreview(documentValue, activeStatus = {}) {
@@ -209,24 +246,58 @@ function renderGatewayExposurePreview(container, preview) {
   }
 }
 
-function createApiClient(getToken, fetchImpl = globalThis.fetch) {
+function adminComponentForPath(path) {
+  const segment = String(path || '').split('?')[0].split('/').filter(Boolean)[0] || 'status';
+  if (segment === 'chat') return 'chat';
+  if (segment === 'gateway') return 'gateway';
+  if (segment === 'workspaces') return 'workspaces';
+  if (segment === 'oauth') return 'oauth';
+  if (segment === 'secrets') return 'secrets';
+  if (segment === 'settings') return 'settings';
+  return 'status';
+}
+
+function createApiClient(getToken, fetchImpl = globalThis.fetch, onActivity = null) {
   async function request(path, options = {}) {
     const token = String(getToken?.() || '');
+    const method = options.method || 'GET';
+    const startedAt = Date.now();
     const headers = new Headers(options.headers || {});
     headers.set('Accept', 'application/json');
     if (options.body !== undefined) headers.set('Content-Type', 'application/json');
     if (token) headers.set('Authorization', `Bearer ${token}`);
-    const response = await fetchImpl(`/admin/api${path}`, {
-      method: options.method || 'GET',
-      headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      credentials: 'same-origin',
-      cache: 'no-store',
-    });
-    let payload = {};
-    try { payload = await response.json(); } catch { payload = {}; }
-    if (!response.ok) throw new ApiError(response.status, payload);
-    return payload;
+    try {
+      const response = await fetchImpl(`/admin/api${path}`, {
+        method,
+        headers,
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      let payload = {};
+      try { payload = await response.json(); } catch { payload = {}; }
+      onActivity?.({
+        timestamp: Date.now(),
+        level: response.ok ? 'info' : 'error',
+        component: adminComponentForPath(path),
+        method,
+        path: String(path).split('?')[0],
+        status: response.status,
+        duration_ms: Math.max(0, Date.now() - startedAt),
+        message: response.ok ? 'Admin API request completed.' : 'Admin API request failed.',
+      });
+      if (!response.ok) throw new ApiError(response.status, payload);
+      return payload;
+    } catch (error) {
+      if (!(error instanceof ApiError)) {
+        onActivity?.({
+          timestamp: Date.now(), level: 'error', component: adminComponentForPath(path), method,
+          path: String(path).split('?')[0], status: 0, duration_ms: Math.max(0, Date.now() - startedAt),
+          message: 'Network request failed.',
+        });
+      }
+      throw error;
+    }
   }
   return { request };
 }
@@ -240,10 +311,22 @@ function createNode(documentRef, tag, options = {}) {
   return node;
 }
 
+function createSvgIcon(documentRef, name, className = 'icon') {
+  const svg = documentRef.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', className);
+  svg.setAttribute('aria-hidden', 'true');
+  const use = documentRef.createElementNS('http://www.w3.org/2000/svg', 'use');
+  use.setAttribute('href', `#i-${name}`);
+  svg.append(use);
+  return svg;
+}
+
 function setPasswordVisibility(input, toggle, visible) {
   if (!input || !toggle) return;
   input.type = visible ? 'text' : 'password';
-  toggle.textContent = visible ? '隐藏' : '显示';
+  const label = toggle.querySelector?.('span');
+  if (label) label.textContent = visible ? '隐藏' : '显示';
+  else toggle.textContent = visible ? '隐藏' : '显示';
   toggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
   toggle.setAttribute('aria-label', visible ? '隐藏密码' : '显示密码');
 }
@@ -529,6 +612,7 @@ async function handleSettingsSave({ api, state, documentRef }) {
 
 function initAdminApp(documentRef = document) {
   i18n.initI18n();
+  initThemeControls(documentRef);
   const model = globalThis.McpSettingsModel;
   const copy = globalThis.McpSettingsCopy;
   const workspaceEditor = globalThis.McpWorkspaceEditor;
@@ -537,10 +621,20 @@ function initAdminApp(documentRef = document) {
     token: '', settings: null, workspaces: [], workspaceRevision: '', gateway: null,
     gatewayRevision: '', editingGatewayAlias: '', conversationPage: 1, conversationTotal: 0,
     selectedConversation: null, messagePage: 1, contextPage: 1,
-    clientPasswordClientId: '', clientPasswordReturnFocus: null,
+    clientPasswordClientId: '', clientPasswordReturnFocus: null, section: 'overview',
+    overviewStatus: null, conversations: [], oauthClients: [], secrets: [],
+    activityLogs: [], selectedActivityLogId: null,
   };
-  const api = createApiClient(() => state.token);
   const byId = (id) => documentRef.getElementById(id);
+
+  function recordActivity(entry) {
+    state.activityLogs.unshift({ id: `activity-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, ...entry });
+    state.activityLogs = state.activityLogs.slice(0, 250);
+    renderActivityLogSummary();
+    if (byId('activityLogDialog')?.open) renderActivityLogs();
+  }
+
+  const api = createApiClient(() => state.token, globalThis.fetch, recordActivity);
 
   function status(message, kind = '') {
     const box = byId('globalStatus');
@@ -681,7 +775,206 @@ function initAdminApp(documentRef = document) {
     return payload;
   }
 
+  const sectionMeta = {
+    overview: ['概览', '运行状态与运维提醒'],
+    gateway: ['工具连接', '工具网关配置、暴露策略与重启语义'],
+    workspaces: ['工作区', '会话的文件与进程边界'],
+    chat: ['聊天会话', '摘要列表与按需正文'],
+    settings: ['服务器设置', '带版本校验的配置管理'],
+    oauth: ['授权管理', '客户端、授权记录、令牌与签名密钥'],
+    secrets: ['凭据保险箱', '只显示名称的凭据管理'],
+    system: ['系统状态', '运行时、工具网关、凭据保险箱与 Telemetry'],
+  };
+
+  function clientWorkspaceIds(client) {
+    if (Array.isArray(client?.workspace_access?.workspace_ids)) return client.workspace_access.workspace_ids.map(String);
+    if (Array.isArray(client?.workspace_ids)) return client.workspace_ids.map(String);
+    return [];
+  }
+
+  function renderOverviewDashboard() {
+    const servers = state.gateway?.persisted?.servers || {};
+    const aliases = Object.keys(servers);
+    const enabledConnections = aliases.filter((alias) => servers[alias]?.enabled !== false).length;
+    const brokerConnections = aliases.filter((alias) => servers[alias]?.expose_mode === 'broker').length;
+    const enabledWorkspaces = state.workspaces.filter((item) => item?.enabled !== false);
+    const defaultWorkspace = enabledWorkspaces.find((item) => item.default);
+    const exposure = state.gateway?.active_status?.exposure_report;
+    const catalogCount = Number(exposure?.catalog?.count || exposure?.direct?.count || 0);
+    const missingClientAccess = state.oauthClients.filter((client) => client?.enabled !== false && clientWorkspaceIds(client).length === 0);
+    const restartCount = Number(Boolean(state.gateway?.restart_required)) + Number(Boolean(state.settings?.restartRequired)) + Number(state.settings?.pendingRestart?.length || 0);
+
+    const navConnections = byId('navConnectionCount');
+    const navWorkspaces = byId('navWorkspaceCount');
+    if (navConnections) navConnections.textContent = String(aliases.length);
+    if (navWorkspaces) navWorkspaces.textContent = String(state.workspaces.length);
+    if (byId('sidebarMode')) byId('sidebarMode').textContent = brokerConnections >= (aliases.length - brokerConnections) ? '代理模式' : '直连为主';
+    if (byId('overviewRuntimeStatus')) byId('overviewRuntimeStatus').textContent = state.overviewStatus?.admin_api ? '运行中' : '未连接';
+    if (byId('overviewPermissionMode')) byId('overviewPermissionMode').textContent = state.settings?.active?.permission_mode || '—';
+
+    const taskRoot = byId('operationsAlerts');
+    if (taskRoot) {
+      taskRoot.replaceChildren();
+      const tasks = [];
+      if (restartCount) tasks.push({ kind: 'warning', icon: 'alert', title: '需要重启服务', detail: '工具网关或服务器设置已保存，但当前运行时仍可能使用旧快照。', action: '查看影响', section: 'system' });
+      if (!defaultWorkspace) tasks.push({ kind: 'danger', icon: 'folder', title: '检查默认工作区', detail: '当前没有启用且可作为默认项的工作区。', action: '查看工作区', section: 'workspaces' });
+      if (missingClientAccess.length) tasks.push({ kind: 'danger', icon: 'users', title: 'OAuth Client 配置', detail: `${missingClientAccess.length} 个启用 Client 缺少 Workspace allowlist。`, action: '查看详情', section: 'oauth' });
+      if (!aliases.length) tasks.push({ kind: 'warning', icon: 'plug', title: '尚未配置工具连接', detail: '添加上游 MCP 后才能通过工具网关提供能力。', action: '添加连接', section: 'gateway' });
+      if (!tasks.length) tasks.push({ kind: 'success', icon: 'check', title: '没有阻塞提醒', detail: '工具连接、工作区、授权和服务器配置当前没有明显阻塞项。', action: '查看系统状态', section: 'system' });
+      tasks.slice(0, 4).forEach((task) => {
+        const card = createNode(documentRef, 'article', { className: `task-card ${task.kind}` });
+        const icon = createNode(documentRef, 'span', { className: 'task-icon' });
+        icon.append(createSvgIcon(documentRef, task.icon, 'icon icon-sm'));
+        const copyNode = createNode(documentRef, 'div', { className: 'task-copy' });
+        const button = createNode(documentRef, 'button', { type: 'button', className: 'secondary', text: task.action });
+        button.addEventListener('click', () => showSection(task.section));
+        copyNode.append(createNode(documentRef, 'strong', { text: task.title }), createNode(documentRef, 'p', { text: task.detail }), button);
+        card.append(icon, copyNode);
+        taskRoot.append(card);
+      });
+    }
+
+    const metricRoot = byId('overviewMetrics');
+    if (metricRoot) {
+      metricRoot.replaceChildren();
+      const metrics = [
+        ['工具连接', aliases.length, '个连接', [[enabledConnections, '启用中', 'good'], [aliases.length - enabledConnections, '已停用', 'danger'], [brokerConnections, 'Broker', 'info']]],
+        ['工作区', state.workspaces.length, '个目录', [[enabledWorkspaces.length, '启用中', 'good'], [defaultWorkspace ? 1 : 0, '默认', defaultWorkspace ? 'info' : 'warning']]],
+        ['聊天会话', state.conversationTotal || state.conversations.length, '个会话', [[state.conversations.length, '本页摘要', 'good']]],
+        ['运行时工具', catalogCount, '个公开定义', [[state.gateway?.active_status ? '正常' : '未报告', 'Gateway', state.gateway?.active_status ? 'good' : 'warning']]],
+      ];
+      metrics.forEach(([title, value, unit, meta]) => {
+        const card = createNode(documentRef, 'article', { className: 'metric-card' });
+        card.append(createNode(documentRef, 'div', { className: 'metric-head', text: title }));
+        const valueNode = createNode(documentRef, 'strong', { className: 'metric-value', text: value });
+        valueNode.append(createNode(documentRef, 'small', { text: unit }));
+        const metaNode = createNode(documentRef, 'div', { className: 'metric-meta' });
+        meta.forEach(([amount, label, kind]) => {
+          const row = createNode(documentRef, 'span');
+          row.append(createNode(documentRef, 'span', { className: `mini-dot ${kind}` }), documentRef.createTextNode(`${amount} ${label}`));
+          metaNode.append(row);
+        });
+        card.append(valueNode, metaNode);
+        metricRoot.append(card);
+      });
+    }
+
+    const gatewayRoot = byId('overviewGateway');
+    if (gatewayRoot) {
+      gatewayRoot.replaceChildren();
+      aliases.slice(0, 5).forEach((alias) => {
+        const config = servers[alias] || {};
+        const row = createNode(documentRef, 'div', { className: 'compact-row' });
+        const copyNode = createNode(documentRef, 'span', { className: 'compact-copy' });
+        copyNode.append(createNode(documentRef, 'strong', { text: alias }), createNode(documentRef, 'small', { text: config.transport === 'stdio' ? '本地命令' : 'Streamable HTTP' }));
+        row.append(copyNode, createNode(documentRef, 'span', { className: 'compact-meta', text: `${config.enabled === false ? '停用' : '启用'} · ${config.expose_mode === 'broker' ? 'Broker' : 'Direct'}` }));
+        gatewayRoot.append(row);
+      });
+      if (!aliases.length) gatewayRoot.append(createNode(documentRef, 'p', { className: 'muted', text: '尚未配置工具连接。' }));
+    }
+
+    const conversationRoot = byId('overviewConversations');
+    if (conversationRoot) {
+      conversationRoot.replaceChildren();
+      state.conversations.slice(0, 5).forEach((item) => {
+        const button = createNode(documentRef, 'button', { type: 'button', className: 'compact-row' });
+        const copyNode = createNode(documentRef, 'span', { className: 'compact-copy' });
+        copyNode.append(createNode(documentRef, 'strong', { text: item.title || item.conversation_id }), createNode(documentRef, 'small', { text: item.preview || '无摘要' }));
+        button.append(copyNode, createNode(documentRef, 'span', { className: 'compact-meta', text: item.updated_at || '' }));
+        button.addEventListener('click', () => {
+          if (byId('chatWorkspace')) byId('chatWorkspace').value = item.workspace_id;
+          state.selectedConversation = { workspaceId: item.workspace_id, conversationId: item.conversation_id };
+          showSection('chat');
+          loadConversationDetail().catch((error) => status(error.message, 'danger'));
+        });
+        conversationRoot.append(button);
+      });
+      if (!state.conversations.length) conversationRoot.append(createNode(documentRef, 'p', { className: 'muted', text: '暂无会话摘要。' }));
+    }
+
+    const systemRoot = byId('overviewSystem');
+    if (systemRoot) {
+      systemRoot.replaceChildren();
+      const rows = [
+        ['Admin API', state.overviewStatus?.admin_api ? '正常' : '未连接'],
+        ['工具网关', state.overviewStatus?.gateway?.available ? '连接正常' : '不可用'],
+        ['凭据保险箱', state.overviewStatus?.vault?.enabled ? '已启用' : '未启用'],
+        ['配置版本', state.settings?.persistedRevision || state.gatewayRevision || '—'],
+      ];
+      rows.forEach(([label, value]) => {
+        const row = createNode(documentRef, 'div', { className: 'status-row' });
+        row.append(createNode(documentRef, 'span', { className: `status-dot ${/正常|启用/.test(value) ? 'good' : 'warning'}` }), createNode(documentRef, 'strong', { text: label }), createNode(documentRef, 'small', { text: value }));
+        systemRoot.append(row);
+      });
+    }
+
+    if (byId('systemRestartCount')) byId('systemRestartCount').textContent = String(restartCount);
+    if (byId('systemRestartTitle')) byId('systemRestartTitle').textContent = restartCount ? `${restartCount} 项等待生效` : '没有等待生效的项目';
+    if (byId('systemRestartDetail')) byId('systemRestartDetail').textContent = restartCount ? '工具网关或服务器设置需要新建运行时或服务重启。' : 'Active 与 Persisted 配置已同步。';
+  }
+
+  function activityTime(timestamp) {
+    return new Date(timestamp).toLocaleTimeString(i18n.getLocale() === 'en' ? 'en-US' : 'zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function filteredActivityLogs() {
+    const time = byId('activityLogTime')?.value || '24h';
+    const level = byId('activityLogLevel')?.value || 'all';
+    const component = byId('activityLogComponent')?.value || 'all';
+    const query = (byId('activityLogSearch')?.value || '').trim().toLowerCase();
+    const limits = { '15m': 15 * 60e3, '1h': 60 * 60e3, '24h': 24 * 60 * 60e3 };
+    const now = Date.now();
+    return state.activityLogs.filter((item) => (time === 'all' || now - item.timestamp <= limits[time]) && (level === 'all' || item.level === level) && (component === 'all' || item.component === component) && (!query || `${item.method} ${item.path} ${item.status} ${item.message}`.toLowerCase().includes(query)));
+  }
+
+  function renderActivityLogSummary() {
+    if (byId('activityLogCount')) byId('activityLogCount').textContent = String(state.activityLogs.length);
+    if (byId('activityLogErrorCount')) byId('activityLogErrorCount').textContent = String(state.activityLogs.filter((item) => item.level === 'error').length);
+    if (byId('activityLogLastUpdated')) byId('activityLogLastUpdated').textContent = state.activityLogs[0] ? activityTime(state.activityLogs[0].timestamp) : '—';
+  }
+
+  function renderActivityLogDetail(item) {
+    const root = byId('activityLogDetail');
+    if (!root) return;
+    root.replaceChildren();
+    if (!item) {
+      const empty = createNode(documentRef, 'div', { className: 'empty-state' });
+      empty.append(createNode(documentRef, 'h3', { text: '选择一条日志' }), createNode(documentRef, 'p', { text: '点击记录查看请求方法、路径、HTTP 状态和耗时。' }));
+      root.append(empty);
+      return;
+    }
+    root.append(createNode(documentRef, 'h3', { text: `${item.method} ${item.path}` }), createNode(documentRef, 'p', { className: 'muted', text: item.message }));
+    const dl = createNode(documentRef, 'dl');
+    [['时间', new Date(item.timestamp).toLocaleString()], ['组件', item.component], ['HTTP 状态', item.status || 'network'], ['耗时', `${item.duration_ms} ms`]].forEach(([label, value]) => {
+      const row = createNode(documentRef, 'div');
+      row.append(createNode(documentRef, 'dt', { text: label }), createNode(documentRef, 'dd', { text: value }));
+      dl.append(row);
+    });
+    root.append(dl);
+  }
+
+  function renderActivityLogs() {
+    const root = byId('activityLogList');
+    if (!root) return;
+    const items = filteredActivityLogs();
+    if (state.selectedActivityLogId && !items.some((item) => item.id === state.selectedActivityLogId)) state.selectedActivityLogId = null;
+    if (byId('activityLogResultCount')) byId('activityLogResultCount').textContent = `${items.length} 条结果`;
+    root.replaceChildren();
+    items.forEach((item) => {
+      const row = createNode(documentRef, 'button', { type: 'button', className: `log-row ${state.selectedActivityLogId === item.id ? 'active' : ''}` });
+      const copyNode = createNode(documentRef, 'span', { className: 'log-copy' });
+      copyNode.append(createNode(documentRef, 'strong', { text: `${item.method} ${item.path}` }), createNode(documentRef, 'small', { text: item.message }));
+      row.append(createNode(documentRef, 'time', { text: activityTime(item.timestamp) }), createNode(documentRef, 'span', { className: `log-level ${item.level}`, text: item.level }), createNode(documentRef, 'span', { text: item.component }), copyNode);
+      row.addEventListener('click', () => { state.selectedActivityLogId = item.id; renderActivityLogs(); });
+      root.append(row);
+    });
+    if (!items.length) root.append(createNode(documentRef, 'div', { className: 'empty-state', text: '当前筛选条件没有日志。' }));
+    renderActivityLogDetail(items.find((item) => item.id === state.selectedActivityLogId) || null);
+  }
+
   function showSection(name) {
+    if (!sectionMeta[name]) return;
+    state.section = name;
     for (const section of documentRef.querySelectorAll('.page-section')) {
       const active = section.id === `section-${name}`;
       section.hidden = !active;
@@ -693,11 +986,18 @@ function initAdminApp(documentRef = document) {
       if (active) button.setAttribute('aria-current', 'page');
       else button.removeAttribute('aria-current');
     }
+    const [title, subtitle] = sectionMeta[name];
+    if (byId('pageTitle')) byId('pageTitle').textContent = translateUi(title);
+    if (byId('pageSubtitle')) byId('pageSubtitle').textContent = translateUi(subtitle);
+    documentRef.title = `${translateUi(title)} · Coding Tools MCP`;
+    documentRef.body.classList.remove('sidebar-open');
+    byId('menuButton')?.setAttribute('aria-expanded', 'false');
     byId('mainContent')?.focus();
   }
 
   async function loadOverview() {
     const payload = await api.request('/status');
+    state.overviewStatus = payload;
     byId('adminApiStatus').textContent = payload.admin_api ? '可用' : '不可用';
     byId('gatewayRuntimeStatus').textContent = payload.gateway?.available ? '已配置（快照不可变）' : '不可用';
     byId('vaultStatus').textContent = payload.vault?.enabled ? '已启用' : '未启用';
@@ -706,6 +1006,7 @@ function initAdminApp(documentRef = document) {
     byId('telemetryDetail').textContent = telemetry.detail;
     byId('telemetryDisableHelp').textContent = copy.TELEMETRY_DISABLE_HELP;
     byId('fakeReadonlyStatus').textContent = payload.runtime?.annotation_override === 'fake_readonly' ? '已启用' : payload.runtime ? '未启用' : '未报告';
+    renderOverviewDashboard();
     return payload;
   }
 
@@ -719,6 +1020,7 @@ function initAdminApp(documentRef = document) {
       ? model.refreshPersistedKeepingDraft(state.settings, payload)
       : model.hydrateSettings(payload);
     settingsPage.renderSettingsForm(documentRef, state.settings, copy.permissionPresentation);
+    renderOverviewDashboard();
     return payload;
   }
 
@@ -755,6 +1057,7 @@ function initAdminApp(documentRef = document) {
       },
     });
     workspaceEditor.populateWorkspaceSelect(byId('chatWorkspace'), state.workspaces, byId('chatWorkspace')?.value || payload.default_workspace_id);
+    renderOverviewDashboard();
     return payload;
   }
 
@@ -857,6 +1160,7 @@ function initAdminApp(documentRef = document) {
       }
     }
     updateGatewayExposurePreview();
+    renderOverviewDashboard();
   }
 
   async function loadGateway() { const payload = await api.request('/gateway'); renderGateway(payload); return payload; }
@@ -864,6 +1168,7 @@ function initAdminApp(documentRef = document) {
   async function loadOAuth() {
     const collection = byId('oauthCollection').value;
     const payload = await api.request(`/oauth/${encodeURIComponent(collection)}`);
+    if (collection === 'clients') state.oauthClients = payload.items || [];
     renderOAuthItems(byId('oauthList'), payload.items || [], collection, async (resource, id, action, button) => {
       const accepted = await confirmDestructive(documentRef, {
         title: `OAuth ${action}`,
@@ -906,11 +1211,13 @@ function initAdminApp(documentRef = document) {
       await loadOAuth();
       return result;
     }, state.workspaces);
+    renderOverviewDashboard();
     return payload;
   }
 
   async function loadSecrets() {
     const payload = await api.request('/secrets');
+    state.secrets = payload.secrets || [];
     const root = byId('secretList');
     root.replaceChildren();
     for (const item of payload.secrets || []) {
@@ -940,6 +1247,7 @@ function initAdminApp(documentRef = document) {
       root.append(card);
     }
     if (!(payload.secrets || []).length) root.append(createNode(documentRef, 'p', { className: 'muted', text: 'Vault 中没有已配置名称。' }));
+    renderOverviewDashboard();
   }
 
   async function loadConversations() {
@@ -950,6 +1258,7 @@ function initAdminApp(documentRef = document) {
     if (search) query.set('query', search);
     const payload = await api.request(`/chat/conversations?${query}`);
     state.conversationTotal = payload.total || 0;
+    state.conversations = payload.items || [];
     byId('conversationPage').textContent = `第 ${payload.page || 1} 页`;
     byId('conversationPrev').disabled = state.conversationPage <= 1;
     byId('conversationNext').disabled = state.conversationPage * (payload.page_size || 20) >= state.conversationTotal;
@@ -958,6 +1267,7 @@ function initAdminApp(documentRef = document) {
       state.messagePage = 1; state.contextPage = 1;
       await loadConversationDetail();
     });
+    renderOverviewDashboard();
   }
 
   async function deleteChatResource(resource, workspaceId, identifier, button, detailMessage) {
@@ -1006,6 +1316,7 @@ function initAdminApp(documentRef = document) {
     status('正在读取 Admin API…');
     await Promise.all([loadOverview(), loadSettings(), loadWorkspaces(), loadGateway(), loadSecrets()]);
     await Promise.all([loadOAuth(), loadConversations()]);
+    renderOverviewDashboard();
     status('Admin 数据已刷新。');
   }
 
@@ -1016,12 +1327,73 @@ function initAdminApp(documentRef = document) {
   for (const button of documentRef.querySelectorAll('.nav-item')) {
     button.addEventListener('click', () => showSection(button.dataset.section));
   }
+  for (const control of documentRef.querySelectorAll('[data-open-section]')) {
+    control.addEventListener('click', (event) => {
+      event.preventDefault();
+      showSection(control.dataset.openSection);
+    });
+  }
+  byId('menuButton')?.addEventListener('click', () => {
+    const open = !documentRef.body.classList.contains('sidebar-open');
+    documentRef.body.classList.toggle('sidebar-open', open);
+    byId('menuButton')?.setAttribute('aria-expanded', String(open));
+  });
+  byId('sidebarBackdrop')?.addEventListener('click', () => {
+    documentRef.body.classList.remove('sidebar-open');
+    byId('menuButton')?.setAttribute('aria-expanded', 'false');
+  });
+  byId('mobileMoreButton')?.addEventListener('click', () => {
+    documentRef.body.classList.add('sidebar-open');
+    byId('menuButton')?.setAttribute('aria-expanded', 'true');
+  });
+  byId('openAuthDialog')?.addEventListener('click', () => {
+    byId('authDialog')?.showModal();
+    byId('adminToken')?.focus();
+  });
+  documentRef.querySelectorAll('[data-close-auth]').forEach((control) => {
+    control.addEventListener('click', () => byId('authDialog')?.close());
+  });
+  const openActivityLogs = () => {
+    renderActivityLogs();
+    byId('activityLogDialog')?.showModal();
+  };
+  byId('openActivityLogs')?.addEventListener('click', openActivityLogs);
+  documentRef.querySelectorAll('[data-open-activity-logs]').forEach((control) => control.addEventListener('click', openActivityLogs));
+  documentRef.querySelectorAll('[data-close-activity-logs]').forEach((control) => control.addEventListener('click', () => byId('activityLogDialog')?.close()));
+  ['activityLogTime', 'activityLogLevel', 'activityLogComponent'].forEach((id) => byId(id)?.addEventListener('change', renderActivityLogs));
+  byId('activityLogSearch')?.addEventListener('input', renderActivityLogs);
+  byId('clearActivityLogs')?.addEventListener('click', () => {
+    state.activityLogs = [];
+    state.selectedActivityLogId = null;
+    renderActivityLogSummary();
+    renderActivityLogs();
+  });
+  byId('refreshCurrent')?.addEventListener('click', () => {
+    if (!state.token) {
+      byId('authDialog')?.showModal();
+      byId('adminToken')?.focus();
+      return;
+    }
+    const loaders = {
+      overview: refreshAll, system: refreshAll, settings: loadSettings, workspaces: loadWorkspaces,
+      gateway: loadGateway, oauth: loadOAuth, secrets: loadSecrets, chat: loadConversations,
+    };
+    Promise.resolve(loaders[state.section]?.()).catch((error) => status(error.message, 'danger'));
+  });
+  documentRef.addEventListener('localechange', () => {
+    renderOverviewDashboard();
+    renderActivityLogs();
+    const [title, subtitle] = sectionMeta[state.section] || sectionMeta.overview;
+    if (byId('pageTitle')) byId('pageTitle').textContent = translateUi(title);
+    if (byId('pageSubtitle')) byId('pageSubtitle').textContent = translateUi(subtitle);
+  });
   byId('authForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     state.token = byId('adminToken').value;
     try {
       await refreshAll();
       setAuthenticationUi(documentRef, true);
+      byId('authDialog')?.close();
     } catch (error) {
       setAuthenticationUi(documentRef, false);
       status(error.message, 'danger');
@@ -1031,6 +1403,7 @@ function initAdminApp(documentRef = document) {
     state.token = '';
     setAuthenticationUi(documentRef, false);
     status('Admin token 已从页面内存清除。');
+    byId('authDialog')?.showModal();
     byId('adminToken').focus();
   });
   byId('refreshAll').addEventListener('click', () => refreshAll().catch((error) => status(error.message, 'danger')));

@@ -593,9 +593,198 @@ export const EN_MESSAGES = Object.freeze({
   '本地 stdio 连接必须填写启动命令。': 'A local stdio connection requires a launch command.',
   '远程 Streamable HTTP 连接必须填写服务地址。': 'A remote Streamable HTTP connection requires a service URL.',
   '等待时间必须是正整数。': 'The timeout must be a positive integer.',
+  'Coding Tools MCP · 管理控制台': 'Coding Tools MCP · Admin Console',
+  '管理控制台': 'Admin console',
+  '授权管理': 'OAuth management',
+  '凭据保险箱': 'Secret Vault',
+  '系统状态': 'System status',
+  '当前暴露策略': 'Current exposure strategy',
+  '代理模式': 'Broker mode',
+  '只直接暴露固定工具与置顶工具，其余能力通过目录搜索按需调用。': 'Only fixed and pinned tools are exposed directly. Other capabilities are discovered on demand through catalog search.',
+  '查看模式说明': 'View mode details',
+  'MCP 管理接口': 'MCP Admin API',
+  '安全管理入口': 'Secure administration',
+  '运行状态与运维提醒': 'Runtime status and operational alerts',
+  '跟随系统': 'Follow system',
+  '中文': 'Chinese',
+  '日间模式': 'Light mode',
+  '夜间模式': 'Dark mode',
+  '未连接': 'Disconnected',
+  '连接管理接口': 'Connect Admin API',
+  '已连接': 'Connected',
+  '退出': 'Disconnect',
+  '输入专用 Admin token 后连接。': 'Connect with a dedicated Admin token.',
+  '欢迎回来': 'Welcome back',
+  '先处理影响运行的事项，再进入具体管理页面。': 'Address runtime-impacting items first, then open a management area.',
+  '服务状态': 'Service status',
+  '权限模式': 'Permission mode',
+  '管理接口': 'Admin API',
+  '运维提醒': 'Operational alerts',
+  '汇总需要管理员关注的配置、权限和运行状态。': 'Summarizes configuration, permission, and runtime conditions that need administrator attention.',
+  '查看全部提醒': 'View all alerts',
+  '连接后生成真实运维提醒。': 'Connect to generate live operational alerts.',
+  '工具连接状态': 'Tool connection status',
+  '持久化配置与下一次运行时的启用状态。': 'Persisted configuration and enablement for the next runtime.',
+  '查看全部': 'View all',
+  '最近会话': 'Recent conversations',
+  '只展示摘要；选择后才读取正文。': 'Only summaries are shown; message bodies load after selection.',
+  '管理接口、工具网关、凭据保险箱与配置版本。': 'Admin API, tool gateway, Secret Vault, and configuration version.',
+  '查看详情': 'View details',
+  '快速操作': 'Quick actions',
+  '直接进入最常用的管理流程。': 'Open the most common management workflows.',
+  '添加工具连接': 'Add tool connection',
+  '配置本地命令或远程 MCP': 'Configure a local command or remote MCP server',
+  '添加工作区': 'Add workspace',
+  '明确文件访问边界': 'Define file-access boundaries',
+  '配置授权': 'Configure OAuth',
+  '客户端、授权记录与工作区': 'Clients, grants, and workspaces',
+  '服务器设置': 'Server settings',
+  '带版本校验的保存': 'Revision-aware saving',
+  '管理上游 MCP 配置。启用、禁用和删除只影响下一次运行时或服务重启。': 'Manage upstream MCP configuration. Enable, disable, and delete actions affect only the next runtime or service restart.',
+  '工具网关配置可能需要重启后生效': 'Tool gateway changes may require a restart',
+  '当前运行时的工具快照不会热重载；以接口返回的 restart_required 为准。': 'The current runtime tool snapshot does not hot reload; follow the restart_required value returned by the API.',
+  '查看影响': 'View impact',
+  '需要重启': 'Restart required',
+  '当前运行时不会被热修改': 'The current runtime is not mutated',
+  '配置版本': 'Configuration revision',
+  '写入必须携带最新版本': 'Writes must include the latest revision',
+  '暴露策略': 'Exposure strategy',
+  'Broker 模式只直接暴露固定工具和置顶工具；Direct 模式直接暴露过滤后的完整工具集合。': 'Broker exposes only fixed and pinned tools directly; Direct exposes the complete filtered tool set.',
+  '表单保留隐藏凭据；保存后新建运行时或重启服务才生效。': 'The form preserves hidden credentials; changes take effect in a new runtime or after a service restart.',
+  '可直接填写值，也可使用': 'Use a direct value or',
+  '；敏感项读取时会遮蔽。': '; sensitive values are redacted when read.',
+  'Broker（推荐）': 'Broker (recommended)',
+  '凭据策略': 'Credential policy',
+  '页面读取时遮蔽敏感值，表单编辑会保留隐藏字段。': 'Sensitive values are redacted when read, and hidden fields are preserved during form editing.',
+  '策略': 'Policy',
+  '本地 MCP 模式': 'Local MCP mode',
+  '严格安全模式': 'Strict security mode',
+  '保存策略': 'Save policy',
+  '代理模式与直连模式': 'Broker and Direct modes',
+  '暴露方式只改变客户端看到的工具目录。': 'Exposure mode changes only the tool catalog visible to clients.',
+  '：固定工具与置顶工具直接可见，其余按需搜索。': ': fixed and pinned tools are directly visible; the rest are searched on demand.',
+  '直连模式': 'Direct mode',
+  '：过滤后的完整工具集合直接可见。': ': the complete filtered tool set is directly visible.',
+  '用于诊断或批量替换不含凭据的配置。普通管理请使用上方表单。': 'Use this for diagnostics or bulk replacement of credential-free configuration. Use the form above for normal management.',
+  '不会预填或显示任何上游凭据、摘要值或内部引用。': 'No upstream credentials, digests, or internal references are prefilled or displayed.',
+  '按当前运行时已发现的公开工具预览差异；保存不会改变当前运行时。': 'Preview differences using public tools discovered by the current runtime; saving does not change the current runtime.',
+  '每个 HTTP 会话在初始化时绑定一个已校验工作区，生命周期内不可切换。': 'Each HTTP session binds to one validated workspace at initialization and cannot switch during its lifetime.',
+  '工作区是文件与进程隔离边界': 'A workspace is the file and process isolation boundary',
+  '当前目录、保留输出、进程表、项目指令和工具快照均按会话隔离。': 'Working directory, retained output, process table, project instructions, and tool snapshots are isolated per session.',
+  '新增工作区': 'Add workspace',
+  '新增后可检查路径、设置默认或停用。': 'After adding it, you can check the path, set it as default, or disable it.',
+  '列表仅加载摘要；消息与持久化上下文只在明确选择会话后按页读取。': 'The list loads summaries only; messages and durable context are paged only after a conversation is explicitly selected.',
+  '选择一条会话': 'Select a conversation',
+  '只有选择摘要后，才会加载消息正文和持久化上下文。': 'Message bodies and durable context load only after a summary is selected.',
+  '保存必须携带最新 persisted revision；发生冲突时保留草稿并提示重新比较。': 'Saves must include the latest persisted revision; on conflict, the draft is preserved for comparison.',
+  '网络与运行': 'Network and runtime',
+  'Host、Port 和 OAuth 公开地址修改后需要重启。': 'Changes to Host, Port, and the public OAuth URL require a restart.',
+  'Active、Persisted 与 Pending restart 分离。': 'Active, Persisted, and Pending restart states are separate.',
+  '等待重启': 'Pending restart',
+  '只显示脱敏元数据；客户端密码和 Workspace allowlist 更新可立即生效。': 'Only redacted metadata is shown; client-password and workspace-allowlist updates can take effect immediately.',
+  '页面只列出 Secret 名称和用途，不读取、显示或复制已保存的值。': 'The page lists Secret names and purposes only; saved values are never read, displayed, or copied.',
+  '已配置名称': 'Configured names',
+  'OAuth、Gateway 和签名材料均通过名称引用。': 'OAuth, Gateway, and signing material are referenced by name.',
+  '提交后输入立即清空，值不会出现在响应中。': 'The input is cleared immediately after submission, and the value never appears in the response.',
+  '集中查看运行时、工具网关、凭据保险箱、Telemetry、执行环境和重启影响。': 'View runtime, tool gateway, Secret Vault, telemetry, execution environment, and restart impact in one place.',
+  '查看运行日志': 'View runtime logs',
+  '刷新状态': 'Refresh status',
+  '工具网关': 'Tool gateway',
+  '工具快照在运行时初始化时冻结。': 'The tool snapshot is frozen when the runtime initializes.',
+  '运行日志': 'Runtime logs',
+  '默认不展开日志明细；需要排障时再打开查看器并筛选范围。': 'Log details stay closed by default; open the viewer and filter the scope only when troubleshooting.',
+  '打开日志查看器': 'Open log viewer',
+  '当前页面活动': 'Current page activity',
+  'Admin API 请求记录': 'Admin API request records',
+  '本次页面会话': 'Current page session',
+  '最后更新': 'Last updated',
+  '仅保存在内存中': 'Kept in memory only',
+  '当前后端尚未暴露服务器运行日志端点；查看器记录本管理页面发出的 Admin API 请求结果，不记录 token、请求体或 Secret 值。': 'The backend does not currently expose a server-runtime log endpoint. This viewer records Admin API request results from this page without tokens, request bodies, or Secret values.',
+  '重启影响': 'Restart impact',
+  '工具网关和部分服务器设置只在新建运行时或服务重启后生效。': 'The tool gateway and some server settings take effect only in a new runtime or after a service restart.',
+  '没有等待生效的项目': 'No items pending',
+  'Active 与 Persisted 配置已同步。': 'Active and Persisted configuration are synchronized.',
+  '查看配置差异': 'View configuration differences',
+  '安全说明': 'Security notes',
+  '管理接口与普通 MCP/OAuth 权限面相互独立。': 'The Admin API is separate from the normal MCP/OAuth privilege surface.',
+  'Admin token 只保存在当前页面内存中，退出后立即清除。': 'The Admin token is kept only in page memory and cleared immediately on disconnect.',
+  'Secret 值、token 原文和内部摘要不会通过管理页面回显。': 'Secret values, raw tokens, and internal digests are never echoed by the admin page.',
+  '更多': 'More',
+  '连接真实 Admin API': 'Connect live Admin API',
+  '使用专用 Admin token；token 仅保存在当前页面内存中。': 'Use a dedicated Admin token; it is kept only in page memory.',
+  '不会写入 URL、浏览器持久化存储、日志或服务器设置。': 'It is not written to the URL, browser persistent storage, logs, or server settings.',
+  '连接并读取': 'Connect and load',
+  '运行日志查看器': 'Runtime log viewer',
+  '按时间、级别、组件和关键词筛选本页面的管理接口活动。': 'Filter this page\'s Admin API activity by time, level, component, and keyword.',
+  '时间范围': 'Time range',
+  '最近 15 分钟': 'Last 15 minutes',
+  '最近 1 小时': 'Last hour',
+  '最近 24 小时': 'Last 24 hours',
+  '全部': 'All',
+  '级别': 'Level',
+  '全部级别': 'All levels',
+  '组件': 'Component',
+  '全部组件': 'All components',
+  '关键词': 'Keyword',
+  '0 条结果': '0 results',
+  '清空当前页面日志': 'Clear page logs',
+  '选择一条日志': 'Select a log entry',
+  '点击记录查看请求方法、路径、HTTP 状态和耗时。': 'Select an entry to view the request method, path, HTTP status, and duration.',
+  '不记录 Admin token、请求体或 Secret 值。': 'Admin tokens, request bodies, and Secret values are not recorded.',
+  'Coding Tools MCP 管理控制台首页': 'Coding Tools MCP Admin Console home',
+  '主要导航': 'Primary navigation',
+  '打开导航': 'Open navigation',
+  '关闭导航': 'Close navigation',
+  '界面语言': 'Interface language',
+  '界面主题': 'Interface theme',
+  '刷新当前页面': 'Refresh current page',
+  '服务摘要': 'Service summary',
+  '移动端主要导航': 'Mobile primary navigation',
+  '搜索路径、状态或错误': 'Search path, status, or error',
+  '界面主题：跟随系统': 'Interface theme: follow system',
+  '界面主题：夜间模式': 'Interface theme: dark mode',
+  '界面主题：日间模式': 'Interface theme: light mode',
+  '真实数据 · 已连接': 'Live data · connected',
+  '运行中': 'Running',
+  '启用中': 'Enabled',
+  '已停用': 'Disabled',
+  '默认': 'Default',
+  '本页摘要': 'Summaries on this page',
+  '个连接': ' connections',
+  '个目录': ' directories',
+  '个会话': ' conversations',
+  '个公开定义': ' public definitions',
+  '尚未配置工具连接。': 'No tool connections are configured.',
+  '暂无会话摘要。': 'No conversation summaries.',
+  '没有阻塞提醒': 'No blocking alerts',
+  '工具连接、工作区、授权和服务器配置当前没有明显阻塞项。': 'Tool connections, workspaces, authorization, and server configuration have no obvious blockers.',
+  '查看系统状态': 'View system status',
+  '检查默认工作区': 'Check default workspace',
+  '当前没有启用且可作为默认项的工作区。': 'There is no enabled workspace available as the default.',
+  '查看工作区': 'View workspaces',
+  'OAuth Client 配置': 'OAuth client configuration',
+  '尚未配置工具连接': 'No tool connections configured',
+  '添加上游 MCP 后才能通过工具网关提供能力。': 'Add an upstream MCP server before the tool gateway can provide capabilities.',
+  '添加连接': 'Add connection',
+  '需要重启服务': 'Service restart required',
+  '工具网关或服务器设置已保存，但当前运行时仍可能使用旧快照。': 'Tool gateway or server settings were saved, but the current runtime may still use the old snapshot.',
+  '项等待生效': ' items pending',
+  '工具网关或服务器设置需要新建运行时或服务重启。': 'Tool gateway or server settings require a new runtime or service restart.',
+  '当前筛选条件没有日志。': 'No logs match the current filters.',
 });
 
 const FRAGMENTS = Object.freeze([
+  ['连接正常', 'Connected'],
+  ['运行时工具', 'Runtime tools'],
+  ['本页摘要', 'summaries on this page'],
+  ['本地命令', 'Local command'],
+  ['数据已刷新', 'data refreshed'],
+  ['启用中', 'enabled'],
+  ['已停用', 'disabled'],
+  ['缺少', 'missing'],
+  ['正常', 'healthy'],
+  ['默认', 'default'],
+  ['启用', 'enabled'],
   ['还有未保存的编辑，确认', 'There are unsaved edits. Confirm '],
   ['确认删除', 'Confirm deletion of '],
   ['确认清空', 'Confirm clearing '],
@@ -626,6 +815,7 @@ const FRAGMENTS = Object.freeze([
 const originalText = new WeakMap();
 const originalAttributes = new WeakMap();
 let currentLocale = DEFAULT_LOCALE;
+let localePreference = 'system';
 let observer = null;
 
 export function normalizeLocale(locale) {
@@ -644,6 +834,12 @@ export function translateText(value, locale = currentLocale) {
   let translated = EN_MESSAGES[source];
   if (!translated) {
     const patterns = [
+      [/^(\d+) 个启用$/, (_, count) => `${count} enabled`],
+      [/^(\d+) 启用中$/, (_, count) => `${count} enabled`],
+      [/^(\d+) 已停用$/, (_, count) => `${count} disabled`],
+      [/^(\d+) 默认$/, (_, count) => `${count} default`],
+      [/^(\d+) 本页摘要$/, (_, count) => `${count} summaries on this page`],
+      [/^(\d+) 个启用 Client 缺少 Workspace allowlist。$/, (_, count) => `${count} enabled clients are missing a Workspace allowlist.`],
       [/^(\d+) 个项目$/, (_, count) => `${count} projects`],
       [/^(\d+) 个候选$/, (_, count) => `${count} candidates`],
       [/^(\d+) 个$/, (_, count) => `${count} items`],
@@ -755,7 +951,19 @@ function applyTranslations(root = document.documentElement) {
   elementRoot.querySelectorAll?.('[placeholder], [title], [aria-label]').forEach(translateAttributes);
 }
 
-function updateToggles() {
+function detectLocale() {
+  const languages = Array.isArray(globalThis.navigator?.languages) && globalThis.navigator.languages.length
+    ? globalThis.navigator.languages
+    : [globalThis.navigator?.language || DEFAULT_LOCALE];
+  for (const language of languages) {
+    const value = String(language || '').toLowerCase();
+    if (value.startsWith('en')) return 'en';
+    if (value.startsWith('zh')) return 'zh-CN';
+  }
+  return DEFAULT_LOCALE;
+}
+
+function updateLanguageControls() {
   document.querySelectorAll('[data-language-toggle]').forEach((button) => {
     const switchingToEnglish = currentLocale === 'zh-CN';
     const label = button.querySelector('[data-locale-label]');
@@ -769,6 +977,13 @@ function updateToggles() {
       button.setAttribute('title', accessibleLabel);
     }
   });
+  document.querySelectorAll('[data-language-select]').forEach((select) => {
+    if (select.value !== localePreference) select.value = localePreference;
+    const label = currentLocale === 'en' ? 'Interface language' : '界面语言';
+    if (select.getAttribute('aria-label') !== label) select.setAttribute('aria-label', label);
+    const picker = select.closest('.locale-picker');
+    if (picker && picker.getAttribute('title') !== label) picker.setAttribute('title', label);
+  });
 }
 
 export function setLocale(locale) {
@@ -776,19 +991,31 @@ export function setLocale(locale) {
   document.documentElement.lang = currentLocale;
   document.documentElement.dataset.locale = currentLocale;
   applyTranslations(document);
-  updateToggles();
-  document.dispatchEvent(new CustomEvent('localechange', { detail: { locale: currentLocale } }));
+  updateLanguageControls();
+  document.dispatchEvent(new CustomEvent('localechange', { detail: { locale: currentLocale, preference: localePreference } }));
   return currentLocale;
 }
 
 function initialLocale() {
-  return normalizeLocale(globalThis.navigator?.language || DEFAULT_LOCALE);
+  return detectLocale();
+}
+
+export function setLocalePreference(preference, persist = true) {
+  localePreference = ['system', 'zh-CN', 'en'].includes(preference) ? preference : 'system';
+  document.documentElement.dataset.localePreference = localePreference;
+  return setLocale(localePreference === 'system' ? detectLocale() : localePreference);
 }
 
 export function initI18n() {
   if (typeof document === 'undefined') return DEFAULT_LOCALE;
   document.querySelectorAll('[data-language-toggle]').forEach((button) => {
     button.addEventListener('click', () => setLocale(currentLocale === 'zh-CN' ? 'en' : 'zh-CN'));
+  });
+  document.querySelectorAll('[data-language-select]').forEach((select) => {
+    select.addEventListener('change', () => setLocalePreference(select.value));
+  });
+  globalThis.addEventListener?.('languagechange', () => {
+    if (localePreference === 'system') setLocale(detectLocale());
   });
   if (!observer) {
     observer = new MutationObserver((mutations) => {
@@ -797,7 +1024,7 @@ export function initI18n() {
         mutation.addedNodes.forEach((node) => applyTranslations(node));
         if (mutation.type === 'attributes') translateAttributes(mutation.target);
       }
-      updateToggles();
+      updateLanguageControls();
     });
     observer.observe(document.documentElement, {
       childList: true,
@@ -807,7 +1034,7 @@ export function initI18n() {
       attributeFilter: ['placeholder', 'title', 'aria-label'],
     });
   }
-  return setLocale(initialLocale());
+  return setLocalePreference(localePreference, false);
 }
 
 globalThis.McpI18n = Object.freeze({
@@ -816,5 +1043,8 @@ globalThis.McpI18n = Object.freeze({
   translateText,
   getLocale,
   setLocale,
+  getPreference: () => localePreference,
+  setLocalePreference,
+  detectLocale,
   initI18n,
 });

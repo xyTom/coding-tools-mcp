@@ -4,198 +4,139 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <title>Coding Tools MCP Admin</title>
+  <meta name="theme-color" content="#f4f7fb">
+  <title>Coding Tools MCP · 管理控制台</title>
   <link rel="stylesheet" href="./admin.css">
 </head>
 <body>
-  <a class="skip-link" href="#mainContent">跳到主要内容</a>
-  <header class="topbar">
-    <div class="brand-lockup">
-      <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 7.5 12 4l5 3.5v5L12 16l-5-3.5z"/><path d="m7 12.5-3 2v4L8 21l4-2.5V16m5-3.5 3 2v4L16 21l-4-2.5"/></svg></div>
-      <div>
-        <p class="eyebrow">coding-tools-mcp</p>
-        <h1>MCP 管理台</h1>
-      </div>
-    </div>
-    <div class="topbar-actions">
-      <button class="secondary language-toggle" type="button" data-language-toggle data-i18n-skip aria-label="Switch to English" title="Switch to English"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.7 5.5 3.7 9S14.4 18.5 12 21c-2.4-2.5-3.7-5.5-3.7-9S9.6 5.5 12 3z"/></svg><span data-locale-label>EN</span></button>
-      <form id="authForm" class="auth-form" autocomplete="off">
-      <div>
-        <label for="adminToken">本次页面使用的 Admin token</label>
-        <div class="password-input-row">
-          <input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required>
-          <button id="adminTokenToggle" type="button" class="secondary password-toggle" data-password-toggle data-password-target="adminToken" aria-controls="adminToken" aria-pressed="false" aria-label="显示密码">显示</button>
-        </div>
-        <p id="adminTokenHelp" class="help">仅保存在当前页面内存中；不会写入 URL、浏览器持久化存储、日志或服务器设置。</p>
-       </div>
-       <button type="submit">连接</button>
-      </form>
-      <div id="authConnected" class="auth-connected" hidden>
-        <span class="badge good">已连接</span>
-        <button id="forgetToken" type="button" class="secondary">退出</button>
-      </div>
-    </div>
-  </header>
+  <svg class="svg-sprite" aria-hidden="true">
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M7 7.5 12 4l5 3.5v5L12 16l-5-3.5z"/><path d="m7 12.5-3 2v4L8 21l4-2.5V16m5-3.5 3 2v4L16 21l-4-2.5"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10M9 20v-6h6v6"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M8 3v5M16 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6.5h7l2 2h9v10.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-message" viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.1-2.1-1.9.9-1.7-.7L10.5 2h-3l-.7 2.3-1.7.7-1.9-.9L1.1 6.2l.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.9-.9 1.7.7.7 2.3h3l.7-2.3 1.7-.7 1.9.9 2.1-2.1-.9-1.9.7-1.7z" transform="translate(2 0) scale(.83)"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-1a6 6 0 0 1 12 0v1M16 5a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5v1"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M16 7l2 2M14 9l2 2"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M6.1 8A7 7 0 0 1 19 11M17.9 16A7 7 0 0 1 5 13"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.7 5.5 3.7 9S14.4 18.5 12 21c-2.4-2.5-3.7-5.5-3.7-9S9.6 5.5 12 3z"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-file-text" viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5M9 12h6M9 16h6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  </svg>
 
-  <div class="layout">
-    <nav aria-label="Admin 页面" class="sidebar">
-      <button class="nav-item active" data-section="overview" type="button" aria-current="page">概览</button>
-      <button class="nav-item" data-section="settings" type="button">设置</button>
-      <button class="nav-item" data-section="workspaces" type="button">Workspace</button>
-      <button class="nav-item" data-section="gateway" type="button">Gateway</button>
-      <button class="nav-item" data-section="oauth" type="button">OAuth</button>
-      <button class="nav-item" data-section="secrets" type="button">Secret Vault</button>
-      <button class="nav-item" data-section="chat" type="button">Conversations</button>
+  <a class="skip-link" href="#mainContent">跳到主要内容</a>
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="#overview" data-open-section="overview" aria-label="Coding Tools MCP 管理控制台首页"><span class="brand-mark"><svg class="icon"><use href="#i-logo"></use></svg></span><span><strong>Coding Tools MCP</strong><small>管理控制台</small></span></a>
+    <nav class="primary-nav" aria-label="主要导航">
+      <button class="nav-item active" type="button" data-section="overview" aria-current="page"><svg class="icon"><use href="#i-home"></use></svg><span>概览</span></button>
+      <button class="nav-item" type="button" data-section="gateway"><svg class="icon"><use href="#i-plug"></use></svg><span>工具连接</span><span class="nav-count" id="navConnectionCount">—</span></button>
+      <button class="nav-item" type="button" data-section="workspaces"><svg class="icon"><use href="#i-folder"></use></svg><span>工作区</span><span class="nav-count" id="navWorkspaceCount">—</span></button>
+      <button class="nav-item" type="button" data-section="chat"><svg class="icon"><use href="#i-message"></use></svg><span>聊天会话</span></button>
+      <button class="nav-item" type="button" data-section="settings"><svg class="icon"><use href="#i-settings"></use></svg><span>服务器设置</span></button>
+      <button class="nav-item" type="button" data-section="oauth"><svg class="icon"><use href="#i-users"></use></svg><span>授权管理</span></button>
+      <button class="nav-item" type="button" data-section="secrets"><svg class="icon"><use href="#i-key"></use></svg><span>凭据保险箱</span></button>
+      <button class="nav-item" type="button" data-section="system"><svg class="icon"><use href="#i-activity"></use></svg><span>系统状态</span></button>
     </nav>
+    <div class="sidebar-spacer"></div>
+    <section class="mode-panel" aria-labelledby="modePanelTitle"><div class="mode-panel-head"><span id="modePanelTitle">当前暴露策略</span><span class="status-dot good"></span></div><strong id="sidebarMode">代理模式</strong><p>只直接暴露固定工具与置顶工具，其余能力通过目录搜索按需调用。</p><button class="button ghost full" type="button" data-open-section="gateway">查看模式说明</button></section>
+    <footer class="sidebar-footer"><span>MCP 管理接口</span><small>安全管理入口</small></footer>
+  </aside>
+  <button class="sidebar-backdrop" id="sidebarBackdrop" type="button" aria-label="关闭导航"></button>
+
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar-title"><button class="icon-button menu-button" id="menuButton" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="打开导航"><svg class="icon"><use href="#i-menu"></use></svg></button><div><strong id="pageTitle">概览</strong><span id="pageSubtitle">运行状态与运维提醒</span></div></div>
+      <div class="topbar-actions">
+        <label class="locale-picker" id="localePicker" title="界面语言"><svg class="icon icon-sm" aria-hidden="true"><use href="#i-globe"></use></svg><select id="localeSelect" data-language-select aria-label="界面语言"><option value="system">跟随系统</option><option value="zh-CN">中文</option><option value="en">English</option></select></label>
+        <label class="theme-picker" id="themePicker" title="界面主题"><svg class="icon icon-sm" id="themePickerIcon" aria-hidden="true"><use href="#i-monitor"></use></svg><select id="themeSelect" aria-label="界面主题"><option value="system">跟随系统</option><option value="light">日间模式</option><option value="dark">夜间模式</option></select></label>
+        <span class="environment-pill"><span class="status-dot warning" id="environmentDot"></span><span id="environmentLabel">未连接</span></span>
+        <button class="icon-button" id="refreshCurrent" type="button" aria-label="刷新当前页面" title="刷新"><svg class="icon"><use href="#i-refresh"></use></svg></button>
+        <button class="button secondary compact" id="openAuthDialog" type="button"><svg class="icon icon-sm"><use href="#i-plug"></use></svg><span>连接管理接口</span></button>
+        <div id="authConnected" class="auth-connected" hidden><span class="badge good">已连接</span><button id="forgetToken" type="button" class="button secondary compact">退出</button></div>
+      </div>
+    </header>
 
     <main id="mainContent" tabindex="-1">
       <div id="globalStatus" class="status" role="status" aria-live="polite">输入专用 Admin token 后连接。</div>
 
       <section id="section-overview" class="page-section active" aria-labelledby="overviewTitle">
-        <div class="section-heading"><div><p class="eyebrow">Runtime</p><h2 id="overviewTitle">概览</h2></div><button id="refreshAll" type="button" class="secondary">刷新</button></div>
-        <div class="card-grid">
-          <article class="card"><h3>Admin API</h3><strong id="adminApiStatus">未连接</strong><p class="muted">普通 MCP bearer 不具备管理员权限。</p></article>
-          <article class="card"><h3>Gateway</h3><strong id="gatewayRuntimeStatus">未连接</strong><p class="muted">工具快照在 Runtime 初始化时冻结，不支持热 reload。</p></article>
-          <article class="card"><h3>Telemetry</h3><strong id="telemetryStatus">未报告</strong><p id="telemetryDetail" class="muted"></p><p id="telemetryDisableHelp" class="help"></p></article>
-          <article class="card"><h3>Vault</h3><strong id="vaultStatus">未连接</strong><p class="muted">页面从不读取或显示 Secret 值。</p></article>
+        <div class="welcome-row"><div><h1 id="overviewTitle">欢迎回来</h1><p>先处理影响运行的事项，再进入具体管理页面。</p></div><div class="runtime-summary" aria-label="服务摘要"><div><span>服务状态</span><strong id="overviewRuntimeStatus">未连接</strong></div><div><span>权限模式</span><strong id="overviewPermissionMode">—</strong></div><div><span>管理接口</span><strong class="mono">/admin/api</strong></div></div></div>
+        <article class="panel operations-panel"><div class="panel-heading"><div><h2>运维提醒</h2><p>汇总需要管理员关注的配置、权限和运行状态。</p></div><button class="text-button" type="button" data-open-section="system">查看全部提醒<svg class="icon icon-sm"><use href="#i-chevron"></use></svg></button></div><div class="task-grid" id="operationsAlerts"><div class="empty-state compact-empty"><span><svg class="icon"><use href="#i-activity"></use></svg></span><p>连接后生成真实运维提醒。</p></div></div></article>
+        <div class="metric-grid" id="overviewMetrics"></div>
+        <div class="overview-grid">
+          <article class="panel connection-summary-panel"><div class="panel-heading"><div><h2>工具连接状态</h2><p>持久化配置与下一次运行时的启用状态。</p></div><button class="text-button" type="button" data-open-section="gateway">查看全部</button></div><div id="overviewGateway" class="compact-list"></div></article>
+          <article class="panel recent-panel"><div class="panel-heading"><div><h2>最近会话</h2><p>只展示摘要；选择后才读取正文。</p></div><button class="text-button" type="button" data-open-section="chat">查看全部</button></div><div id="overviewConversations" class="compact-list"></div></article>
+          <article class="panel status-panel"><div class="panel-heading"><div><h2>系统状态</h2><p>管理接口、工具网关、凭据保险箱与配置版本。</p></div><button class="text-button" type="button" data-open-section="system">查看详情</button></div><div id="overviewSystem" class="status-list"></div></article>
+          <article class="panel quick-panel"><div class="panel-heading"><div><h2>快速操作</h2><p>直接进入最常用的管理流程。</p></div></div><div class="quick-action-grid"><button type="button" data-open-section="gateway"><span class="quick-icon"><svg class="icon"><use href="#i-plus"></use></svg></span><span><strong>添加工具连接</strong><small>配置本地命令或远程 MCP</small></span></button><button type="button" data-open-section="workspaces"><span class="quick-icon"><svg class="icon"><use href="#i-folder"></use></svg></span><span><strong>添加工作区</strong><small>明确文件访问边界</small></span></button><button type="button" data-open-section="oauth"><span class="quick-icon"><svg class="icon"><use href="#i-users"></use></svg></span><span><strong>配置授权</strong><small>客户端、授权记录与工作区</small></span></button><button type="button" data-open-section="settings"><span class="quick-icon"><svg class="icon"><use href="#i-settings"></use></svg></span><span><strong>服务器设置</strong><small>带版本校验的保存</small></span></button></div></article>
         </div>
-      </section>
-
-      <section id="section-settings" class="page-section" aria-labelledby="settingsTitle" hidden>
-        <div class="section-heading"><div><p class="eyebrow">Revision-aware</p><h2 id="settingsTitle">服务器设置</h2></div><div class="button-row"><button id="reloadSettings" type="button" class="secondary">重新读取</button><button id="saveSettings" type="button">保存草稿</button></div></div>
-        <div id="settingsConflict" class="alert warning" role="alert" tabindex="-1" hidden></div>
-        <div id="settingsError" class="alert danger" role="alert" tabindex="-1" hidden></div>
-        <form id="settingsForm" class="card form-grid" novalidate>
-          <div><label for="settingsHost">Host</label><input id="settingsHost" aria-describedby="settingsHostHelp"><p id="settingsHostHelp" class="help">修改后需重启。</p></div>
-          <div><label for="settingsPort">Port</label><input id="settingsPort" type="number" min="1" max="65535" aria-describedby="settingsPortHelp"><p id="settingsPortHelp" class="help">1–65535，修改后需重启。</p></div>
-          <div><label for="settingsPermission">Permission mode</label><select id="settingsPermission" aria-describedby="permissionHelp"><option value="safe">safe</option><option value="trusted">trusted</option><option value="dangerous">dangerous</option></select><p id="permissionHelp" class="help"></p></div>
-          <div><label for="settingsShellEnv">Shell 环境继承</label><select id="settingsShellEnv"><option value="core">core</option><option value="all">all</option><option value="none">none</option></select></div>
-          <div class="full"><label for="settingsOauthServerUrl">OAuth server URL</label><input id="settingsOauthServerUrl" type="url" placeholder="https://mcp.example"></div>
-          <div class="full"><label for="settingsAllowedOrigins">Allowed origins（每行一个）</label><textarea id="settingsAllowedOrigins" rows="4"></textarea></div>
-          <label class="checkline full" for="settingsOauthCompatibility"><input id="settingsOauthCompatibility" type="checkbox"> OAuth compatibility mode（旧客户端使用受追踪的长效 access token）</label>
-        </form>
-        <details class="card danger-zone">
-          <summary>高级危险兼容设置</summary>
-          <h3 id="fakeReadonlyLabel"></h3>
-          <p id="fakeReadonlyWarning" class="alert danger"></p>
-          <p id="fakeReadonlyEnable" class="help"></p>
-          <p>当前状态：<strong id="fakeReadonlyStatus">未报告</strong></p>
-        </details>
-        <div class="card-grid">
-          <article class="card"><h3>Active</h3><pre id="settingsActiveJson" class="code-block"></pre></article>
-          <article class="card"><h3>Persisted</h3><pre id="settingsPersistedJson" class="code-block"></pre></article>
-          <article class="card"><h3>Pending restart</h3><ul id="settingsPending"></ul><p>Revision：<code id="settingsRevision">—</code></p></article>
-        </div>
-      </section>
-
-      <section id="section-workspaces" class="page-section" aria-labelledby="workspacesTitle" hidden>
-        <div class="section-heading"><div><p class="eyebrow">Catalog</p><h2 id="workspacesTitle">Workspace</h2></div><button id="reloadWorkspaces" type="button" class="secondary">刷新</button></div>
-        <div id="workspaceList" class="card-grid"></div>
-        <form id="workspaceAddForm" class="card form-grid" novalidate>
-          <h3 class="full">新增 Workspace</h3>
-          <div><label for="workspaceId">ID</label><input id="workspaceId" required></div>
-          <div><label for="workspaceName">名称</label><input id="workspaceName" required></div>
-          <div class="full"><label for="workspaceRoot">Root</label><input id="workspaceRoot" required></div>
-          <label class="checkline"><input id="workspaceEnabled" type="checkbox" checked> 启用</label>
-          <label class="checkline"><input id="workspaceDefault" type="checkbox"> 设为唯一默认 Workspace</label>
-          <div class="full"><button type="submit">添加</button></div>
-        </form>
       </section>
 
       <section id="section-gateway" class="page-section" aria-labelledby="gatewayTitle" hidden>
-        <div class="section-heading"><div><p class="eyebrow">重启后生效</p><h2 id="gatewayTitle">MCP 工具连接</h2><p class="muted">用表单添加和管理上游 MCP；所有变更仅影响新建 MCP 会话或服务重启后的 Runtime。</p></div><div class="button-row"><button id="newGatewayForm" type="button" class="secondary">新增连接</button><button id="reloadGateway" type="button" class="secondary">刷新</button></div></div>
-        <div class="card-grid">
-          <article class="card"><h3>生效状态</h3><p>需要重启：<strong id="gatewayRestartRequired">—</strong></p><p>配置版本：<code id="gatewayRevision">—</code></p><p class="muted">不会热启动、停止或重载当前 Runtime，也不会发送工具列表变更通知。</p></article>
-          <article class="card"><h3>当前 Runtime 工具分布</h3><div id="gatewayExposureReport"></div></article>
-          <article class="card"><h3>凭据安全策略</h3><label for="gatewayCredentialPolicy">策略</label><select id="gatewayCredentialPolicy"><option value="local">本地 MCP 模式（推荐个人使用）</option><option value="strict">严格安全模式</option></select><button id="saveGatewayCredentialPolicy" type="button" class="secondary">保存策略</button><div id="gatewayCredentialSources"></div></article>
+        <div class="page-heading"><div><h1 id="gatewayTitle">工具连接</h1><p>管理上游 MCP 配置。启用、禁用和删除只影响下一次运行时或服务重启。</p></div><div class="button-row"><button id="reloadGateway" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>刷新</button><button id="newGatewayForm" type="button" class="button primary"><svg class="icon icon-sm"><use href="#i-plus"></use></svg>新增连接</button></div></div>
+        <div class="alert warning restart-strip"><svg class="icon"><use href="#i-alert"></use></svg><div><strong>工具网关配置可能需要重启后生效</strong><p>当前运行时的工具快照不会热重载；以接口返回的 restart_required 为准。</p></div><button class="button secondary compact" type="button" data-open-section="system">查看影响</button></div>
+        <div class="summary-grid three"><article class="summary-card"><span>需要重启</span><strong id="gatewayRestartRequired">—</strong><small>当前运行时不会被热修改</small></article><article class="summary-card"><span>配置版本</span><strong class="mono" id="gatewayRevision">—</strong><small>写入必须携带最新版本</small></article><article class="summary-card"><span>暴露策略</span><div id="gatewayExposureReport"></div></article></div>
+        <article class="panel"><div class="panel-heading"><div><h2>工具连接</h2><p>Broker 模式只直接暴露固定工具和置顶工具；Direct 模式直接暴露过滤后的完整工具集合。</p></div></div><div id="gatewaySummary" class="card-grid"></div></article>
+        <div class="detail-grid">
+          <form id="gatewayServerForm" class="panel form-grid" novalidate><div class="full panel-heading"><div><h2 id="gatewayServerFormTitle">新增 MCP 连接</h2><p>表单保留隐藏凭据；保存后新建运行时或重启服务才生效。</p></div></div><div><label for="gatewayAlias">连接别名</label><input id="gatewayAlias" required pattern="[A-Za-z0-9_-]{1,64}" aria-describedby="gatewayAliasHelp"><p id="gatewayAliasHelp" class="help">1–64 位字母、数字、下划线或连字符；保存后不可直接改名。</p></div><div><label for="gatewayTransport">连接方式</label><select id="gatewayTransport"><option value="stdio">本地命令（stdio）</option><option value="streamable_http">远程网址（Streamable HTTP）</option></select></div><div class="full" data-gateway-stdio><label for="gatewayCommand">启动命令</label><input id="gatewayCommand" placeholder="npx 或 uvx"></div><div class="full" data-gateway-stdio><label for="gatewayArgs">启动参数（每行一个）</label><textarea id="gatewayArgs" rows="4" placeholder="-y&#10;@modelcontextprotocol/server-filesystem"></textarea></div><div class="full" data-gateway-stdio><label for="gatewayEnvironment">环境变量（每行 KEY=value）</label><textarea id="gatewayEnvironment" rows="4" aria-describedby="gatewayEnvironmentHelp"></textarea><p id="gatewayEnvironmentHelp" class="help">可直接填写值，也可使用 <code>secret:Vault名称</code> 或 <code>env:变量名</code>；敏感项读取时会遮蔽。</p><p id="gatewayCredentialNotice" class="help"></p></div><div class="full" data-gateway-http hidden><label for="gatewayUrl">服务地址</label><input id="gatewayUrl" type="url" placeholder="https://example.com/mcp"></div><div data-gateway-http hidden><label for="gatewayAuthorizationEnv">Authorization 环境变量名（可选）</label><input id="gatewayAuthorizationEnv" placeholder="MCP_AUTH_TOKEN"></div><div><label for="gatewayExposeMode">工具暴露方式</label><select id="gatewayExposeMode"><option value="broker">Broker（推荐）</option><option value="direct">Direct</option></select></div><div><label for="gatewayTimeout">等待时间（毫秒）</label><input id="gatewayTimeout" type="number" min="1" value="30000"></div><div><label for="gatewayPinnedTools">Broker 置顶工具（每行一个）</label><textarea id="gatewayPinnedTools" rows="4"></textarea></div><div><label for="gatewayIncludeTools">只包含这些工具（每行一个）</label><textarea id="gatewayIncludeTools" rows="4"></textarea></div><div><label for="gatewayExcludeTools">排除这些工具（每行一个）</label><textarea id="gatewayExcludeTools" rows="4"></textarea></div><div><label for="gatewayTags">搜索标签（每行一个）</label><textarea id="gatewayTags" rows="4"></textarea></div><label class="checkline full"><input id="gatewayEnabled" type="checkbox" checked> 下次启动或新建 Runtime 时启用</label><p id="gatewayFormError" class="alert danger full" role="alert" hidden></p><div class="button-row full"><button type="submit" class="button primary">保存连接</button><button id="cancelGatewayEdit" type="button" class="button secondary">取消编辑</button></div></form>
+          <aside class="settings-side"><article class="panel"><div class="panel-heading"><div><h2>凭据策略</h2><p>页面读取时遮蔽敏感值，表单编辑会保留隐藏字段。</p></div></div><label for="gatewayCredentialPolicy">策略</label><select id="gatewayCredentialPolicy"><option value="local">本地 MCP 模式</option><option value="strict">严格安全模式</option></select><button id="saveGatewayCredentialPolicy" type="button" class="button secondary">保存策略</button><div id="gatewayCredentialSources" class="muted"></div></article><article class="panel"><div class="panel-heading"><div><h2>代理模式与直连模式</h2><p>暴露方式只改变客户端看到的工具目录。</p></div></div><p><strong>代理模式</strong>：固定工具与置顶工具直接可见，其余按需搜索。</p><p><strong>直连模式</strong>：过滤后的完整工具集合直接可见。</p></article></aside>
         </div>
-        <div id="gatewaySummary" class="card-grid" aria-live="polite"></div>
-
-        <form id="gatewayServerForm" class="card form-grid" novalidate>
-          <div class="full section-heading"><div><h3 id="gatewayServerFormTitle">新增 MCP 连接</h3><p class="muted">Broker 模式只直接暴露固定工具和置顶工具；Direct 模式会直接暴露过滤后的全部工具。</p></div></div>
-          <div><label for="gatewayAlias">连接别名</label><input id="gatewayAlias" required pattern="[A-Za-z0-9_-]{1,64}" aria-describedby="gatewayAliasHelp"><p id="gatewayAliasHelp" class="help">1–64 位字母、数字、下划线或连字符；保存后不可直接改名。</p></div>
-          <div><label for="gatewayTransport">连接方式</label><select id="gatewayTransport"><option value="stdio">本地命令（stdio）</option><option value="streamable_http">远程网址（Streamable HTTP）</option></select></div>
-          <div class="full" data-gateway-stdio><label for="gatewayCommand">启动命令</label><input id="gatewayCommand" placeholder="npx 或 uvx"></div>
-          <div class="full" data-gateway-stdio><label for="gatewayArgs">启动参数（每行一个）</label><textarea id="gatewayArgs" rows="4" placeholder="-y&#10;@modelcontextprotocol/server-filesystem"></textarea></div>
-          <div class="full" data-gateway-stdio><label for="gatewayEnvironment">环境变量（每行 KEY=value）</label><textarea id="gatewayEnvironment" rows="4" placeholder="TDMS_USERNAME=user@example.com&#10;TDMS_PASSWORD=your-password&#10;CACHE_DIR=C:\\data" aria-describedby="gatewayEnvironmentHelp"></textarea><p id="gatewayEnvironmentHelp" class="help">可像普通 MCP 配置一样直接填写值；管理台读取时会遮蔽密码、Token 等敏感项并在后续编辑中保留。也可选用 <code>secret:Vault名称</code> 或 <code>env:变量名</code>。</p><p id="gatewayCredentialNotice" class="help"></p></div>
-          <div class="full" data-gateway-http hidden><label for="gatewayUrl">服务地址</label><input id="gatewayUrl" type="url" placeholder="https://example.com/mcp"></div>
-          <div data-gateway-http hidden><label for="gatewayAuthorizationEnv">Authorization 环境变量名（可选）</label><input id="gatewayAuthorizationEnv" placeholder="MCP_AUTH_TOKEN"></div>
-          <div><label for="gatewayExposeMode">工具暴露方式</label><select id="gatewayExposeMode"><option value="broker">Broker（推荐，按需搜索调用）</option><option value="direct">Direct（全部直接列出）</option></select></div>
-          <div><label for="gatewayTimeout">等待时间（毫秒）</label><input id="gatewayTimeout" type="number" min="1" value="30000"></div>
-          <div><label for="gatewayPinnedTools">Broker 置顶工具（每行一个）</label><textarea id="gatewayPinnedTools" rows="4"></textarea></div>
-          <div><label for="gatewayIncludeTools">只包含这些工具（每行一个）</label><textarea id="gatewayIncludeTools" rows="4"></textarea></div>
-          <div><label for="gatewayExcludeTools">排除这些工具（每行一个）</label><textarea id="gatewayExcludeTools" rows="4"></textarea></div>
-          <div><label for="gatewayTags">搜索标签（每行一个）</label><textarea id="gatewayTags" rows="4"></textarea></div>
-          <label class="checkline full"><input id="gatewayEnabled" type="checkbox" checked> 下次启动或新建 Runtime 时启用</label>
-          <p id="gatewayFormError" class="alert danger full" role="alert" hidden></p>
-          <div class="button-row full"><button type="submit">保存连接</button><button id="cancelGatewayEdit" type="button" class="secondary">取消编辑</button></div>
-        </form>
-
-        <details id="gatewayAdvanced" class="card">
-          <summary>高级选项：整份配置 JSON</summary>
-          <form id="gatewayForm" class="stack" novalidate>
-            <p class="muted">用于诊断或批量替换不含凭据的配置。普通新增、编辑、启用和删除请使用上方表单与连接卡片。</p>
-            <div class="section-heading"><div><h3>整份配置 JSON</h3><p class="muted">示例默认使用 Broker 模式。</p></div><button id="newGatewayServer" type="button" class="secondary">载入 Broker 示例</button></div>
-            <label for="gatewayDocument">替换配置 JSON（仅限不含凭据的配置）</label>
-            <textarea id="gatewayDocument" rows="14" placeholder='{"servers":{}}' aria-describedby="gatewayHelp gatewayPreviewHelp"></textarea>
-            <p id="gatewayHelp" class="help">不会预填或显示任何上游凭据、摘要值或内部引用。含凭据的现有配置请使用表单逐项修改，以便保留隐藏字段。</p>
-            <div class="card" aria-live="polite"><h3>工具暴露预览</h3><p id="gatewayPreviewHelp" class="help">按当前 Runtime 已发现的公开工具预览 Direct、置顶与仅 Broker 可见的差异；保存不会改变当前 Runtime。</p><div id="gatewayExposurePreview"></div></div>
-            <div class="button-row"><button type="submit">替换配置并标记重启</button><button id="clearGatewayDraft" type="button" class="secondary">清空草稿</button></div>
-          </form>
-        </details>
+        <details id="gatewayAdvanced" class="panel advanced-panel"><summary>高级选项：整份配置 JSON</summary><form id="gatewayForm" class="stack" novalidate><p class="muted">用于诊断或批量替换不含凭据的配置。普通管理请使用上方表单。</p><div class="panel-heading"><div><h2>整份配置 JSON</h2><p>示例默认使用 Broker 模式。</p></div><button id="newGatewayServer" type="button" class="button secondary">载入 Broker 示例</button></div><label for="gatewayDocument">替换配置 JSON（仅限不含凭据的配置）</label><textarea id="gatewayDocument" rows="14" placeholder='{"servers":{}}' aria-describedby="gatewayHelp gatewayPreviewHelp"></textarea><p id="gatewayHelp" class="help">不会预填或显示任何上游凭据、摘要值或内部引用。</p><div class="panel inset-panel" aria-live="polite"><h3>工具暴露预览</h3><p id="gatewayPreviewHelp" class="help">按当前运行时已发现的公开工具预览差异；保存不会改变当前运行时。</p><div id="gatewayExposurePreview"></div></div><div class="button-row"><button type="submit" class="button primary">替换配置并标记重启</button><button id="clearGatewayDraft" type="button" class="button secondary">清空草稿</button></div></form></details>
       </section>
 
-      <section id="section-oauth" class="page-section" aria-labelledby="oauthTitle" hidden>
-        <div class="section-heading"><div><p class="eyebrow">Redacted</p><h2 id="oauthTitle">OAuth 管理</h2></div><button id="reloadOAuth" type="button" class="secondary">刷新</button></div>
-        <div class="toolbar"><label for="oauthCollection">资源</label><select id="oauthCollection"><option value="clients">Clients</option><option value="grants">Grants</option><option value="tokens">Access Token metadata</option><option value="refresh-families">Refresh Families</option><option value="signing-keys">Signing Keys</option><option value="audit">Audit Events</option></select></div>
-        <p class="help">页面只显示脱敏元数据，不显示任何凭据、摘要值或内部引用。Client 可设置立即生效的专属 Authorize 密码；未设置时使用全局密码。</p>
-        <div id="oauthList" class="stack"></div>
-      </section>
-
-      <section id="section-secrets" class="page-section" aria-labelledby="secretsTitle" hidden>
-        <div class="section-heading"><div><p class="eyebrow">Names only</p><h2 id="secretsTitle">Secret Vault</h2></div><button id="reloadSecrets" type="button" class="secondary">刷新</button></div>
-        <div id="secretList" class="stack"></div>
-        <form id="secretForm" class="card form-grid" autocomplete="off">
-          <div><label for="secretName">Secret 名称</label><input id="secretName" autocomplete="off" placeholder="例如 oauth/authorization-password" required></div>
-          <div><label for="secretValue">新值</label><div class="password-input-row"><input id="secretValue" type="password" autocomplete="new-password" required><button id="secretValueToggle" type="button" class="secondary password-toggle" data-password-toggle data-password-target="secretValue" aria-controls="secretValue" aria-pressed="false" aria-label="显示密码">显示</button></div></div>
-          <p class="help full">使用名称 <code>oauth/authorization-password</code> 保存后，当前运行中的 OAuth Authorize 页面会立即采用新密码；旧密码立即失效。</p>
-          <div class="full"><button type="submit">设置或替换</button></div>
-        </form>
+      <section id="section-workspaces" class="page-section" aria-labelledby="workspacesTitle" hidden>
+        <div class="page-heading"><div><h1 id="workspacesTitle">工作区</h1><p>每个 HTTP 会话在初始化时绑定一个已校验工作区，生命周期内不可切换。</p></div><button id="reloadWorkspaces" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>刷新</button></div>
+        <div class="info-strip"><span><svg class="icon"><use href="#i-key"></use></svg></span><div><strong>工作区是文件与进程隔离边界</strong><p>当前目录、保留输出、进程表、项目指令和工具快照均按会话隔离。</p></div></div>
+        <div id="workspaceList" class="workspace-grid"></div>
+        <form id="workspaceAddForm" class="panel form-grid" novalidate><div class="full panel-heading"><div><h2>新增工作区</h2><p>新增后可检查路径、设置默认或停用。</p></div></div><div><label for="workspaceId">ID</label><input id="workspaceId" required></div><div><label for="workspaceName">名称</label><input id="workspaceName" required></div><div class="full"><label for="workspaceRoot">Root</label><input id="workspaceRoot" required></div><label class="checkline"><input id="workspaceEnabled" type="checkbox" checked> 启用</label><label class="checkline"><input id="workspaceDefault" type="checkbox"> 设为唯一默认 Workspace</label><div class="full"><button type="submit" class="button primary">添加</button></div></form>
       </section>
 
       <section id="section-chat" class="page-section" aria-labelledby="chatTitle" hidden>
-        <div class="section-heading"><div><p class="eyebrow">Summary → detail</p><h2 id="chatTitle">Conversations</h2></div><button id="reloadConversations" type="button" class="secondary">刷新摘要</button></div>
-        <div class="toolbar"><label for="chatWorkspace">Workspace</label><select id="chatWorkspace"></select><label for="chatQuery">搜索摘要</label><input id="chatQuery"><button id="searchConversations" type="button">搜索</button></div>
-        <div class="split-view">
-          <div><div id="conversationList" class="stack"></div><div class="pager"><button id="conversationPrev" type="button" class="secondary">上一页</button><span id="conversationPage">1</span><button id="conversationNext" type="button" class="secondary">下一页</button></div></div>
-          <article id="conversationDetail" class="card" aria-live="polite"><h3>按需详情</h3><p class="muted">从摘要列表选择会话后，才会调用详情分页端点读取正文。</p></article>
-        </div>
+        <div class="page-heading"><div><h1 id="chatTitle">聊天会话</h1><p>列表仅加载摘要；消息与持久化上下文只在明确选择会话后按页读取。</p></div><button id="reloadConversations" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>刷新摘要</button></div>
+        <article class="panel conversation-shell"><aside class="conversation-sidebar"><div class="conversation-filters"><label><span>工作区</span><select id="chatWorkspace"></select></label><label class="search-field"><span>搜索摘要</span><span class="input-with-icon"><svg class="icon icon-sm"><use href="#i-message"></use></svg><input id="chatQuery"></span></label><button id="searchConversations" type="button" class="button secondary compact">搜索</button></div><div id="conversationList" class="conversation-list"></div><div class="pager"><button id="conversationPrev" type="button" class="icon-button" aria-label="上一页"><svg class="icon"><use href="#i-chevron"></use></svg></button><span id="conversationPage">1</span><button id="conversationNext" type="button" class="icon-button next" aria-label="下一页"><svg class="icon"><use href="#i-chevron"></use></svg></button></div></aside><article id="conversationDetail" class="conversation-detail" aria-live="polite"><div class="empty-state"><span><svg class="icon"><use href="#i-message"></use></svg></span><h2>选择一条会话</h2><p>只有选择摘要后，才会加载消息正文和持久化上下文。</p></div></article></article>
+      </section>
+
+      <section id="section-settings" class="page-section" aria-labelledby="settingsTitle" hidden>
+        <div class="page-heading"><div><h1 id="settingsTitle">服务器设置</h1><p>保存必须携带最新 persisted revision；发生冲突时保留草稿并提示重新比较。</p></div><div class="button-row"><button id="reloadSettings" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>重新读取</button><button id="saveSettings" type="button" class="button primary"><svg class="icon icon-sm"><use href="#i-check"></use></svg>保存草稿</button></div></div>
+        <div id="settingsConflict" class="alert warning" role="alert" tabindex="-1" hidden></div><div id="settingsError" class="alert danger" role="alert" tabindex="-1" hidden></div>
+        <div class="settings-layout"><form id="settingsForm" class="panel form-grid" novalidate><div class="full panel-heading"><div><h2>网络与运行</h2><p>Host、Port 和 OAuth 公开地址修改后需要重启。</p></div></div><div><label for="settingsHost">Host</label><input id="settingsHost" aria-describedby="settingsHostHelp"><p id="settingsHostHelp" class="help">修改后需重启。</p></div><div><label for="settingsPort">Port</label><input id="settingsPort" type="number" min="1" max="65535" aria-describedby="settingsPortHelp"><p id="settingsPortHelp" class="help">1–65535，修改后需重启。</p></div><div><label for="settingsPermission">Permission mode</label><select id="settingsPermission" aria-describedby="permissionHelp"><option value="safe">safe</option><option value="trusted">trusted</option><option value="dangerous">dangerous</option></select><p id="permissionHelp" class="help"></p></div><div><label for="settingsShellEnv">Shell 环境继承</label><select id="settingsShellEnv"><option value="core">core</option><option value="all">all</option><option value="none">none</option></select></div><div class="full"><label for="settingsOauthServerUrl">OAuth server URL</label><input id="settingsOauthServerUrl" type="url" placeholder="https://mcp.example"></div><div class="full"><label for="settingsAllowedOrigins">Allowed origins（每行一个）</label><textarea id="settingsAllowedOrigins" rows="4"></textarea></div><label class="checkline full" for="settingsOauthCompatibility"><input id="settingsOauthCompatibility" type="checkbox"> OAuth compatibility mode（旧客户端使用受追踪的长效 access token）</label></form><aside class="settings-side"><article class="panel"><div class="panel-heading"><div><h2>配置版本</h2><p>Active、Persisted 与 Pending restart 分离。</p></div></div><p>Revision：<code id="settingsRevision">—</code></p><div class="pending-box"><strong>等待重启</strong><ul id="settingsPending"></ul></div></article><details class="panel danger-zone"><summary>高级危险兼容设置</summary><h3 id="fakeReadonlyLabel"></h3><p id="fakeReadonlyWarning" class="alert danger"></p><p id="fakeReadonlyEnable" class="help"></p><p>当前状态：<strong id="fakeReadonlyStatus">未报告</strong></p></details></aside></div>
+        <details class="panel advanced-panel"><summary>原始设置预览</summary><div class="detail-grid raw-settings-grid"><article class="inset-panel"><h3>Active</h3><pre id="settingsActiveJson" class="code-block"></pre></article><article class="inset-panel"><h3>Persisted</h3><pre id="settingsPersistedJson" class="code-block"></pre></article></div></details>
+      </section>
+
+      <section id="section-oauth" class="page-section" aria-labelledby="oauthTitle" hidden>
+        <div class="page-heading"><div><h1 id="oauthTitle">授权管理</h1><p>只显示脱敏元数据；客户端密码和 Workspace allowlist 更新可立即生效。</p></div><button id="reloadOAuth" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>刷新</button></div>
+        <article class="panel toolbar-panel"><div class="toolbar"><label for="oauthCollection">资源</label><select id="oauthCollection"><option value="clients">Clients</option><option value="grants">Grants</option><option value="tokens">Access Token metadata</option><option value="refresh-families">Refresh Families</option><option value="signing-keys">Signing Keys</option><option value="audit">Audit Events</option></select></div><p class="help">页面只显示脱敏元数据，不显示任何凭据、摘要值或内部引用。Client 可设置立即生效的专属 Authorize 密码；未设置时使用全局密码。</p></article><div id="oauthList" class="stack oauth-content"></div>
+      </section>
+
+      <section id="section-secrets" class="page-section" aria-labelledby="secretsTitle" hidden>
+        <div class="page-heading"><div><h1 id="secretsTitle">凭据保险箱</h1><p>页面只列出 Secret 名称和用途，不读取、显示或复制已保存的值。</p></div><button id="reloadSecrets" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>刷新</button></div>
+        <div class="vault-layout"><article class="panel"><div class="panel-heading"><div><h2>已配置名称</h2><p>OAuth、Gateway 和签名材料均通过名称引用。</p></div></div><div id="secretList" class="stack"></div></article><form id="secretForm" class="panel form-grid" autocomplete="off"><div class="full panel-heading"><div><h2>设置或替换</h2><p>提交后输入立即清空，值不会出现在响应中。</p></div></div><div><label for="secretName">Secret 名称</label><input id="secretName" autocomplete="off" placeholder="例如 oauth/authorization-password" required></div><div><label for="secretValue">新值</label><div class="password-input-row"><input id="secretValue" type="password" autocomplete="new-password" required><button id="secretValueToggle" type="button" class="icon-button password-toggle" data-password-toggle data-password-target="secretValue" aria-controls="secretValue" aria-pressed="false" aria-label="显示密码"><svg class="icon"><use href="#i-eye"></use></svg><span>显示</span></button></div></div><p class="help full">使用名称 <code>oauth/authorization-password</code> 保存后，当前运行中的 OAuth Authorize 页面会立即采用新密码；旧密码立即失效。</p><div class="full"><button type="submit" class="button primary">设置或替换</button></div></form></div>
+      </section>
+
+      <section id="section-system" class="page-section" aria-labelledby="systemTitle" hidden>
+        <div class="page-heading"><div><h1 id="systemTitle">系统状态</h1><p>集中查看运行时、工具网关、凭据保险箱、Telemetry、执行环境和重启影响。</p></div><div class="button-row"><button id="openActivityLogs" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-file-text"></use></svg>查看运行日志</button><button id="refreshAll" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>刷新状态</button></div></div>
+        <div class="system-grid"><article class="system-card"><span class="system-card-icon"><svg class="icon"><use href="#i-activity"></use></svg></span><span>Admin API</span><strong id="adminApiStatus">未连接</strong><p>普通 MCP bearer 不具备管理员权限。</p></article><article class="system-card"><span class="system-card-icon"><svg class="icon"><use href="#i-plug"></use></svg></span><span>工具网关</span><strong id="gatewayRuntimeStatus">未连接</strong><p>工具快照在运行时初始化时冻结。</p></article><article class="system-card"><span class="system-card-icon"><svg class="icon"><use href="#i-key"></use></svg></span><span>凭据保险箱</span><strong id="vaultStatus">未连接</strong><p>页面从不读取或显示 Secret 值。</p></article><article class="system-card"><span class="system-card-icon"><svg class="icon"><use href="#i-activity"></use></svg></span><span>Telemetry</span><strong id="telemetryStatus">未报告</strong><p id="telemetryDetail"></p><p id="telemetryDisableHelp" class="help"></p></article></div>
+        <article class="panel log-entry-panel"><div class="panel-heading"><div><h2>运行日志</h2><p>默认不展开日志明细；需要排障时再打开查看器并筛选范围。</p></div><button class="button primary compact" type="button" data-open-activity-logs><svg class="icon icon-sm"><use href="#i-file-text"></use></svg>打开日志查看器</button></div><div class="log-summary-grid"><div><span>当前页面活动</span><strong id="activityLogCount">0</strong><small>Admin API 请求记录</small></div><div><span>错误</span><strong class="danger-text" id="activityLogErrorCount">0</strong><small>本次页面会话</small></div><div><span>最后更新</span><strong id="activityLogLastUpdated">—</strong><small>仅保存在内存中</small></div></div><p class="log-backend-note"><svg class="icon icon-sm"><use href="#i-alert"></use></svg><span>当前后端尚未暴露服务器运行日志端点；查看器记录本管理页面发出的 Admin API 请求结果，不记录 token、请求体或 Secret 值。</span></p></article>
+        <div class="detail-grid"><article class="panel"><div class="panel-heading"><div><h2>重启影响</h2><p>工具网关和部分服务器设置只在新建运行时或服务重启后生效。</p></div></div><div class="restart-impact"><span class="restart-count" id="systemRestartCount">0</span><div><strong id="systemRestartTitle">没有等待生效的项目</strong><p id="systemRestartDetail">Active 与 Persisted 配置已同步。</p></div></div><button class="button secondary" type="button" data-open-section="settings">查看配置差异</button></article><article class="panel"><div class="panel-heading"><div><h2>安全说明</h2><p>管理接口与普通 MCP/OAuth 权限面相互独立。</p></div></div><p>Admin token 只保存在当前页面内存中，退出后立即清除。</p><p>Secret 值、token 原文和内部摘要不会通过管理页面回显。</p></article></div>
       </section>
     </main>
   </div>
 
-  <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
-    <form method="dialog" class="dialog-card">
-      <h2 id="confirmTitle">确认操作</h2>
-      <p id="confirmMessage"></p>
-      <div class="button-row end"><button value="cancel" class="secondary">取消</button><button id="confirmAccept" value="confirm" class="danger">确认</button></div>
-    </form>
-  </dialog>
+  <nav class="mobile-nav" aria-label="移动端主要导航"><button type="button" class="nav-item active" data-section="overview" aria-current="page"><svg class="icon"><use href="#i-home"></use></svg><span>概览</span></button><button type="button" class="nav-item" data-section="gateway"><svg class="icon"><use href="#i-plug"></use></svg><span>连接</span></button><button type="button" class="nav-item" data-section="workspaces"><svg class="icon"><use href="#i-folder"></use></svg><span>工作区</span></button><button type="button" class="nav-item" data-section="chat"><svg class="icon"><use href="#i-message"></use></svg><span>会话</span></button><button type="button" id="mobileMoreButton"><svg class="icon"><use href="#i-menu"></use></svg><span>更多</span></button></nav>
 
-  <dialog id="clientPasswordDialog" aria-labelledby="clientPasswordTitle" aria-describedby="clientPasswordHelp">
-    <form id="clientPasswordForm" class="dialog-card stack" autocomplete="off">
-      <h2 id="clientPasswordTitle">设置 Client 专属密码</h2>
-      <p>Client ID：<code id="clientPasswordClientId">—</code></p>
-      <p id="clientPasswordHelp" class="help">保存后立即生效，只影响这个 Client；未设置或重置后使用全局 OAuth Authorize 密码。</p>
-      <label for="clientPasswordValue">Client 专属密码</label>
-      <div class="password-input-row">
-        <input id="clientPasswordValue" type="password" autocomplete="new-password" required>
-        <button id="clientPasswordToggle" type="button" class="secondary password-toggle" data-password-toggle data-password-target="clientPasswordValue" aria-controls="clientPasswordValue" aria-pressed="false" aria-label="显示密码">显示</button>
-      </div>
-      <p id="clientPasswordError" class="alert danger" role="alert" hidden></p>
-      <div class="button-row end"><button id="clientPasswordCancel" type="button" class="secondary">取消</button><button type="submit">保存并立即生效</button></div>
-    </form>
-  </dialog>
+  <dialog id="authDialog" aria-labelledby="authDialogTitle"><form id="authForm" class="dialog-card" autocomplete="off"><header><div><h2 id="authDialogTitle">连接真实 Admin API</h2><p>使用专用 Admin token；token 仅保存在当前页面内存中。</p></div><button class="icon-button" type="button" data-close-auth aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></header><div class="dialog-body"><label for="adminToken">本次页面使用的 Admin token</label><div class="password-input-row"><input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required><button id="adminTokenToggle" type="button" class="icon-button password-toggle" data-password-toggle data-password-target="adminToken" aria-controls="adminToken" aria-pressed="false" aria-label="显示密码"><svg class="icon"><use href="#i-eye"></use></svg><span>显示</span></button></div><p id="adminTokenHelp" class="help">不会写入 URL、浏览器持久化存储、日志或服务器设置。</p></div><footer><button class="button secondary" type="button" data-close-auth>取消</button><button class="button primary" type="submit">连接并读取</button></footer></form></dialog>
+  <dialog id="activityLogDialog" aria-labelledby="activityLogDialogTitle"><div class="dialog-card log-dialog-card"><header><div><h2 id="activityLogDialogTitle">运行日志查看器</h2><p>按时间、级别、组件和关键词筛选本页面的管理接口活动。</p></div><button class="icon-button" type="button" data-close-activity-logs aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></header><div class="dialog-body"><div class="log-filter-bar"><label>时间范围<select id="activityLogTime"><option value="15m">最近 15 分钟</option><option value="1h">最近 1 小时</option><option value="24h" selected>最近 24 小时</option><option value="all">全部</option></select></label><label>级别<select id="activityLogLevel"><option value="all">全部级别</option><option value="error">Error</option><option value="info">Info</option></select></label><label>组件<select id="activityLogComponent"><option value="all">全部组件</option><option value="status">Status</option><option value="settings">Settings</option><option value="gateway">Gateway</option><option value="workspaces">Workspaces</option><option value="oauth">OAuth</option><option value="secrets">Secret Vault</option><option value="chat">Conversations</option></select></label><label>关键词<input id="activityLogSearch" type="search" placeholder="搜索路径、状态或错误"></label></div><div class="log-result-toolbar"><strong id="activityLogResultCount">0 条结果</strong><button id="clearActivityLogs" type="button" class="button secondary compact">清空当前页面日志</button></div><div class="log-viewer"><div id="activityLogList" class="log-list"></div><aside id="activityLogDetail" class="log-detail"><div class="empty-state"><span><svg class="icon"><use href="#i-file-text"></use></svg></span><h3>选择一条日志</h3><p>点击记录查看请求方法、路径、HTTP 状态和耗时。</p></div></aside></div></div><footer><span class="log-footer-note">不记录 Admin token、请求体或 Secret 值。</span><button class="button secondary" type="button" data-close-activity-logs>关闭</button></footer></div></dialog>
+  <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage"><form method="dialog" class="dialog-card"><header><div><h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p></div></header><footer><button value="cancel" class="button secondary">取消</button><button id="confirmAccept" value="confirm" class="button danger">确认</button></footer></form></dialog>
+  <dialog id="clientPasswordDialog" aria-labelledby="clientPasswordTitle" aria-describedby="clientPasswordHelp"><form id="clientPasswordForm" class="dialog-card" autocomplete="off"><header><div><h2 id="clientPasswordTitle">设置 Client 专属密码</h2><p>Client ID：<code id="clientPasswordClientId">—</code></p></div></header><div class="dialog-body"><p id="clientPasswordHelp" class="help">保存后立即生效，只影响这个 Client；未设置或重置后使用全局 OAuth Authorize 密码。</p><label for="clientPasswordValue">Client 专属密码</label><div class="password-input-row"><input id="clientPasswordValue" type="password" autocomplete="new-password" required><button id="clientPasswordToggle" type="button" class="icon-button password-toggle" data-password-toggle data-password-target="clientPasswordValue" aria-controls="clientPasswordValue" aria-pressed="false" aria-label="显示密码"><svg class="icon"><use href="#i-eye"></use></svg><span>显示</span></button></div><p id="clientPasswordError" class="alert danger" role="alert" hidden></p></div><footer><button id="clientPasswordCancel" type="button" class="button secondary">取消</button><button type="submit" class="button primary">保存并立即生效</button></footer></form></dialog>
 
   <script type="module" src="./settings-copy.js"></script>
   <script type="module" src="./settings-model.js"></script>
