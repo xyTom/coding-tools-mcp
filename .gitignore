@@ -9,6 +9,9 @@ __pycache__/
 .python_history
 .coverage
 .coding-tools
+.coding-tools-mcp/
+.codegraph/
+.tmp/
 htmlcov/
 node_modules/
 dist/

@@ -1,0 +1,2882 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#173a63">
+  <title>Coding Tools MCP · UI 概念展示</title>
+  <link rel="stylesheet" href="./showcase-live.css?v=20260806-2">
+  <style>
+    :root {
+      color-scheme: light;
+      --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --bg: #f3f6fa;
+      --bg-elevated: #f8fafc;
+      --surface: rgba(255, 255, 255, .94);
+      --surface-solid: #ffffff;
+      --surface-muted: #edf3f8;
+      --surface-hover: #f3f7fb;
+      --text: #102033;
+      --text-soft: #536579;
+      --text-faint: #738399;
+      --line: #d9e3ed;
+      --line-strong: #bfcedd;
+      --primary: #173a63;
+      --primary-strong: #102e50;
+      --primary-soft: #e9f1fb;
+      --blue: #2f70d0;
+      --blue-soft: #eaf2ff;
+      --green: #16845b;
+      --green-soft: #e9f8f1;
+      --amber: #a76700;
+      --amber-soft: #fff5df;
+      --red: #b33b35;
+      --red-soft: #fff0ef;
+      --shadow-sm: 0 1px 2px rgba(16, 32, 51, .05), 0 8px 24px rgba(23, 58, 99, .035);
+      --shadow-md: 0 18px 45px rgba(23, 58, 99, .11);
+      --shadow-lg: 0 30px 80px rgba(16, 32, 51, .22);
+      --radius-sm: 10px;
+      --radius-md: 16px;
+      --radius-lg: 24px;
+      --sidebar-width: 260px;
+      --header-height: 76px;
+      --ease: cubic-bezier(.2, .8, .2, 1);
+    }
+
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #09111b;
+      --bg-elevated: #0d1723;
+      --surface: rgba(18, 30, 44, .94);
+      --surface-solid: #121e2c;
+      --surface-muted: #182739;
+      --surface-hover: #1b2d42;
+      --text: #edf4fb;
+      --text-soft: #b0c0d0;
+      --text-faint: #8397ab;
+      --line: #2b4054;
+      --line-strong: #405b73;
+      --primary: #d5e7fb;
+      --primary-strong: #ffffff;
+      --primary-soft: #1a3047;
+      --blue: #80b5ff;
+      --blue-soft: #162e4d;
+      --green: #6bd4a7;
+      --green-soft: #15382d;
+      --amber: #f2c36d;
+      --amber-soft: #3c2e14;
+      --red: #ffaaa4;
+      --red-soft: #432321;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, .2), 0 8px 24px rgba(0, 0, 0, .16);
+      --shadow-md: 0 18px 45px rgba(0, 0, 0, .28);
+      --shadow-lg: 0 30px 80px rgba(0, 0, 0, .5);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-width: 320px;
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      overflow-x: hidden;
+      background:
+        radial-gradient(circle at 12% -5%, color-mix(in srgb, var(--blue) 12%, transparent), transparent 28rem),
+        radial-gradient(circle at 96% 12%, color-mix(in srgb, var(--green) 9%, transparent), transparent 25rem),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      line-height: 1.55;
+      text-rendering: optimizeLegibility;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button,
+    a,
+    summary,
+    label[for] {
+      cursor: pointer;
+    }
+
+    button {
+      min-height: 44px;
+    }
+
+    button:focus-visible,
+    a:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid color-mix(in srgb, var(--blue) 48%, transparent);
+      outline-offset: 3px;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1,
+    h2,
+    h3 {
+      color: var(--text);
+      letter-spacing: -.025em;
+      line-height: 1.18;
+    }
+
+    h1 {
+      margin-bottom: .45rem;
+      font-size: clamp(1.55rem, 2.2vw, 2.15rem);
+    }
+
+    h2 {
+      margin-bottom: .55rem;
+      font-size: clamp(1.25rem, 1.8vw, 1.6rem);
+    }
+
+    h3 {
+      margin-bottom: .4rem;
+      font-size: 1rem;
+    }
+
+    .icon-sprite {
+      position: absolute;
+      width: 0;
+      height: 0;
+      overflow: hidden;
+    }
+
+    .icon {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .icon-sm {
+      width: 17px;
+      height: 17px;
+    }
+
+    .skip-link {
+      position: fixed;
+      top: .75rem;
+      left: .75rem;
+      z-index: 200;
+      transform: translateY(-160%);
+      padding: .7rem .9rem;
+      border-radius: var(--radius-sm);
+      background: var(--primary-strong);
+      color: var(--surface-solid);
+      font-weight: 750;
+      text-decoration: none;
+      transition: transform .18s var(--ease);
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .concept-strip {
+      position: fixed;
+      inset: 0 0 auto 0;
+      z-index: 90;
+      display: flex;
+      min-height: 30px;
+      align-items: center;
+      justify-content: center;
+      gap: .45rem;
+      padding: .25rem 1rem;
+      border-bottom: 1px solid color-mix(in srgb, var(--blue) 18%, var(--line));
+      background: color-mix(in srgb, var(--blue-soft) 84%, var(--surface-solid));
+      color: color-mix(in srgb, var(--primary) 86%, var(--text));
+      font-size: .78rem;
+      font-weight: 700;
+      letter-spacing: .01em;
+      text-align: center;
+    }
+
+    .concept-strip .icon {
+      width: 15px;
+      height: 15px;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+      min-height: 100dvh;
+      padding-top: 30px;
+    }
+
+    .sidebar {
+      position: fixed;
+      inset: 30px auto 0 0;
+      z-index: 60;
+      display: flex;
+      width: var(--sidebar-width);
+      min-width: 0;
+      flex-direction: column;
+      padding: 1.05rem .85rem 1rem;
+      overflow-y: auto;
+      border-right: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+      background: color-mix(in srgb, var(--surface) 92%, transparent);
+      backdrop-filter: blur(22px);
+      transition: transform .24s var(--ease);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      min-height: 54px;
+      padding: .35rem .45rem 1.2rem;
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 13px;
+      background: linear-gradient(145deg, #264f7c, #173a63 66%, #102e50);
+      color: #ffffff;
+      box-shadow: 0 10px 24px rgba(23, 58, 99, .25);
+    }
+
+    .brand-mark .icon {
+      width: 23px;
+      height: 23px;
+      stroke-width: 1.7;
+    }
+
+    .brand-copy {
+      min-width: 0;
+    }
+
+    .brand-copy strong,
+    .brand-copy small {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .brand-copy strong {
+      font-size: .98rem;
+      letter-spacing: -.02em;
+    }
+
+    .brand-copy small {
+      margin-top: .12rem;
+      color: var(--text-faint);
+      font-size: .72rem;
+      font-weight: 650;
+    }
+
+    .nav-group + .nav-group {
+      margin-top: 1.2rem;
+    }
+
+    .nav-label {
+      margin: 0 .65rem .45rem;
+      color: var(--text-faint);
+      font-size: .68rem;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .nav-list {
+      display: grid;
+      gap: .25rem;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .nav-button {
+      position: relative;
+      display: flex;
+      width: 100%;
+      align-items: center;
+      gap: .72rem;
+      padding: .68rem .72rem;
+      border: 1px solid transparent;
+      border-radius: 11px;
+      background: transparent;
+      color: var(--text-soft);
+      font-weight: 680;
+      text-align: left;
+      box-shadow: none;
+      transition: color .18s var(--ease), background-color .18s var(--ease), border-color .18s var(--ease);
+    }
+
+    .nav-button:hover {
+      border-color: color-mix(in srgb, var(--line) 70%, transparent);
+      background: var(--surface-hover);
+      color: var(--text);
+    }
+
+    .nav-button[aria-current="page"] {
+      border-color: color-mix(in srgb, var(--blue) 22%, var(--line));
+      background: color-mix(in srgb, var(--blue-soft) 78%, var(--surface-solid));
+      color: var(--primary);
+      font-weight: 780;
+    }
+
+    .nav-button[aria-current="page"]::before {
+      content: "";
+      position: absolute;
+      left: -5px;
+      width: 3px;
+      height: 24px;
+      border-radius: 99px;
+      background: var(--green);
+    }
+
+    .sidebar-spacer {
+      min-height: 1rem;
+      flex: 1;
+    }
+
+    .help-panel {
+      margin: 1rem .2rem 0;
+      padding: .9rem;
+      border: 1px solid color-mix(in srgb, var(--blue) 17%, var(--line));
+      border-radius: 14px;
+      background: linear-gradient(145deg, color-mix(in srgb, var(--blue-soft) 72%, var(--surface-solid)), var(--surface-solid));
+    }
+
+    .help-panel .help-icon {
+      display: grid;
+      width: 32px;
+      height: 32px;
+      margin-bottom: .7rem;
+      place-items: center;
+      border-radius: 9px;
+      background: var(--surface-solid);
+      color: var(--blue);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .help-panel p {
+      margin-bottom: .75rem;
+      color: var(--text-soft);
+      font-size: .78rem;
+    }
+
+    .text-link {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      color: var(--blue);
+      font-size: .78rem;
+      font-weight: 760;
+      text-decoration: none;
+    }
+
+    .page-shell {
+      grid-column: 2;
+      min-width: 0;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 30px;
+      z-index: 50;
+      display: flex;
+      min-height: var(--header-height);
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: .85rem clamp(1rem, 3vw, 2.25rem);
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 84%, transparent);
+      background: color-mix(in srgb, var(--surface) 88%, transparent);
+      backdrop-filter: blur(20px);
+    }
+
+    .topbar-left,
+    .topbar-actions,
+    .status-pill,
+    .button-content,
+    .profile-button {
+      display: flex;
+      align-items: center;
+    }
+
+    .topbar-left {
+      min-width: 0;
+      gap: .65rem;
+    }
+
+    .topbar-copy {
+      min-width: 0;
+    }
+
+    .topbar-copy strong,
+    .topbar-copy span {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .topbar-copy strong {
+      font-size: .94rem;
+    }
+
+    .topbar-copy span {
+      margin-top: .08rem;
+      color: var(--text-faint);
+      font-size: .74rem;
+    }
+
+    .topbar-actions {
+      justify-content: flex-end;
+      gap: .55rem;
+    }
+
+    .icon-button,
+    .profile-button,
+    .button,
+    .chip,
+    .segmented-button {
+      border: 1px solid transparent;
+      font-weight: 720;
+      transition: background-color .18s var(--ease), border-color .18s var(--ease), color .18s var(--ease), box-shadow .18s var(--ease), transform .18s var(--ease);
+    }
+
+    .icon-button {
+      display: inline-grid;
+      width: 44px;
+      height: 44px;
+      padding: 0;
+      place-items: center;
+      border-color: var(--line);
+      border-radius: 12px;
+      background: var(--surface-solid);
+      color: var(--text-soft);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .icon-button:hover,
+    .profile-button:hover {
+      border-color: var(--line-strong);
+      background: var(--surface-hover);
+      color: var(--text);
+    }
+
+    .menu-button {
+      display: none;
+    }
+
+    .status-pill {
+      min-height: 38px;
+      gap: .45rem;
+      padding: .45rem .72rem;
+      border: 1px solid color-mix(in srgb, var(--green) 25%, var(--line));
+      border-radius: 999px;
+      background: var(--green-soft);
+      color: var(--green);
+      font-size: .78rem;
+      font-weight: 760;
+      white-space: nowrap;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: currentColor;
+      box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 14%, transparent);
+    }
+
+    .profile-button {
+      min-height: 44px;
+      gap: .55rem;
+      padding: .35rem .55rem .35rem .38rem;
+      border-color: var(--line);
+      border-radius: 13px;
+      background: var(--surface-solid);
+      color: var(--text);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .avatar {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 10px;
+      background: linear-gradient(145deg, var(--primary), color-mix(in srgb, var(--blue) 75%, var(--primary)));
+      color: var(--surface-solid);
+      font-size: .74rem;
+      font-weight: 850;
+    }
+
+    .profile-copy {
+      display: grid;
+      text-align: left;
+    }
+
+    .profile-copy strong {
+      font-size: .76rem;
+      line-height: 1.2;
+    }
+
+    .profile-copy small {
+      color: var(--text-faint);
+      font-size: .66rem;
+      line-height: 1.2;
+    }
+
+    .content {
+      width: min(1540px, 100%);
+      margin: 0 auto;
+      padding: clamp(1.1rem, 3vw, 2.25rem) clamp(1rem, 3vw, 2.25rem) 7rem;
+    }
+
+    .page-section {
+      animation: page-in .28s var(--ease) both;
+    }
+
+    .page-section[hidden] {
+      display: none !important;
+    }
+
+    @keyframes page-in {
+      from {
+        opacity: .35;
+        transform: translateY(6px);
+      }
+      to {
+        opacity: 1;
+        transform: none;
+      }
+    }
+
+    .page-heading {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1.35rem;
+    }
+
+    .page-heading p {
+      max-width: 68ch;
+      margin-bottom: 0;
+      color: var(--text-soft);
+      font-size: .93rem;
+    }
+
+    .eyebrow {
+      margin-bottom: .35rem;
+      color: var(--blue);
+      font-size: .72rem;
+      font-weight: 820;
+      letter-spacing: .11em;
+      text-transform: uppercase;
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: .6rem;
+    }
+
+    .button {
+      display: inline-flex;
+      min-height: 44px;
+      align-items: center;
+      justify-content: center;
+      gap: .48rem;
+      padding: .68rem .92rem;
+      border-radius: 11px;
+      text-decoration: none;
+    }
+
+    .button:hover {
+      transform: translateY(-1px);
+    }
+
+    .button:active {
+      transform: translateY(0);
+    }
+
+    .button-primary {
+      border-color: var(--primary-strong);
+      background: var(--primary);
+      color: var(--surface-solid);
+      box-shadow: 0 8px 20px color-mix(in srgb, var(--primary) 20%, transparent);
+    }
+
+    html[data-theme="dark"] .button-primary,
+    html[data-theme="dark"] .avatar {
+      color: #0b1724;
+    }
+
+    .button-primary:hover {
+      background: var(--primary-strong);
+      box-shadow: 0 12px 28px color-mix(in srgb, var(--primary) 24%, transparent);
+    }
+
+    .button-secondary {
+      border-color: var(--line-strong);
+      background: var(--surface-solid);
+      color: var(--text);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .button-secondary:hover {
+      background: var(--surface-hover);
+      border-color: color-mix(in srgb, var(--blue) 28%, var(--line));
+    }
+
+    .button-quiet {
+      border-color: transparent;
+      background: transparent;
+      color: var(--blue);
+      box-shadow: none;
+    }
+
+    .button-danger {
+      border-color: color-mix(in srgb, var(--red) 35%, var(--line));
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .button-sm {
+      min-height: 38px;
+      padding: .52rem .72rem;
+      border-radius: 9px;
+      font-size: .8rem;
+    }
+
+    .hero {
+      position: relative;
+      display: grid;
+      grid-template-columns: minmax(0, 1.55fr) minmax(280px, .7fr);
+      gap: 1rem;
+      margin-bottom: 1rem;
+      overflow: hidden;
+      border: 1px solid color-mix(in srgb, var(--blue) 15%, var(--line));
+      border-radius: var(--radius-lg);
+      background:
+        linear-gradient(120deg, color-mix(in srgb, var(--blue-soft) 72%, var(--surface-solid)), var(--surface-solid) 52%),
+        var(--surface-solid);
+      box-shadow: var(--shadow-md);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -4rem;
+      bottom: -6rem;
+      width: 20rem;
+      height: 20rem;
+      border: 3rem solid color-mix(in srgb, var(--blue) 7%, transparent);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+
+    .hero-main,
+    .hero-side {
+      position: relative;
+      z-index: 1;
+      min-width: 0;
+    }
+
+    .hero-main {
+      padding: clamp(1.4rem, 3vw, 2.25rem);
+    }
+
+    .hero-main h1 {
+      max-width: 18ch;
+      font-size: clamp(1.85rem, 3.6vw, 3.35rem);
+      letter-spacing: -.055em;
+    }
+
+    .hero-main > p:not(.eyebrow) {
+      max-width: 62ch;
+      margin-bottom: 1.25rem;
+      color: var(--text-soft);
+      font-size: clamp(.92rem, 1.25vw, 1.05rem);
+    }
+
+    .hero-side {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      margin: .9rem;
+      padding: 1.15rem;
+      border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+      border-radius: 18px;
+      background: color-mix(in srgb, var(--surface-solid) 78%, transparent);
+      box-shadow: var(--shadow-sm);
+      backdrop-filter: blur(12px);
+    }
+
+    .health-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .75rem;
+      margin-bottom: .8rem;
+    }
+
+    .health-score {
+      display: grid;
+      width: 48px;
+      height: 48px;
+      place-items: center;
+      border-radius: 15px;
+      background: var(--green-soft);
+      color: var(--green);
+      font-size: .9rem;
+      font-weight: 850;
+    }
+
+    .health-list,
+    .timeline,
+    .plain-list,
+    .record-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .health-list {
+      display: grid;
+      gap: .55rem;
+    }
+
+    .health-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .75rem;
+      color: var(--text-soft);
+      font-size: .8rem;
+    }
+
+    .health-item span:last-child {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      color: var(--green);
+      font-weight: 760;
+    }
+
+    .health-item .icon {
+      width: 15px;
+      height: 15px;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: .8rem;
+      margin-bottom: 1rem;
+    }
+
+    .metric-card,
+    .card,
+    .connection-card,
+    .workspace-card,
+    .security-card,
+    .record-panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      background: var(--surface-solid);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .metric-card {
+      display: flex;
+      align-items: center;
+      gap: .8rem;
+      padding: 1rem;
+      border-radius: var(--radius-md);
+    }
+
+    .metric-icon,
+    .card-icon,
+    .connection-icon,
+    .workspace-icon,
+    .security-icon {
+      display: grid;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 12px;
+    }
+
+    .metric-icon {
+      width: 42px;
+      height: 42px;
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .metric-copy {
+      min-width: 0;
+    }
+
+    .metric-copy strong,
+    .metric-copy span {
+      display: block;
+    }
+
+    .metric-copy strong {
+      font-size: 1.28rem;
+      line-height: 1.15;
+    }
+
+    .metric-copy span {
+      margin-top: .18rem;
+      overflow: hidden;
+      color: var(--text-faint);
+      font-size: .74rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .bento-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr);
+      gap: 1rem;
+      align-items: start;
+    }
+
+    .bento-stack {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .card {
+      padding: 1.15rem;
+      border-radius: var(--radius-md);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: .8rem;
+      margin-bottom: 1rem;
+    }
+
+    .card-header p {
+      margin-bottom: 0;
+      color: var(--text-soft);
+      font-size: .82rem;
+    }
+
+    .card-icon {
+      width: 38px;
+      height: 38px;
+      background: var(--surface-muted);
+      color: var(--blue);
+    }
+
+    .setup-progress {
+      display: flex;
+      align-items: center;
+      gap: .8rem;
+      margin-bottom: 1rem;
+      padding: .8rem;
+      border-radius: 13px;
+      background: var(--surface-muted);
+    }
+
+    .progress-ring {
+      --progress: 72%;
+      display: grid;
+      width: 54px;
+      height: 54px;
+      flex: 0 0 auto;
+      place-items: center;
+      border-radius: 50%;
+      background: conic-gradient(var(--green) var(--progress), color-mix(in srgb, var(--line) 70%, transparent) 0);
+    }
+
+    .progress-ring::before {
+      content: "";
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: var(--surface-solid);
+    }
+
+    .progress-ring span {
+      position: absolute;
+      color: var(--green);
+      font-size: .72rem;
+      font-weight: 850;
+    }
+
+    .setup-progress strong,
+    .setup-progress span {
+      display: block;
+    }
+
+    .setup-progress span {
+      margin-top: .14rem;
+      color: var(--text-faint);
+      font-size: .76rem;
+    }
+
+    .setup-steps {
+      display: grid;
+      gap: .6rem;
+    }
+
+    .setup-step {
+      display: grid;
+      grid-template-columns: 32px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: .7rem;
+      padding: .68rem .72rem;
+      border: 1px solid transparent;
+      border-radius: 11px;
+      transition: background-color .18s var(--ease), border-color .18s var(--ease);
+    }
+
+    .setup-step:hover {
+      border-color: var(--line);
+      background: var(--surface-hover);
+    }
+
+    .step-state {
+      display: grid;
+      width: 32px;
+      height: 32px;
+      place-items: center;
+      border-radius: 10px;
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .setup-step.pending .step-state {
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .setup-step strong,
+    .setup-step span {
+      display: block;
+    }
+
+    .setup-step strong {
+      font-size: .84rem;
+    }
+
+    .setup-step span {
+      margin-top: .08rem;
+      color: var(--text-faint);
+      font-size: .72rem;
+    }
+
+    .setup-step > .icon {
+      color: var(--text-faint);
+    }
+
+    .quick-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: .7rem;
+    }
+
+    .quick-action {
+      display: flex;
+      min-height: 112px;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: space-between;
+      padding: .9rem;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface-solid);
+      color: var(--text);
+      text-align: left;
+      box-shadow: none;
+      transition: border-color .18s var(--ease), background-color .18s var(--ease), transform .18s var(--ease), box-shadow .18s var(--ease);
+    }
+
+    .quick-action:hover {
+      transform: translateY(-2px);
+      border-color: color-mix(in srgb, var(--blue) 27%, var(--line));
+      background: var(--surface-hover);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .quick-action .card-icon {
+      width: 34px;
+      height: 34px;
+    }
+
+    .quick-action strong {
+      font-size: .84rem;
+    }
+
+    .quick-action small {
+      display: block;
+      margin-top: .12rem;
+      color: var(--text-faint);
+      font-size: .7rem;
+      font-weight: 550;
+    }
+
+    .timeline {
+      display: grid;
+      gap: .85rem;
+    }
+
+    .timeline-item {
+      position: relative;
+      display: grid;
+      grid-template-columns: 31px minmax(0, 1fr) auto;
+      align-items: start;
+      gap: .7rem;
+    }
+
+    .timeline-item:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      top: 29px;
+      bottom: -14px;
+      left: 15px;
+      width: 1px;
+      background: var(--line);
+    }
+
+    .timeline-icon {
+      z-index: 1;
+      display: grid;
+      width: 31px;
+      height: 31px;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-solid);
+      color: var(--blue);
+    }
+
+    .timeline-icon .icon {
+      width: 15px;
+      height: 15px;
+    }
+
+    .timeline-copy strong,
+    .timeline-copy span {
+      display: block;
+    }
+
+    .timeline-copy strong {
+      font-size: .79rem;
+    }
+
+    .timeline-copy span,
+    .timeline-time {
+      margin-top: .12rem;
+      color: var(--text-faint);
+      font-size: .7rem;
+    }
+
+    .timeline-time {
+      white-space: nowrap;
+    }
+
+    .notice-card {
+      border-color: color-mix(in srgb, var(--green) 22%, var(--line));
+      background: linear-gradient(145deg, var(--green-soft), var(--surface-solid));
+    }
+
+    .notice-row {
+      display: flex;
+      gap: .75rem;
+      align-items: flex-start;
+    }
+
+    .notice-row .card-icon {
+      background: var(--surface-solid);
+      color: var(--green);
+    }
+
+    .notice-row p {
+      margin-bottom: .8rem;
+      color: var(--text-soft);
+      font-size: .8rem;
+    }
+
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem;
+      margin-bottom: 1rem;
+    }
+
+    .chip {
+      min-height: 38px;
+      padding: .45rem .72rem;
+      border-color: var(--line);
+      border-radius: 999px;
+      background: var(--surface-solid);
+      color: var(--text-soft);
+      font-size: .78rem;
+    }
+
+    .chip:hover,
+    .chip[aria-pressed="true"] {
+      border-color: color-mix(in srgb, var(--blue) 28%, var(--line));
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .connections-grid,
+    .workspaces-grid,
+    .security-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+    }
+
+    .connection-card,
+    .workspace-card,
+    .security-card {
+      display: flex;
+      min-height: 240px;
+      flex-direction: column;
+      padding: 1.05rem;
+      border-radius: var(--radius-md);
+      transition: border-color .18s var(--ease), box-shadow .18s var(--ease), transform .18s var(--ease);
+    }
+
+    .connection-card:hover,
+    .workspace-card:hover,
+    .security-card:hover {
+      transform: translateY(-2px);
+      border-color: color-mix(in srgb, var(--blue) 25%, var(--line));
+      box-shadow: var(--shadow-md);
+    }
+
+    .connection-card.add-card {
+      align-items: center;
+      justify-content: center;
+      border-style: dashed;
+      background: color-mix(in srgb, var(--blue-soft) 45%, var(--surface-solid));
+      color: var(--blue);
+      text-align: center;
+    }
+
+    .connection-card.add-card .connection-icon {
+      margin-bottom: .8rem;
+      background: var(--surface-solid);
+    }
+
+    .connection-top,
+    .workspace-top,
+    .security-top,
+    .record-toolbar,
+    .record-meta,
+    .list-row,
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .75rem;
+    }
+
+    .connection-heading,
+    .workspace-heading,
+    .security-heading {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: .65rem;
+    }
+
+    .connection-icon,
+    .workspace-icon,
+    .security-icon {
+      width: 42px;
+      height: 42px;
+      background: var(--surface-muted);
+      color: var(--blue);
+    }
+
+    .connection-heading strong,
+    .connection-heading span,
+    .workspace-heading strong,
+    .workspace-heading span,
+    .security-heading strong,
+    .security-heading span {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .connection-heading strong,
+    .workspace-heading strong,
+    .security-heading strong {
+      font-size: .9rem;
+    }
+
+    .connection-heading span,
+    .workspace-heading span,
+    .security-heading span {
+      margin-top: .12rem;
+      color: var(--text-faint);
+      font-size: .7rem;
+    }
+
+    .badge {
+      display: inline-flex;
+      min-height: 27px;
+      align-items: center;
+      gap: .34rem;
+      padding: .28rem .55rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-muted);
+      color: var(--text-soft);
+      font-size: .68rem;
+      font-weight: 780;
+      white-space: nowrap;
+    }
+
+    .badge.success {
+      border-color: color-mix(in srgb, var(--green) 24%, var(--line));
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .badge.warning {
+      border-color: color-mix(in srgb, var(--amber) 24%, var(--line));
+      background: var(--amber-soft);
+      color: var(--amber);
+    }
+
+    .badge.info {
+      border-color: color-mix(in srgb, var(--blue) 22%, var(--line));
+      background: var(--blue-soft);
+      color: var(--blue);
+    }
+
+    .connection-description,
+    .workspace-description,
+    .security-description {
+      margin: .95rem 0;
+      color: var(--text-soft);
+      font-size: .79rem;
+    }
+
+    .connection-meta,
+    .workspace-meta,
+    .security-meta {
+      display: grid;
+      gap: .42rem;
+      margin-bottom: 1rem;
+    }
+
+    .meta-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .75rem;
+      color: var(--text-faint);
+      font-size: .72rem;
+    }
+
+    .meta-line strong {
+      max-width: 62%;
+      overflow: hidden;
+      color: var(--text-soft);
+      font-size: .72rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .connection-actions,
+    .workspace-actions,
+    .security-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem;
+      margin-top: auto;
+    }
+
+    .switch {
+      position: relative;
+      display: inline-flex;
+      width: 46px;
+      height: 26px;
+      flex: 0 0 auto;
+      align-items: center;
+    }
+
+    .switch input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+    }
+
+    .switch-track {
+      position: relative;
+      width: 46px;
+      height: 26px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--surface-muted);
+      transition: border-color .18s var(--ease), background-color .18s var(--ease);
+    }
+
+    .switch-track::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--surface-solid);
+      box-shadow: 0 2px 6px rgba(16, 32, 51, .22);
+      transition: transform .2s var(--ease), background-color .18s var(--ease);
+    }
+
+    .switch input:checked + .switch-track {
+      border-color: var(--green);
+      background: var(--green);
+    }
+
+    .switch input:checked + .switch-track::after {
+      transform: translateX(20px);
+      background: #ffffff;
+    }
+
+    .switch input:focus-visible + .switch-track {
+      outline: 3px solid color-mix(in srgb, var(--blue) 48%, transparent);
+      outline-offset: 3px;
+    }
+
+    .friendly-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: .8rem;
+      margin-bottom: 1rem;
+      padding: 1rem;
+      border: 1px solid color-mix(in srgb, var(--green) 20%, var(--line));
+      border-radius: var(--radius-md);
+      background: linear-gradient(120deg, var(--green-soft), var(--surface-solid));
+    }
+
+    .friendly-banner .card-icon {
+      background: var(--surface-solid);
+      color: var(--green);
+    }
+
+    .friendly-banner p {
+      margin-bottom: 0;
+      color: var(--text-soft);
+      font-size: .82rem;
+    }
+
+    .record-layout {
+      display: grid;
+      grid-template-columns: minmax(280px, .72fr) minmax(0, 1.28fr);
+      min-height: 650px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: var(--surface-solid);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .record-sidebar {
+      min-width: 0;
+      padding: 1rem;
+      border-right: 1px solid var(--line);
+      background: color-mix(in srgb, var(--surface-muted) 50%, var(--surface-solid));
+    }
+
+    .search-box {
+      position: relative;
+      margin-bottom: .75rem;
+    }
+
+    .search-box .icon {
+      position: absolute;
+      top: 50%;
+      left: .8rem;
+      width: 17px;
+      height: 17px;
+      transform: translateY(-50%);
+      color: var(--text-faint);
+      pointer-events: none;
+    }
+
+    .search-box input,
+    .field input,
+    .field select,
+    .field textarea {
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid var(--line-strong);
+      border-radius: 11px;
+      background: var(--surface-solid);
+      color: var(--text);
+      transition: border-color .18s var(--ease), box-shadow .18s var(--ease), background-color .18s var(--ease);
+    }
+
+    .search-box input {
+      padding: .65rem .8rem .65rem 2.45rem;
+    }
+
+    .field input,
+    .field select,
+    .field textarea {
+      padding: .68rem .8rem;
+    }
+
+    .search-box input:hover,
+    .field input:hover,
+    .field select:hover,
+    .field textarea:hover {
+      border-color: color-mix(in srgb, var(--blue) 30%, var(--line));
+    }
+
+    .search-box input:focus,
+    .field input:focus,
+    .field select:focus,
+    .field textarea:focus {
+      border-color: var(--blue);
+      outline: none;
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 16%, transparent);
+    }
+
+    .record-list {
+      display: grid;
+      gap: .45rem;
+    }
+
+    .record-button {
+      display: grid;
+      width: 100%;
+      gap: .38rem;
+      padding: .8rem;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      background: transparent;
+      color: var(--text);
+      text-align: left;
+      box-shadow: none;
+      transition: border-color .18s var(--ease), background-color .18s var(--ease);
+    }
+
+    .record-button:hover,
+    .record-button[aria-current="true"] {
+      border-color: color-mix(in srgb, var(--blue) 22%, var(--line));
+      background: var(--surface-solid);
+    }
+
+    .record-button[aria-current="true"] {
+      box-shadow: var(--shadow-sm);
+    }
+
+    .record-button strong {
+      overflow: hidden;
+      font-size: .82rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .record-button p {
+      display: -webkit-box;
+      margin-bottom: 0;
+      overflow: hidden;
+      color: var(--text-soft);
+      font-size: .72rem;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+    }
+
+    .record-meta {
+      color: var(--text-faint);
+      font-size: .66rem;
+    }
+
+    .record-detail {
+      min-width: 0;
+      padding: clamp(1rem, 2vw, 1.5rem);
+    }
+
+    .record-toolbar {
+      align-items: flex-start;
+      margin-bottom: 1.25rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .record-toolbar p {
+      margin-bottom: 0;
+      color: var(--text-faint);
+      font-size: .75rem;
+    }
+
+    .message-stack {
+      display: grid;
+      gap: .8rem;
+    }
+
+    .message {
+      max-width: min(720px, 88%);
+      padding: .85rem 1rem;
+      border: 1px solid var(--line);
+      border-radius: 14px 14px 14px 4px;
+      background: var(--surface-muted);
+    }
+
+    .message.user {
+      justify-self: end;
+      border-color: color-mix(in srgb, var(--blue) 22%, var(--line));
+      border-radius: 14px 14px 4px 14px;
+      background: var(--blue-soft);
+    }
+
+    .message header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .8rem;
+      margin-bottom: .35rem;
+      color: var(--text-faint);
+      font-size: .68rem;
+    }
+
+    .message p {
+      margin-bottom: 0;
+      color: var(--text-soft);
+      font-size: .82rem;
+      white-space: pre-wrap;
+    }
+
+    .security-card.featured {
+      border-color: color-mix(in srgb, var(--green) 26%, var(--line));
+      background: linear-gradient(145deg, var(--green-soft), var(--surface-solid));
+    }
+
+    .security-card.featured .security-icon {
+      background: var(--surface-solid);
+      color: var(--green);
+    }
+
+    .plain-list {
+      display: grid;
+      gap: .62rem;
+    }
+
+    .list-row {
+      align-items: flex-start;
+      color: var(--text-soft);
+      font-size: .77rem;
+    }
+
+    .list-row > span:first-child {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      gap: .48rem;
+    }
+
+    .list-row .icon {
+      width: 16px;
+      height: 16px;
+      color: var(--green);
+    }
+
+    .advanced-card {
+      margin-top: 1rem;
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .advanced-card summary {
+      display: flex;
+      min-height: 58px;
+      align-items: center;
+      justify-content: space-between;
+      gap: .8rem;
+      padding: .9rem 1rem;
+      font-weight: 760;
+      list-style: none;
+    }
+
+    .advanced-card summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .advanced-card summary::after {
+      content: "+";
+      display: grid;
+      width: 28px;
+      height: 28px;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--surface-muted);
+      color: var(--text-soft);
+      font-size: 1rem;
+    }
+
+    .advanced-card[open] summary::after {
+      content: "−";
+    }
+
+    .advanced-content {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: .8rem;
+      padding: 0 1rem 1rem;
+    }
+
+    .technical-block {
+      padding: .85rem;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface-muted);
+    }
+
+    .technical-block span,
+    .technical-block code {
+      display: block;
+    }
+
+    .technical-block span {
+      color: var(--text-faint);
+      font-size: .68rem;
+    }
+
+    .technical-block code {
+      margin-top: .35rem;
+      overflow: hidden;
+      color: var(--text-soft);
+      font-family: var(--font-mono);
+      font-size: .72rem;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .mobile-nav {
+      display: none;
+    }
+
+    .backdrop {
+      position: fixed;
+      inset: 30px 0 0 0;
+      z-index: 55;
+      border: 0;
+      background: rgba(4, 12, 22, .48);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .22s var(--ease);
+    }
+
+    body.drawer-open .backdrop {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    dialog {
+      width: min(620px, calc(100% - 1.5rem));
+      max-height: min(760px, calc(100dvh - 2rem));
+      padding: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--surface-solid);
+      color: var(--text);
+      box-shadow: var(--shadow-lg);
+    }
+
+    dialog::backdrop {
+      background: rgba(3, 10, 18, .58);
+      backdrop-filter: blur(6px);
+    }
+
+    .dialog-shell {
+      display: flex;
+      max-height: min(760px, calc(100dvh - 2rem));
+      flex-direction: column;
+    }
+
+    .dialog-header,
+    .dialog-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .8rem;
+      padding: 1rem 1.15rem;
+    }
+
+    .dialog-header {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .dialog-header h2 {
+      margin-bottom: .18rem;
+      font-size: 1.2rem;
+    }
+
+    .dialog-header p {
+      margin-bottom: 0;
+      color: var(--text-faint);
+      font-size: .76rem;
+    }
+
+    .dialog-body {
+      padding: 1.15rem;
+      overflow-y: auto;
+    }
+
+    .dialog-footer {
+      border-top: 1px solid var(--line);
+      background: var(--bg-elevated);
+    }
+
+    .type-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: .75rem;
+      margin-bottom: 1rem;
+    }
+
+    .type-option {
+      position: relative;
+      display: grid;
+      min-height: 132px;
+      align-content: start;
+      gap: .55rem;
+      padding: .85rem;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface-solid);
+      color: var(--text);
+      text-align: left;
+      box-shadow: none;
+    }
+
+    .type-option:hover,
+    .type-option[aria-pressed="true"] {
+      border-color: color-mix(in srgb, var(--blue) 36%, var(--line));
+      background: var(--blue-soft);
+    }
+
+    .type-option[aria-pressed="true"]::after {
+      content: "";
+      position: absolute;
+      top: .72rem;
+      right: .72rem;
+      width: 9px;
+      height: 9px;
+      border: 3px solid var(--surface-solid);
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 1px var(--blue);
+    }
+
+    .type-option .card-icon {
+      width: 36px;
+      height: 36px;
+      background: var(--surface-solid);
+    }
+
+    .type-option strong {
+      font-size: .84rem;
+    }
+
+    .type-option span {
+      color: var(--text-soft);
+      font-size: .72rem;
+      font-weight: 520;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: .8rem;
+    }
+
+    .field {
+      min-width: 0;
+    }
+
+    .field.full {
+      grid-column: 1 / -1;
+    }
+
+    .field label {
+      display: block;
+      margin-bottom: .35rem;
+      font-size: .78rem;
+      font-weight: 730;
+    }
+
+    .field small {
+      display: block;
+      margin-top: .28rem;
+      color: var(--text-faint);
+      font-size: .68rem;
+    }
+
+    .toast-region {
+      position: fixed;
+      right: 1rem;
+      bottom: 1rem;
+      z-index: 150;
+      display: grid;
+      width: min(360px, calc(100% - 2rem));
+      gap: .55rem;
+      pointer-events: none;
+    }
+
+    .toast {
+      display: flex;
+      align-items: flex-start;
+      gap: .65rem;
+      padding: .85rem;
+      border: 1px solid color-mix(in srgb, var(--green) 24%, var(--line));
+      border-radius: 13px;
+      background: var(--surface-solid);
+      color: var(--text);
+      box-shadow: var(--shadow-lg);
+      animation: toast-in .24s var(--ease) both;
+    }
+
+    .toast .card-icon {
+      width: 32px;
+      height: 32px;
+      background: var(--green-soft);
+      color: var(--green);
+    }
+
+    .toast strong,
+    .toast span {
+      display: block;
+    }
+
+    .toast strong {
+      font-size: .79rem;
+    }
+
+    .toast span {
+      margin-top: .12rem;
+      color: var(--text-soft);
+      font-size: .7rem;
+    }
+
+    @keyframes toast-in {
+      from {
+        opacity: 0;
+        transform: translateY(8px) scale(.98);
+      }
+      to {
+        opacity: 1;
+        transform: none;
+      }
+    }
+
+    @media (max-width: 1180px) {
+      .metrics-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .connections-grid,
+      .workspaces-grid,
+      .security-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .hero {
+        grid-template-columns: minmax(0, 1.3fr) minmax(260px, .7fr);
+      }
+    }
+
+    @media (max-width: 980px) {
+      :root {
+        --header-height: 68px;
+      }
+
+      .app-shell {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        width: min(320px, calc(100% - 3rem));
+        transform: translateX(-105%);
+        box-shadow: var(--shadow-lg);
+      }
+
+      body.drawer-open {
+        overflow: hidden;
+      }
+
+      body.drawer-open .sidebar {
+        transform: translateX(0);
+      }
+
+      .page-shell {
+        grid-column: 1;
+      }
+
+      .menu-button {
+        display: inline-grid;
+      }
+
+      .profile-copy,
+      .profile-button > .icon {
+        display: none;
+      }
+
+      .profile-button {
+        width: 44px;
+        padding: 4px;
+      }
+
+      .hero,
+      .bento-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-side {
+        margin: 0 1rem 1rem;
+      }
+
+      .record-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .record-sidebar {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .record-list {
+        grid-template-columns: repeat(3, minmax(220px, 1fr));
+        overflow-x: auto;
+        padding-bottom: .35rem;
+        scroll-snap-type: x proximity;
+      }
+
+      .record-button {
+        scroll-snap-align: start;
+      }
+
+      .mobile-nav {
+        position: fixed;
+        inset: auto .75rem max(.75rem, env(safe-area-inset-bottom)) .75rem;
+        z-index: 45;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: .2rem;
+        padding: .35rem;
+        border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+        border-radius: 18px;
+        background: color-mix(in srgb, var(--surface) 92%, transparent);
+        box-shadow: var(--shadow-lg);
+        backdrop-filter: blur(20px);
+      }
+
+      .mobile-nav button {
+        display: grid;
+        min-height: 52px;
+        place-items: center;
+        gap: .12rem;
+        padding: .32rem;
+        border: 0;
+        border-radius: 13px;
+        background: transparent;
+        color: var(--text-faint);
+        font-size: .64rem;
+        font-weight: 720;
+        box-shadow: none;
+      }
+
+      .mobile-nav button[aria-current="page"] {
+        background: var(--blue-soft);
+        color: var(--blue);
+      }
+
+      .mobile-nav .icon {
+        width: 19px;
+        height: 19px;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .concept-strip {
+        justify-content: flex-start;
+        overflow: hidden;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .topbar {
+        gap: .55rem;
+        padding-inline: .75rem;
+      }
+
+      .topbar-copy span,
+      .status-pill span:last-child {
+        display: none;
+      }
+
+      .status-pill {
+        width: 38px;
+        min-height: 38px;
+        justify-content: center;
+        padding: 0;
+      }
+
+      .content {
+        padding: 1rem .75rem 7.2rem;
+      }
+
+      .page-heading {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .page-heading .button-row,
+      .page-heading .button {
+        width: 100%;
+      }
+
+      .hero-main {
+        padding: 1.25rem;
+      }
+
+      .hero-main h1 {
+        font-size: clamp(1.7rem, 9vw, 2.45rem);
+      }
+
+      .hero-main .button-row,
+      .hero-main .button {
+        width: 100%;
+      }
+
+      .metrics-grid,
+      .connections-grid,
+      .workspaces-grid,
+      .security-grid,
+      .advanced-content,
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .field.full {
+        grid-column: auto;
+      }
+
+      .quick-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .quick-action {
+        min-height: 96px;
+      }
+
+      .setup-step {
+        grid-template-columns: 32px minmax(0, 1fr);
+      }
+
+      .setup-step > .icon {
+        display: none;
+      }
+
+      .timeline-item {
+        grid-template-columns: 31px minmax(0, 1fr);
+      }
+
+      .timeline-time {
+        grid-column: 2;
+        margin-top: -.25rem;
+      }
+
+      .connection-card,
+      .workspace-card,
+      .security-card {
+        min-height: 0;
+      }
+
+      .record-layout {
+        min-height: 0;
+      }
+
+      .record-detail {
+        min-height: 520px;
+      }
+
+      .record-toolbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .record-toolbar .button-row,
+      .record-toolbar .button {
+        width: 100%;
+      }
+
+      .message {
+        max-width: 94%;
+      }
+
+      .type-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .type-option {
+        min-height: 104px;
+      }
+
+      .dialog-footer {
+        align-items: stretch;
+        flex-direction: column-reverse;
+      }
+
+      .dialog-footer .button {
+        width: 100%;
+      }
+    }
+
+    @media (max-width: 390px) {
+      .topbar-actions {
+        gap: .35rem;
+      }
+
+      .topbar .icon-button,
+      .topbar .profile-button {
+        width: 40px;
+        height: 40px;
+        min-height: 40px;
+      }
+
+      .topbar-copy strong {
+        max-width: 110px;
+      }
+
+      .metric-card {
+        padding: .85rem;
+      }
+
+      .dialog-header,
+      .dialog-body,
+      .dialog-footer {
+        padding-inline: .85rem;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      *,
+      *::before,
+      *::after {
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: .01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="m7 7 5-3 5 3v5l-5 3-5-3Z"/><path d="m7 12-3 2v4l4 2.5 4-2.5v-3m5-3 3 2v4l-4 2.5-4-2.5"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M12 22v-5"/><path d="M9 8V2m6 6V2"/><path d="M18 8v4a6 6 0 0 1-12 0V8Z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5h7l2 2h9v9.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 7.5V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2.5"/></symbol>
+    <symbol id="i-message" viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/><path d="M8 9h8M8 13h5"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10Z"/><path d="m9 12 2 2 4-5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.16.36.37.69.6 1 .28.36.67.58 1.1.6h.1v4h-.1c-.43.02-.82.24-1.1.6-.23.31-.44.64-.6 1Z"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9a2.5 2.5 0 1 1 4.4 1.6c-.9.8-2 1.3-2 2.9M12 17h.01"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M6.1 9A7 7 0 0 1 18.5 6.5L20 11M4 13l1.5 4.5A7 7 0 0 0 17.9 15"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2-7 4 14 2-7h6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-browser" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></symbol>
+    <symbol id="i-files" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M5 21h14"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9m-3 3 3 3m-6 0 3 3"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.3 2.5 3.5 5.5 3.5 9S14.3 18.5 12 21c-2.3-2.5-3.5-5.5-3.5-9S9.7 5.5 12 3Z"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="m8 9-4 3 4 3m8-6 4 3-4 3m-3-9-2 12"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+  </svg>
+
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <div class="concept-strip">
+    <svg class="icon" aria-hidden="true"><use href="#i-info"></use></svg>
+    <span>真实任务展示版 · 可连接 Admin API · 默认只读</span>
+  </div>
+
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="产品导航">
+      <a class="brand" href="#" data-page-link="overview" aria-label="返回总览">
+        <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-logo"></use></svg></span>
+        <span class="brand-copy"><strong>Coding Tools</strong><small>MCP 管理中心</small></span>
+      </a>
+
+      <nav>
+        <div class="nav-group">
+          <p class="nav-label">开始使用</p>
+          <ul class="nav-list">
+            <li><button class="nav-button" type="button" data-page="overview" aria-current="page"><svg class="icon"><use href="#i-grid"></use></svg><span>总览</span></button></li>
+          </ul>
+        </div>
+
+        <div class="nav-group">
+          <p class="nav-label">连接与内容</p>
+          <ul class="nav-list">
+            <li><button class="nav-button" type="button" data-page="connections"><svg class="icon"><use href="#i-plug"></use></svg><span>工具连接</span></button></li>
+            <li><button class="nav-button" type="button" data-page="workspaces"><svg class="icon"><use href="#i-folder"></use></svg><span>工作文件夹</span></button></li>
+            <li><button class="nav-button" type="button" data-page="records"><svg class="icon"><use href="#i-message"></use></svg><span>聊天记录</span></button></li>
+          </ul>
+        </div>
+
+        <div class="nav-group">
+          <p class="nav-label">系统管理</p>
+          <ul class="nav-list">
+            <li><button class="nav-button" type="button" data-page="security"><svg class="icon"><use href="#i-shield"></use></svg><span>安全与设置</span></button></li>
+          </ul>
+        </div>
+      </nav>
+
+      <div class="sidebar-spacer"></div>
+
+      <section class="help-panel" aria-labelledby="help-title">
+        <span class="help-icon" aria-hidden="true"><svg class="icon"><use href="#i-help"></use></svg></span>
+        <h3 id="help-title">第一次使用？</h3>
+        <p>按向导完成连接、文件夹授权和安全检查，不需要理解 MCP 技术细节。</p>
+        <a class="text-link" href="#" data-mock-action="打开新手指南">查看新手指南<svg class="icon icon-sm"><use href="#i-arrow"></use></svg></a>
+      </section>
+    </aside>
+
+    <button class="backdrop" id="drawerBackdrop" type="button" aria-label="关闭导航"></button>
+
+    <div class="page-shell">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-button menu-button" id="menuButton" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="打开导航">
+            <svg class="icon"><use href="#i-menu"></use></svg>
+          </button>
+          <div class="topbar-copy">
+            <strong id="topbarTitle">总览</strong>
+            <span id="topbarSubtitle">查看服务状态和下一步操作</span>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="status-pill" title="所有核心服务运行正常">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span>服务正常</span>
+          </div>
+          <button class="icon-button" id="themeToggle" type="button" aria-pressed="false" aria-label="切换深色模式" title="切换主题">
+            <svg class="icon theme-icon-light"><use href="#i-moon"></use></svg>
+            <svg class="icon theme-icon-dark" hidden><use href="#i-sun"></use></svg>
+          </button>
+          <button class="profile-button" type="button" data-mock-action="打开账户菜单" aria-label="打开账户菜单">
+            <span class="avatar">CT</span>
+            <span class="profile-copy"><strong>本机管理员</strong><small>安全连接</small></span>
+            <svg class="icon icon-sm"><use href="#i-chevron"></use></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="content" id="main-content" tabindex="-1">
+        <section class="page-section" id="page-overview" data-page-section="overview" aria-labelledby="overview-title">
+          <div class="hero">
+            <div class="hero-main">
+              <p class="eyebrow">准备就绪</p>
+              <h1 id="overview-title">让工具连接和文件访问变得简单</h1>
+              <p>集中管理 AI 可以使用的工具、工作文件夹和聊天记录。常用操作使用向导完成，技术设置只在需要时显示。</p>
+              <div class="button-row">
+                <button class="button button-primary" type="button" data-open-connection-dialog><svg class="icon icon-sm"><use href="#i-plus"></use></svg>连接一个工具</button>
+                <button class="button button-secondary" type="button" data-page="workspaces"><svg class="icon icon-sm"><use href="#i-folder"></use></svg>添加工作文件夹</button>
+              </div>
+            </div>
+            <div class="hero-side" aria-label="服务健康状态">
+              <div class="health-header">
+                <div><h3>系统健康</h3><p class="muted-text">最近检查：刚刚</p></div>
+                <span class="health-score">100</span>
+              </div>
+              <ul class="health-list">
+                <li class="health-item"><span>管理服务</span><span><svg class="icon"><use href="#i-check"></use></svg>正常</span></li>
+                <li class="health-item"><span>工具连接</span><span><svg class="icon"><use href="#i-check"></use></svg>正常</span></li>
+                <li class="health-item"><span>凭据保护</span><span><svg class="icon"><use href="#i-check"></use></svg>已启用</span></li>
+                <li class="health-item"><span>记录保存</span><span><svg class="icon"><use href="#i-check"></use></svg>正常</span></li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="metrics-grid" aria-label="使用概况">
+            <article class="metric-card">
+              <span class="metric-icon"><svg class="icon"><use href="#i-plug"></use></svg></span>
+              <span class="metric-copy"><strong>6</strong><span>已连接工具</span></span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-icon"><svg class="icon"><use href="#i-folder"></use></svg></span>
+              <span class="metric-copy"><strong>3</strong><span>授权文件夹</span></span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-icon"><svg class="icon"><use href="#i-message"></use></svg></span>
+              <span class="metric-copy"><strong>128</strong><span>已保存会话</span></span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-icon"><svg class="icon"><use href="#i-activity"></use></svg></span>
+              <span class="metric-copy"><strong>24</strong><span>今日工具调用</span></span>
+            </article>
+          </div>
+
+          <div class="bento-grid">
+            <div class="bento-stack">
+              <article class="card">
+                <div class="card-header">
+                  <div><h2>完成首次设置</h2><p>只需三个步骤，即可让 AI 安全地使用你的工作资料。</p></div>
+                  <span class="card-icon"><svg class="icon"><use href="#i-check"></use></svg></span>
+                </div>
+                <div class="setup-progress">
+                  <span class="progress-ring"><span>72%</span></span>
+                  <span><strong>还差一个步骤</strong><span>完成安全检查后即可开始日常使用</span></span>
+                </div>
+                <div class="setup-steps">
+                  <button class="setup-step" type="button" data-page="connections">
+                    <span class="step-state"><svg class="icon icon-sm"><use href="#i-check"></use></svg></span>
+                    <span><strong>连接常用工具</strong><span>已连接 6 个工具</span></span>
+                    <svg class="icon icon-sm"><use href="#i-chevron"></use></svg>
+                  </button>
+                  <button class="setup-step" type="button" data-page="workspaces">
+                    <span class="step-state"><svg class="icon icon-sm"><use href="#i-check"></use></svg></span>
+                    <span><strong>选择可访问的文件夹</strong><span>已授权 3 个位置</span></span>
+                    <svg class="icon icon-sm"><use href="#i-chevron"></use></svg>
+                  </button>
+                  <button class="setup-step pending" type="button" data-page="security">
+                    <span class="step-state"><svg class="icon icon-sm"><use href="#i-shield"></use></svg></span>
+                    <span><strong>检查安全设置</strong><span>建议确认远程访问和登录方式</span></span>
+                    <svg class="icon icon-sm"><use href="#i-chevron"></use></svg>
+                  </button>
+                </div>
+              </article>
+
+              <article class="card">
+                <div class="card-header">
+                  <div><h2>常用操作</h2><p>把高频任务放在首页，减少寻找配置项的时间。</p></div>
+                </div>
+                <div class="quick-grid">
+                  <button class="quick-action" type="button" data-open-connection-dialog>
+                    <span class="card-icon"><svg class="icon"><use href="#i-plus"></use></svg></span>
+                    <span><strong>添加工具连接</strong><small>使用分步向导</small></span>
+                  </button>
+                  <button class="quick-action" type="button" data-page="workspaces">
+                    <span class="card-icon"><svg class="icon"><use href="#i-folder"></use></svg></span>
+                    <span><strong>授权文件夹</strong><small>控制可访问范围</small></span>
+                  </button>
+                  <button class="quick-action" type="button" data-page="records">
+                    <span class="card-icon"><svg class="icon"><use href="#i-message"></use></svg></span>
+                    <span><strong>查看聊天记录</strong><small>搜索与恢复会话</small></span>
+                  </button>
+                  <button class="quick-action" type="button" data-page="security">
+                    <span class="card-icon"><svg class="icon"><use href="#i-shield"></use></svg></span>
+                    <span><strong>运行安全检查</strong><small>查看推荐设置</small></span>
+                  </button>
+                </div>
+              </article>
+            </div>
+
+            <div class="bento-stack">
+              <article class="card">
+                <div class="card-header">
+                  <div><h2>最近动态</h2><p>只显示易理解的结果，详细日志按需查看。</p></div>
+                  <button class="button button-quiet button-sm" type="button" data-mock-action="刷新最近动态"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>刷新</button>
+                </div>
+                <ol class="timeline">
+                  <li class="timeline-item">
+                    <span class="timeline-icon"><svg class="icon"><use href="#i-plug"></use></svg></span>
+                    <span class="timeline-copy"><strong>浏览器工具连接成功</strong><span>可以开始使用网页操作能力</span></span>
+                    <time class="timeline-time">2 分钟前</time>
+                  </li>
+                  <li class="timeline-item">
+                    <span class="timeline-icon"><svg class="icon"><use href="#i-folder"></use></svg></span>
+                    <span class="timeline-copy"><strong>项目代码文件夹已检查</strong><span>路径存在，权限正常</span></span>
+                    <time class="timeline-time">18 分钟前</time>
+                  </li>
+                  <li class="timeline-item">
+                    <span class="timeline-icon"><svg class="icon"><use href="#i-message"></use></svg></span>
+                    <span class="timeline-copy"><strong>聊天记录已自动保存</strong><span>新增 6 条消息</span></span>
+                    <time class="timeline-time">1 小时前</time>
+                  </li>
+                  <li class="timeline-item">
+                    <span class="timeline-icon"><svg class="icon"><use href="#i-shield"></use></svg></span>
+                    <span class="timeline-copy"><strong>凭据保护检查通过</strong><span>敏感值均已隐藏</span></span>
+                    <time class="timeline-time">今天</time>
+                  </li>
+                </ol>
+              </article>
+
+              <article class="card notice-card">
+                <div class="notice-row">
+                  <span class="card-icon"><svg class="icon"><use href="#i-lock"></use></svg></span>
+                  <div><h3>默认保护你的数据</h3><p>工具只能访问你明确授权的文件夹，页面不会回显密码或密钥原文。</p><button class="button button-quiet button-sm" type="button" data-page="security">了解安全策略<svg class="icon icon-sm"><use href="#i-arrow"></use></svg></button></div>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section class="page-section" id="page-connections" data-page-section="connections" aria-labelledby="connections-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">工具连接</p><h1 id="connections-title">连接 AI 可以使用的能力</h1><p>用用途而不是协议名称来组织工具。普通用户只需选择类型并填写必要信息，高级参数默认收起。</p></div>
+            <div class="button-row"><button class="button button-secondary" type="button" data-mock-action="刷新工具状态"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>刷新状态</button><button class="button button-primary" type="button" data-open-connection-dialog><svg class="icon icon-sm"><use href="#i-plus"></use></svg>添加连接</button></div>
+          </div>
+
+          <div class="friendly-banner">
+            <span class="card-icon"><svg class="icon"><use href="#i-info"></use></svg></span>
+            <div><h3>不确定该怎么选？</h3><p>选择最接近用途的模板即可。系统会自动填写常见设置，并把技术参数放到“高级选项”中。</p></div>
+          </div>
+
+          <div class="filters" aria-label="工具筛选">
+            <button class="chip" type="button" aria-pressed="true">全部 6</button>
+            <button class="chip" type="button" aria-pressed="false">正在使用 5</button>
+            <button class="chip" type="button" aria-pressed="false">需要处理 1</button>
+            <button class="chip" type="button" aria-pressed="false">本机工具</button>
+            <button class="chip" type="button" aria-pressed="false">在线服务</button>
+          </div>
+
+          <div class="connections-grid">
+            <article class="connection-card">
+              <div class="connection-top">
+                <div class="connection-heading"><span class="connection-icon"><svg class="icon"><use href="#i-files"></use></svg></span><span><strong>文件与目录</strong><span>本机工具</span></span></div>
+                <span class="badge success"><span class="status-dot"></span>已连接</span>
+              </div>
+              <p class="connection-description">让 AI 在已授权的工作文件夹中查找、读取和整理文件。</p>
+              <div class="connection-meta"><div class="meta-line"><span>可用能力</span><strong>12 项</strong></div><div class="meta-line"><span>最近使用</span><strong>3 分钟前</strong></div><div class="meta-line"><span>访问范围</span><strong>3 个文件夹</strong></div></div>
+              <div class="connection-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="打开文件与目录设置">管理</button><label class="switch" title="启用文件与目录"><input type="checkbox" checked data-switch-name="文件与目录"><span class="switch-track"></span></label></div>
+            </article>
+
+            <article class="connection-card">
+              <div class="connection-top">
+                <div class="connection-heading"><span class="connection-icon"><svg class="icon"><use href="#i-browser"></use></svg></span><span><strong>浏览器工具</strong><span>本机工具</span></span></div>
+                <span class="badge success"><span class="status-dot"></span>已连接</span>
+              </div>
+              <p class="connection-description">允许 AI 打开网页、查找信息和完成需要浏览器的步骤。</p>
+              <div class="connection-meta"><div class="meta-line"><span>可用能力</span><strong>18 项</strong></div><div class="meta-line"><span>最近使用</span><strong>2 分钟前</strong></div><div class="meta-line"><span>运行位置</span><strong>这台电脑</strong></div></div>
+              <div class="connection-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="打开浏览器工具设置">管理</button><label class="switch" title="启用浏览器工具"><input type="checkbox" checked data-switch-name="浏览器工具"><span class="switch-track"></span></label></div>
+            </article>
+
+            <article class="connection-card">
+              <div class="connection-top">
+                <div class="connection-heading"><span class="connection-icon"><svg class="icon"><use href="#i-database"></use></svg></span><span><strong>团队知识库</strong><span>在线服务</span></span></div>
+                <span class="badge warning">需要重新登录</span>
+              </div>
+              <p class="connection-description">搜索团队文档和内部资料。当前授权已过期，需要重新连接。</p>
+              <div class="connection-meta"><div class="meta-line"><span>可用能力</span><strong>7 项</strong></div><div class="meta-line"><span>最后成功</span><strong>昨天 18:42</strong></div><div class="meta-line"><span>账号</span><strong>team@example.com</strong></div></div>
+              <div class="connection-actions"><button class="button button-primary button-sm" type="button" data-mock-action="重新登录团队知识库">重新登录</button><label class="switch" title="启用团队知识库"><input type="checkbox" checked data-switch-name="团队知识库"><span class="switch-track"></span></label></div>
+            </article>
+
+            <article class="connection-card">
+              <div class="connection-top">
+                <div class="connection-heading"><span class="connection-icon"><svg class="icon"><use href="#i-code"></use></svg></span><span><strong>代码仓库</strong><span>在线服务</span></span></div>
+                <span class="badge success"><span class="status-dot"></span>已连接</span>
+              </div>
+              <p class="connection-description">查看代码、问题记录和变更内容，不需要在页面中直接处理 Token。</p>
+              <div class="connection-meta"><div class="meta-line"><span>可用能力</span><strong>15 项</strong></div><div class="meta-line"><span>最近使用</span><strong>45 分钟前</strong></div><div class="meta-line"><span>授权方式</span><strong>安全登录</strong></div></div>
+              <div class="connection-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="打开代码仓库设置">管理</button><label class="switch" title="启用代码仓库"><input type="checkbox" checked data-switch-name="代码仓库"><span class="switch-track"></span></label></div>
+            </article>
+
+            <article class="connection-card">
+              <div class="connection-top">
+                <div class="connection-heading"><span class="connection-icon"><svg class="icon"><use href="#i-globe"></use></svg></span><span><strong>远程分析服务</strong><span>在线服务</span></span></div>
+                <span class="badge info">已暂停</span>
+              </div>
+              <p class="connection-description">连接团队部署的分析服务。暂停期间不会向该服务发送请求。</p>
+              <div class="connection-meta"><div class="meta-line"><span>可用能力</span><strong>9 项</strong></div><div class="meta-line"><span>最近使用</span><strong>3 天前</strong></div><div class="meta-line"><span>服务状态</span><strong>可访问</strong></div></div>
+              <div class="connection-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="打开远程分析服务设置">管理</button><label class="switch" title="启用远程分析服务"><input type="checkbox" data-switch-name="远程分析服务"><span class="switch-track"></span></label></div>
+            </article>
+
+            <button class="connection-card add-card" type="button" data-open-connection-dialog>
+              <span class="connection-icon"><svg class="icon"><use href="#i-plus"></use></svg></span>
+              <strong>添加新的工具连接</strong>
+              <span class="connection-description">从常用模板开始，几步完成配置</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="page-section" id="page-workspaces" data-page-section="workspaces" aria-labelledby="workspaces-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">工作文件夹</p><h1 id="workspaces-title">明确控制 AI 可以访问哪些文件</h1><p>每个工作文件夹都是独立授权范围。默认禁止访问未添加的位置，降低误读个人文件的风险。</p></div>
+            <div class="button-row"><button class="button button-secondary" type="button" data-mock-action="检查全部文件夹"><svg class="icon icon-sm"><use href="#i-shield"></use></svg>检查权限</button><button class="button button-primary" type="button" data-mock-action="打开文件夹选择器"><svg class="icon icon-sm"><use href="#i-plus"></use></svg>添加文件夹</button></div>
+          </div>
+
+          <div class="friendly-banner">
+            <span class="card-icon"><svg class="icon"><use href="#i-lock"></use></svg></span>
+            <div><h3>访问范围默认最小化</h3><p>添加文件夹不会自动开放整块磁盘。工具只能访问这里列出的路径，并且可以随时暂停或移除授权。</p></div>
+          </div>
+
+          <div class="workspaces-grid">
+            <article class="workspace-card">
+              <div class="workspace-top"><div class="workspace-heading"><span class="workspace-icon"><svg class="icon"><use href="#i-folder"></use></svg></span><span><strong>项目代码</strong><span>默认工作文件夹</span></span></div><span class="badge success">可用</span></div>
+              <p class="workspace-description">主要开发项目。新会话默认从这里开始，适合代码查找和文件编辑。</p>
+              <div class="workspace-meta"><div class="meta-line"><span>位置</span><strong>G:\LLM\coding-tools-mcp</strong></div><div class="meta-line"><span>连接工具</span><strong>4 个</strong></div><div class="meta-line"><span>最近检查</span><strong>18 分钟前</strong></div></div>
+              <div class="workspace-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="打开项目代码文件夹">打开</button><button class="button button-quiet button-sm" type="button" data-mock-action="编辑项目代码权限">编辑权限</button></div>
+            </article>
+
+            <article class="workspace-card">
+              <div class="workspace-top"><div class="workspace-heading"><span class="workspace-icon"><svg class="icon"><use href="#i-files"></use></svg></span><span><strong>研究资料</strong><span>只读优先</span></span></div><span class="badge success">可用</span></div>
+              <p class="workspace-description">论文、笔记和参考资料。默认优先读取，避免工具意外修改原始文件。</p>
+              <div class="workspace-meta"><div class="meta-line"><span>位置</span><strong>D:\Research</strong></div><div class="meta-line"><span>连接工具</span><strong>2 个</strong></div><div class="meta-line"><span>最近检查</span><strong>今天 09:20</strong></div></div>
+              <div class="workspace-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="打开研究资料文件夹">打开</button><button class="button button-quiet button-sm" type="button" data-mock-action="编辑研究资料权限">编辑权限</button></div>
+            </article>
+
+            <article class="workspace-card">
+              <div class="workspace-top"><div class="workspace-heading"><span class="workspace-icon"><svg class="icon"><use href="#i-download"></use></svg></span><span><strong>导出文件</strong><span>输出位置</span></span></div><span class="badge success">可用</span></div>
+              <p class="workspace-description">集中保存生成的报告、表格和演示文件，便于查找和清理。</p>
+              <div class="workspace-meta"><div class="meta-line"><span>位置</span><strong>D:\Exports</strong></div><div class="meta-line"><span>连接工具</span><strong>3 个</strong></div><div class="meta-line"><span>最近检查</span><strong>昨天 16:05</strong></div></div>
+              <div class="workspace-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="打开导出文件夹">打开</button><button class="button button-quiet button-sm" type="button" data-mock-action="编辑导出文件权限">编辑权限</button></div>
+            </article>
+
+            <button class="workspace-card connection-card add-card" type="button" data-mock-action="打开文件夹选择器">
+              <span class="connection-icon"><svg class="icon"><use href="#i-plus"></use></svg></span>
+              <strong>添加工作文件夹</strong>
+              <span class="connection-description">选择一个目录并设置访问方式</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="page-section" id="page-records" data-page-section="records" aria-labelledby="records-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">聊天记录</p><h1 id="records-title">查找、回顾和恢复工作过程</h1><p>先显示会话摘要，只有选择某条记录后才读取详细内容。默认使用易读视图，原始技术信息按需展开。</p></div>
+            <div class="button-row"><button class="button button-secondary" type="button" data-mock-action="导出聊天记录"><svg class="icon icon-sm"><use href="#i-download"></use></svg>导出</button><button class="button button-primary" type="button" data-mock-action="新建恢复检查点"><svg class="icon icon-sm"><use href="#i-plus"></use></svg>创建恢复点</button></div>
+          </div>
+
+          <div class="record-layout">
+            <aside class="record-sidebar" aria-label="聊天记录列表">
+              <div class="search-box"><svg class="icon"><use href="#i-search"></use></svg><input type="search" placeholder="搜索会话名称或内容" aria-label="搜索会话"></div>
+              <div class="filters"><button class="chip" type="button" aria-pressed="true">全部</button><button class="chip" type="button" aria-pressed="false">今天</button><button class="chip" type="button" aria-pressed="false">有恢复点</button></div>
+              <ul class="record-list">
+                <li><button class="record-button" type="button" aria-current="true"><strong>优化管理台体验</strong><p>讨论非开发者友好的导航、状态反馈和响应式布局。</p><span class="record-meta"><span>今天 17:42</span><span>18 条消息</span></span></button></li>
+                <li><button class="record-button" type="button"><strong>整理项目发布清单</strong><p>核对测试、文档、构建产物和发布前检查。</p><span class="record-meta"><span>今天 14:18</span><span>26 条消息</span></span></button></li>
+                <li><button class="record-button" type="button"><strong>分析工具连接异常</strong><p>定位远程知识库的登录状态和错误原因。</p><span class="record-meta"><span>昨天 19:03</span><span>12 条消息</span></span></button></li>
+              </ul>
+            </aside>
+
+            <article class="record-detail">
+              <header class="record-toolbar">
+                <div><span class="badge info">项目代码</span><h2>优化管理台体验</h2><p>最后更新：今天 17:42 · 已自动保存</p></div>
+                <div class="button-row"><button class="button button-secondary button-sm" type="button" data-mock-action="复制恢复信息">复制恢复信息</button><button class="icon-button" type="button" data-mock-action="打开记录操作菜单" aria-label="更多操作"><svg class="icon"><use href="#i-more"></use></svg></button></div>
+              </header>
+              <div class="message-stack" aria-label="会话内容预览">
+                <article class="message user"><header><strong>你</strong><time>17:28</time></header><p>当前管理台对非开发者不够友好，希望先给出一个现代化效果展示。</p></article>
+                <article class="message"><header><strong>Coding Tools</strong><time>17:29</time></header><p>我会把信息架构改为任务导向：先展示系统是否可用和下一步操作，再把工具协议、密钥和运行参数收进高级区域。</p></article>
+                <article class="message user"><header><strong>你</strong><time>17:31</time></header><p>要同时兼容桌面、平板和手机。</p></article>
+                <article class="message"><header><strong>Coding Tools</strong><time>17:32</time></header><p>展示稿采用可折叠侧栏、移动端底部导航、单列卡片和 44px 触控目标，并保留键盘焦点与减少动画设置。</p></article>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="page-section" id="page-security" data-page-section="security" aria-labelledby="security-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">安全与设置</p><h1 id="security-title">用清晰选择代替复杂参数</h1><p>按使用场景提供推荐模式。普通用户不需要理解端口、来源列表、OAuth 或 Secret Vault，仍可获得安全默认值。</p></div>
+            <div class="button-row"><button class="button button-secondary" type="button" data-mock-action="运行安全检查"><svg class="icon icon-sm"><use href="#i-shield"></use></svg>重新检查</button><button class="button button-primary" type="button" data-mock-action="保存安全设置"><svg class="icon icon-sm"><use href="#i-check"></use></svg>保存设置</button></div>
+          </div>
+
+          <div class="security-grid">
+            <article class="security-card featured">
+              <div class="security-top"><div class="security-heading"><span class="security-icon"><svg class="icon"><use href="#i-shield"></use></svg></span><span><strong>安全编辑</strong><span>推荐模式</span></span></div><span class="badge success">正在使用</span></div>
+              <p class="security-description">允许查看和常规编辑，同时保留危险命令与敏感位置的保护确认。</p>
+              <ul class="plain-list"><li class="list-row"><span><svg class="icon"><use href="#i-check"></use></svg>文件访问限制在授权目录</span></li><li class="list-row"><span><svg class="icon"><use href="#i-check"></use></svg>危险操作需要明确确认</span></li><li class="list-row"><span><svg class="icon"><use href="#i-check"></use></svg>适合日常本机工作</span></li></ul>
+              <div class="security-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="查看安全编辑详情">查看详情</button></div>
+            </article>
+
+            <article class="security-card">
+              <div class="security-top"><div class="security-heading"><span class="security-icon"><svg class="icon"><use href="#i-globe"></use></svg></span><span><strong>访问范围</strong><span>当前仅本机</span></span></div><span class="badge success">安全</span></div>
+              <p class="security-description">管理页面和 MCP 服务只允许这台电脑访问，不会自动暴露到局域网或互联网。</p>
+              <div class="security-meta"><div class="meta-line"><span>访问方式</span><strong>仅本机</strong></div><div class="meta-line"><span>浏览器来源</span><strong>自动限制</strong></div><div class="meta-line"><span>公开地址</span><strong>未启用</strong></div></div>
+              <div class="security-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="修改访问范围">修改范围</button></div>
+            </article>
+
+            <article class="security-card">
+              <div class="security-top"><div class="security-heading"><span class="security-icon"><svg class="icon"><use href="#i-key"></use></svg></span><span><strong>登录与凭据</strong><span>加密保存</span></span></div><span class="badge success">已保护</span></div>
+              <p class="security-description">密码和 Token 不会在列表中回显。需要替换时直接输入新值，无需先读取旧值。</p>
+              <div class="security-meta"><div class="meta-line"><span>凭据保险箱</span><strong>已启用</strong></div><div class="meta-line"><span>管理登录</span><strong>已连接</strong></div><div class="meta-line"><span>最近轮换</span><strong>7 天前</strong></div></div>
+              <div class="security-actions"><button class="button button-secondary button-sm" type="button" data-mock-action="管理登录与凭据">管理凭据</button></div>
+            </article>
+          </div>
+
+          <details class="card advanced-card">
+            <summary><span><strong>高级技术信息</strong><span class="muted-text">供排障和部署时使用，日常无需修改</span></span></summary>
+            <div class="advanced-content">
+              <div class="technical-block"><span>监听地址</span><code>127.0.0.1</code></div>
+              <div class="technical-block"><span>服务端口</span><code>8000</code></div>
+              <div class="technical-block"><span>权限模式</span><code>safe</code></div>
+              <div class="technical-block"><span>工具暴露模式</span><code>broker</code></div>
+              <div class="technical-block"><span>OAuth 公开地址</span><code>未配置</code></div>
+              <div class="technical-block"><span>配置版本</span><code>rev-20260806-1842</code></div>
+            </div>
+          </details>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <nav class="mobile-nav" aria-label="移动端主要导航">
+    <button type="button" data-page="overview" aria-current="page"><svg class="icon"><use href="#i-grid"></use></svg><span>总览</span></button>
+    <button type="button" data-page="connections"><svg class="icon"><use href="#i-plug"></use></svg><span>工具</span></button>
+    <button type="button" data-page="workspaces"><svg class="icon"><use href="#i-folder"></use></svg><span>文件夹</span></button>
+    <button type="button" data-page="security"><svg class="icon"><use href="#i-shield"></use></svg><span>安全</span></button>
+  </nav>
+
+  <dialog id="connectionDialog" aria-labelledby="dialog-title">
+    <form class="dialog-shell" id="connectionForm" method="dialog">
+      <header class="dialog-header">
+        <div><h2 id="dialog-title">添加工具连接</h2><p>先选择用途，系统会准备合适的默认设置。</p></div>
+        <button class="icon-button" type="button" data-close-dialog aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button>
+      </header>
+      <div class="dialog-body">
+        <div class="type-grid" aria-label="连接类型">
+          <button class="type-option" type="button" aria-pressed="true" data-connection-type="本机文件工具"><span class="card-icon"><svg class="icon"><use href="#i-files"></use></svg></span><strong>文件与目录</strong><span>让 AI 使用这台电脑上的指定文件夹</span></button>
+          <button class="type-option" type="button" aria-pressed="false" data-connection-type="浏览器工具"><span class="card-icon"><svg class="icon"><use href="#i-browser"></use></svg></span><strong>浏览器工具</strong><span>完成网页查找、填写和自动化步骤</span></button>
+          <button class="type-option" type="button" aria-pressed="false" data-connection-type="在线服务"><span class="card-icon"><svg class="icon"><use href="#i-globe"></use></svg></span><strong>在线服务</strong><span>通过网址连接团队或云端工具</span></button>
+          <button class="type-option" type="button" aria-pressed="false" data-connection-type="其他工具"><span class="card-icon"><svg class="icon"><use href="#i-plug"></use></svg></span><strong>其他工具</strong><span>使用自定义命令或高级配置</span></button>
+        </div>
+
+        <div class="form-grid">
+          <div class="field full"><label for="connectionName">连接名称</label><input id="connectionName" name="connectionName" placeholder="例如：项目资料库" required><small>使用容易识别的名称，不必填写技术别名。</small></div>
+          <div class="field"><label for="connectionLocation">运行位置</label><select id="connectionLocation" name="connectionLocation"><option>这台电脑</option><option>通过网址连接</option></select></div>
+          <div class="field"><label for="connectionAccess">访问方式</label><select id="connectionAccess" name="connectionAccess"><option>按需使用（推荐）</option><option>始终显示全部能力</option></select></div>
+          <div class="field full"><label for="connectionNote">用途说明（可选）</label><textarea id="connectionNote" name="connectionNote" rows="3" placeholder="例如：读取团队研究资料，不允许修改原文件"></textarea></div>
+        </div>
+      </div>
+      <footer class="dialog-footer">
+        <button class="button button-secondary" type="button" data-close-dialog>取消</button>
+        <button class="button button-primary" type="submit"><svg class="icon icon-sm"><use href="#i-arrow"></use></svg>继续设置</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+
+  <script>
+    const pageMeta = {
+      overview: ['总览', '查看服务状态和下一步操作'],
+      connections: ['工具连接', '连接和管理 AI 可以使用的能力'],
+      workspaces: ['工作文件夹', '控制 AI 可以访问的文件范围'],
+      records: ['聊天记录', '查找、回顾和恢复工作过程'],
+      security: ['安全与设置', '使用推荐模式保护服务和凭据'],
+    };
+
+    const body = document.body;
+    const root = document.documentElement;
+    const sidebar = document.getElementById('sidebar');
+    const menuButton = document.getElementById('menuButton');
+    const drawerBackdrop = document.getElementById('drawerBackdrop');
+    const topbarTitle = document.getElementById('topbarTitle');
+    const topbarSubtitle = document.getElementById('topbarSubtitle');
+    const themeToggle = document.getElementById('themeToggle');
+    const lightThemeIcon = themeToggle.querySelector('.theme-icon-light');
+    const darkThemeIcon = themeToggle.querySelector('.theme-icon-dark');
+    const connectionDialog = document.getElementById('connectionDialog');
+    const connectionForm = document.getElementById('connectionForm');
+    const toastRegion = document.getElementById('toastRegion');
+
+    function closeDrawer() {
+      body.classList.remove('drawer-open');
+      menuButton.setAttribute('aria-expanded', 'false');
+      menuButton.setAttribute('aria-label', '打开导航');
+    }
+
+    function openDrawer() {
+      body.classList.add('drawer-open');
+      menuButton.setAttribute('aria-expanded', 'true');
+      menuButton.setAttribute('aria-label', '关闭导航');
+    }
+
+    function setPage(page, { focus = true } = {}) {
+      if (!pageMeta[page]) return;
+
+      document.querySelectorAll('[data-page-section]').forEach((section) => {
+        section.hidden = section.dataset.pageSection !== page;
+      });
+
+      document.querySelectorAll('[data-page]').forEach((button) => {
+        if (button.dataset.page === page) button.setAttribute('aria-current', button.closest('.mobile-nav') ? 'page' : 'page');
+        else button.removeAttribute('aria-current');
+      });
+
+      const [title, subtitle] = pageMeta[page];
+      topbarTitle.textContent = title;
+      topbarSubtitle.textContent = subtitle;
+      document.title = `${title} · Coding Tools UI 概念展示`;
+      closeDrawer();
+
+      if (focus) {
+        const main = document.getElementById('main-content');
+        main.focus({ preventScroll: true });
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    }
+
+    function showToast(title, detail = '这是概念展示，不会修改真实配置。') {
+      const toast = document.createElement('div');
+      toast.className = 'toast';
+      toast.innerHTML = `
+        <span class="card-icon" aria-hidden="true"><svg class="icon"><use href="#i-check"></use></svg></span>
+        <span><strong></strong><span></span></span>
+      `;
+      toast.querySelector('strong').textContent = title;
+      toast.querySelector('span span').textContent = detail;
+      toastRegion.appendChild(toast);
+      window.setTimeout(() => toast.remove(), 3200);
+    }
+
+    document.addEventListener('click', (event) => {
+      const pageTrigger = event.target.closest('[data-page]');
+      if (pageTrigger) {
+        setPage(pageTrigger.dataset.page);
+        return;
+      }
+
+      const pageLink = event.target.closest('[data-page-link]');
+      if (pageLink) {
+        event.preventDefault();
+        setPage(pageLink.dataset.pageLink);
+        return;
+      }
+
+      if (event.target.closest('[data-open-connection-dialog]')) {
+        connectionDialog.showModal();
+        window.setTimeout(() => document.getElementById('connectionName').focus(), 0);
+        return;
+      }
+
+      if (event.target.closest('[data-close-dialog]')) {
+        connectionDialog.close();
+        return;
+      }
+
+      const mockAction = event.target.closest('[data-mock-action]');
+      if (mockAction) showToast(mockAction.dataset.mockAction);
+    });
+
+    menuButton.addEventListener('click', () => {
+      if (body.classList.contains('drawer-open')) closeDrawer();
+      else openDrawer();
+    });
+
+    drawerBackdrop.addEventListener('click', closeDrawer);
+
+    window.addEventListener('resize', () => {
+      if (window.innerWidth > 980) closeDrawer();
+    });
+
+    themeToggle.addEventListener('click', () => {
+      const dark = root.dataset.theme !== 'dark';
+      root.dataset.theme = dark ? 'dark' : 'light';
+      themeToggle.setAttribute('aria-pressed', String(dark));
+      themeToggle.setAttribute('aria-label', dark ? '切换浅色模式' : '切换深色模式');
+      lightThemeIcon.hidden = dark;
+      darkThemeIcon.hidden = !dark;
+    });
+
+    document.querySelectorAll('.chip').forEach((chip) => {
+      chip.addEventListener('click', () => {
+        const group = chip.parentElement;
+        group.querySelectorAll('.chip').forEach((item) => item.setAttribute('aria-pressed', 'false'));
+        chip.setAttribute('aria-pressed', 'true');
+      });
+    });
+
+    document.querySelectorAll('[data-switch-name]').forEach((input) => {
+      input.addEventListener('change', () => {
+        showToast(`${input.dataset.switchName}${input.checked ? '已启用' : '已暂停'}`);
+      });
+    });
+
+    document.querySelectorAll('[data-connection-type]').forEach((option) => {
+      option.addEventListener('click', () => {
+        document.querySelectorAll('[data-connection-type]').forEach((item) => item.setAttribute('aria-pressed', 'false'));
+        option.setAttribute('aria-pressed', 'true');
+      });
+    });
+
+    connectionForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const name = document.getElementById('connectionName').value.trim() || '新工具连接';
+      connectionDialog.close();
+      connectionForm.reset();
+      document.querySelectorAll('[data-connection-type]').forEach((item, index) => item.setAttribute('aria-pressed', index === 0 ? 'true' : 'false'));
+      showToast(`已创建“${name}”的展示草稿`, '下一步将进入连接检查；本展示页不会保存任何数据。');
+    });
+
+    connectionDialog.addEventListener('click', (event) => {
+      const rect = connectionDialog.getBoundingClientRect();
+      const outside = event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+      if (outside) connectionDialog.close();
+    });
+
+    document.querySelectorAll('.record-button').forEach((button) => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.record-button').forEach((item) => item.removeAttribute('aria-current'));
+        button.setAttribute('aria-current', 'true');
+        showToast(`已选择“${button.querySelector('strong').textContent}”`, '右侧详情区域为静态展示内容。');
+      });
+    });
+
+    setPage('overview', { focus: false });
+  </script>
+  <!-- 普通脚本而非 ES module，确保直接双击 file:// 页面时也能加载。 -->
+  <script src="./showcase-live.js?v=20260806-2"></script>
+</body>
+</html>
