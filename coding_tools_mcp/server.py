@@ -6503,6 +6503,28 @@ def load_workspace_startup(
     return config_dir, settings, catalog
 
 
+def apply_persisted_runtime_settings(
+    args: argparse.Namespace,
+    settings: dict[str, Any],
+) -> None:
+    """Apply WebUI-persisted startup settings before building runtime policy.
+
+    Command line arguments and explicit environment variables remain the
+    highest-precedence startup controls. The admin settings store is the
+    fallback source for values edited in WebUI, so a service restart actually
+    activates those saved values.
+    """
+
+    if getattr(args, "host", None) is None:
+        args.host = settings.get("host") or os.environ.get(f"{ENV_PREFIX}_HOST") or "127.0.0.1"
+    if getattr(args, "port", None) is None:
+        args.port = settings.get("port") or env_int(f"{ENV_PREFIX}_PORT", 8000)
+    if getattr(args, "permission_mode", None) is None:
+        args.permission_mode = settings.get("permission_mode")
+    if getattr(args, "shell_env_inherit", None) is None:
+        args.shell_env_inherit = settings.get("shell_env_inherit")
+
+
 def upstream_config_path(args: argparse.Namespace, config_dir: Path) -> Path:
     explicit = (
         getattr(args, "upstream_config", None)
@@ -6714,8 +6736,9 @@ def run_http(args: argparse.Namespace) -> int:
         return 2
     auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or None
     try:
-        runtime_policy = runtime_policy_from_args(args)
         config_dir, startup_settings, workspace_catalog = load_workspace_startup(args)
+        apply_persisted_runtime_settings(args, startup_settings)
+        runtime_policy = runtime_policy_from_args(args)
         workspace_bindings = normalize_oauth_client_workspace_bindings(
             startup_settings.get("oauth_client_workspace_bindings"),
             workspace_catalog,
@@ -6968,8 +6991,9 @@ def run_http(args: argparse.Namespace) -> int:
 
 def run_stdio(args: argparse.Namespace) -> int:
     try:
+        config_dir, startup_settings, workspace_catalog = load_workspace_startup(args)
+        apply_persisted_runtime_settings(args, startup_settings)
         runtime_policy = runtime_policy_from_args(args)
-        config_dir, _settings, workspace_catalog = load_workspace_startup(args)
         binding = WorkspaceBindingResolver(workspace_catalog).resolve_stdio()
         upstream_snapshot = load_upstream_startup(args, config_dir)
         server_vault = SecretVault(
@@ -7015,13 +7039,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--host",
-        default=os.environ.get(f"{ENV_PREFIX}_HOST") or "127.0.0.1",
+        default=None,
         help=f"bind host; defaults to {ENV_PREFIX}_HOST or 127.0.0.1",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=env_int(f"{ENV_PREFIX}_PORT", 8000),
+        default=None,
         help=f"bind port; defaults to {ENV_PREFIX}_PORT or 8000",
     )
     parser.add_argument("--stdio", action="store_true", help="serve newline-delimited JSON-RPC over stdio")
