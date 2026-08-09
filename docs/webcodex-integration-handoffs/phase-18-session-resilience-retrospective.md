@@ -21,10 +21,30 @@ All source commits below are from `integration/webcodex-runner`. For every row, 
 
 ## Evidence added after the source work
 
-RM01-RM10 provide current remediation evidence rather than retroactively changing the RS history. The relevant additions include HTTP/upstream recovery, frozen-catalog and role-isolation checks, create/call/close race coverage, close cleanup, aggregate observability, the HTTP matrix, transcript/stdio controls, loopback WebSocket exception handling, and two completed RM10 measurements of 0/100/128/500 full Runtime working-set points. The RM10 measurements are capacity evidence only; the production default remains 128.
+RM01-RM12 provide current remediation evidence rather than retroactively changing the RS history. The relevant additions include HTTP/upstream recovery, frozen-catalog and role-isolation checks, create/call/close race coverage, close cleanup, aggregate observability, the HTTP matrix, transcript/stdio controls, loopback WebSocket exception handling, two completed RM10 measurements of 0/100/128/500 full Runtime working-set points, the RM12 Core 25 and aggregate gates, and independent Ubuntu WSL POSIX sidecar evidence. The RM10 measurements are capacity evidence only; the production default remains 128.
 
-The historical source work and the later remediation are therefore separate evidence layers. RM11 records the provenance gap; it does not claim that the missing handoffs existed earlier, and it does not close the release gate.
+The historical source work and the later remediation are therefore separate evidence layers. RM11 recorded the provenance gap; it did not claim that the missing handoffs existed earlier or close the release gate.
 
-## Open release gates
+## Current RM Handoffs
 
-Phase 18 and Phase 22 remain `in remediation`. RM12 must rerun the aggregate Core 25, resilience, persistence, security, and `main...HEAD` range-diff gates. RM11 does not claim that the range diff or the final release validation passed. RM13 remains responsible for the final handoff after those gates.
+- `integration-remediation/RM00-canonical-checkpoint.md`
+- `integration-remediation/RM01-http-upstream-recovery.md`
+- `integration-remediation/RM02-deep-freeze-catalog-template.md`
+- `integration-remediation/RM03-operator-admin-role-isolation.md`
+- `integration-remediation/RM04-runner-mcp-create-call-close-race.md`
+- `integration-remediation/RM05-http-session-close-cleanup.md`
+- `integration-remediation/RM06-upstream-aggregate-observability.md`
+- `integration-remediation/RM07-session-resilience-http-matrix.md`
+- `integration-remediation/RM08-transcript-permissions-stdio-redaction.md`
+- `integration-remediation/RM09-loopback-ws-exception.md`
+- `integration-remediation/RM10-full-runtime-capacity.md`
+- `integration-remediation/RM11-retrospective-status-honesty.md`
+- `integration-remediation/RM12-release-aggregate-blocked.md` (historical blocked result)
+- `integration-remediation/RM12A-local-gate-remediation.md`
+- `integration-remediation/RM12B-linux-posix-evidence.md`
+- `integration-remediation/RM13-final-release-handoff.md`
+
+RM12 passed its Core 25, resilience, security/persistence, Linux POSIX, and
+`main...HEAD` range-diff gates for candidate commit `81072da`. RM13 records the
+final Phase 18/22 status; this list does not rewrite the historical blocked RM12
+handoff.

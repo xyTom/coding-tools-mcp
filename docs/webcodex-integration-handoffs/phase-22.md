@@ -2,7 +2,7 @@
 
 ## Status
 
-- Result: `d8c1cc8` is the canonical implementation baseline; Phase 22 release status remains **in remediation** until all RM12 aggregate/audit gates pass and RM13 issues the final handoff. No release-complete claim is made yet.
+- Result: complete; `d8c1cc8` is the canonical implementation baseline and RM13 records the final release handoff after RM12 gates passed.
 - Branch: `integration/webcodex-runtime-platform`
 - Baseline HEAD: `252c2f0b5508e6b6c23a330e3417943960249eca`
 - Implementation commit: `d8c1cc855f71303a525da288a6c8e895a76a10b8`.
@@ -21,28 +21,25 @@
 
 Some contract fixture cases are skipped on this Windows validation host because POSIX `/dev/null`/signal fixtures are unavailable. The grouped suites themselves exit 0; skipped platform fixtures are not counted as passed behavior on Windows.
 
-### Final integration rerun
+### RM12 final aggregate rerun
 
-The final canonical working-tree rerun on 2026-08-09 completed with these explicit gates:
+The exact RM12 gates were rerun on candidate commit `81072da`:
 
-| Gate | Result |
-| --- | --- |
-| Runner WebSocket + remote capabilities/MCP + HTTP Session + upstream resilience/lazy catalog aggregate | exit 0 |
-| Core MCP / strict JSON / schema drift / tool golden / runtime semantics / upstream compliance group | exit 0 (`skipped=50`, platform/fixture conditional) |
-| Admin / OAuth persistence / security / chat / Operator / Agent Platform group | exit 0 (`skipped=15`, platform/fixture conditional) |
-| Runtime helpers / required docs / compliance report / e2e / Windows smoke / support / dogfood groups | exit 0 (`skipped=19`, platform/fixture conditional) |
-| OAuth fail-closed | exit 0 |
-| OAuth integration + refresh | exit 0 |
-| OAuth signing + store | exit 0 |
-| tracked top-level Desktop / v0.2.2 contract / packaging / release / settings / telemetry / WebUI / Workspace binding group | exit 0 (`skipped=1`, PySide6 conditional) |
-| new ExecutionBackend / Operator / Semantic / Validation / WorkspaceHost group | exit 0 |
-| WebUI Node tests + production build | exit 0 |
-| final schema drift + v0.2.2 integration contract + MCP contract quick gate | exit 0 (`skipped=37`, POSIX fixture conditional) |
-| required-docs compliance after final handoff update | exit 0 |
-| common secret-prefix/private-key literal scan over the canonical worktree | 0 matches |
-| `git diff --check` (working tree) | exit 0 | Working-tree check only; `main...HEAD` range check is re-run in RM12. |
+| Exact command/group | Exit | Result |
+| --- | ---: | --- |
+| `python -m unittest tests.compliance.test_tool_golden tests.compliance.test_schema_drift tests.compliance.test_mcp_contract` | 0 | 54 tests; 46 skipped: 9 tool-golden and 37 MCP-contract Windows `/dev/null` fixture skips; schema drift 8 passed |
+| In-process Runtime catalog check | 0 | Registry 25; exposed list 25; `listChanged=False` |
+| Runner/resilience aggregate from RM12.2 | 0 | 198 tests; 1 PySide6 skip; no failures or unhandled thread exception |
+| Security/persistence aggregate from RM12.3 | 0 | 65 tests; 1 Windows POSIX skip |
+| Ubuntu WSL `python3 -m unittest tests.compliance.test_chat_persistence.ChatPersistenceTests.test_startup_settings_transcript_and_sqlite_sidecars_are_private` | 0 | 1 passed; real settings/config/transcript/database/WAL/SHM/journal mode evidence |
+| Ubuntu WSL `python3 -m unittest tests.compliance.test_chat_persistence` | 0 | 17 tests; 1 Windows file-sharing skip |
+| `git diff --check` | 0 | Passed |
+| `git diff --check main...HEAD` | 0 | Passed |
+| `git diff --name-status main...HEAD` | 0 | Passed |
 
-One attempted monolithic compliance run and two aggregate top-level/OAuth commands exceeded the coding-tools command/session window. They are not counted as passing evidence; every tracked compliance module and affected top-level area was rerun in shorter groups above with explicit exit 0 results.
+Platform skips are recorded as skips, not silently counted as passed behavior.
+The Linux POSIX permission result is supplied by Ubuntu WSL; Windows skips do
+not substitute for it.
 
 ### OAuth / Admin / Operator / secrets
 
@@ -147,6 +144,7 @@ Phase 21 is optional by product contract. It is **not enabled** in this integrat
 - Benchmark/tests use temporary/synthetic state and loopback only.
 - Remote root remains opaque in the Control Plane and is rejected by local filesystem scope helpers.
 - Ambiguous mutating calls are never automatically replayed.
+- Ubuntu WSL independently verified transcript/config/SQLite sidecar POSIX modes for candidate commit `81072da`; no real user data was used.
 
 ## Release Notes / Limitations
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-- Result: in remediation (release gate held open pending RM12 aggregate verification and RM13 final handoff)
+- Result: complete; RM12 aggregate and audit gates passed, and RM13 issued the final release handoff
 - Branch: `integration/webcodex-runtime-platform`
 - Canonical worktree: `G:\LLM\coding-tools-mcp\.worktrees\webcodex-runtime-platform`
 - Baseline HEAD before integrated working-tree changes: `252c2f0b5508e6b6c23a330e3417943960249eca`
@@ -126,7 +126,7 @@ The 500 Session-manager metadata point remains lightweight and is not evidence t
 
 ## Known Recovery Paths
 
-Capacity/identity/initialization pressure returns explicit JSON-RPC backpressure with retry guidance; active request leases block delete/prune/shutdown from closing in-use Runtimes; stale idle Sessions can be closed to reclaim capacity; upstream failures back off without automatic reconnect loops; unavailable Runner routes recover through authenticated reconnect plus inventory reconciliation. The final aggregate gate and audit for these recovery paths are held in RM12; this document does not independently assert a blanket "restart never required" claim.
+Capacity/identity/initialization pressure returns explicit JSON-RPC backpressure with retry guidance; active request leases block delete/prune/shutdown from closing in-use Runtimes; stale idle Sessions can be closed to reclaim capacity; upstream failures back off without automatic reconnect loops; unavailable Runner routes recover through authenticated reconnect plus inventory reconciliation. RM12 aggregate and audit evidence for these recovery paths passed; recovery remains bounded and does not imply an unconditional restart guarantee.
 
 ## Evidence / Documentation
 
@@ -136,6 +136,8 @@ Capacity/identity/initialization pressure returns explicit JSON-RPC backpressure
 - `docs/webcodex-runner-troubleshooting.md`
 - `docs/webcodex-migration-rollback.md`
 - `docs/webcodex-integration-handoffs/phase-18-session-resilience-retrospective.md` (real RS00–RS07 provenance)
+- `docs/webcodex-integration-handoffs/integration-remediation/RM12B-linux-posix-evidence.md`
+- `docs/webcodex-integration-handoffs/integration-remediation/RM13-final-release-handoff.md`
 - tests: HTTP session resilience, upstream resilience/lazy catalog, Runner remote/MCP/capabilities/WebSocket, WorkspaceHost/binding.
 
 ## Remaining Deployment Limit

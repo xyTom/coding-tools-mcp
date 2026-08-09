@@ -167,3 +167,9 @@ Deployments may tune these values after measuring their actual language servers,
 - 500 full Runtime objects were measured twice on this Windows validation host only; other platforms and hosts may differ.
 
 No comparative claim against WebCodex, Codex, or another product should be made from these measurements.
+
+## Release Handoff References
+
+- `docs/webcodex-integration-handoffs/integration-remediation/RM10-full-runtime-capacity.md`
+- `docs/webcodex-integration-handoffs/integration-remediation/RM12B-linux-posix-evidence.md`
+- `docs/webcodex-integration-handoffs/integration-remediation/RM13-final-release-handoff.md`
