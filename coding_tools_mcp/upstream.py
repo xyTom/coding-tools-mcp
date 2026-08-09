@@ -933,6 +933,8 @@ class HttpUpstreamClient(BaseUpstreamClient):
                 self.session_id = None
             next_state = UpstreamClientState.NEW
         elif ambiguous_transport:
+            with self._session_lock:
+                self.session_id = None
             self._resilience.record_failure(self._resilience_key, exc.code)
             next_state = UpstreamClientState.BACKING_OFF
         elif auth_failure or exc.category == "protocol":
@@ -984,7 +986,7 @@ class HttpUpstreamClient(BaseUpstreamClient):
         headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
-            **self.config.headers,
+            **_without_protected_headers(self.config.headers),
         }
         with self._session_lock:
             current_session_id = self.session_id
@@ -1013,20 +1015,13 @@ class HttpUpstreamClient(BaseUpstreamClient):
                     expected_id=expected_id if type(expected_id) is int else None,
                 )
         except urllib.error.HTTPError as exc:
-            raw = exc.read(MAX_RESPONSE_BYTES + 1)
-            if len(raw) <= MAX_RESPONSE_BYTES and raw:
-                try:
-                    return decode_http_rpc_response(
-                        raw,
-                        exc.headers.get("Content-Type", ""),
-                        expected_id=(
-                            payload.get("id")
-                            if type(payload.get("id")) is int
-                            else None
-                        ),
-                    )
-                except (UpstreamError, UnicodeDecodeError, ValueError):
-                    pass
+            # An HTTP error body is diagnostic input only. It must never turn a
+            # non-2xx response into a successful JSON-RPC result, even when the
+            # body happens to contain a valid envelope.
+            try:
+                exc.read(MAX_RESPONSE_BYTES + 1)
+            except OSError:
+                pass
             raise UpstreamError(
                 "UPSTREAM_HTTP_ERROR",
                 f"Upstream MCP server returned HTTP {exc.code}.",
@@ -1080,9 +1075,9 @@ class HttpUpstreamClient(BaseUpstreamClient):
             return
         headers = {
             "Accept": "application/json, text/event-stream",
+            **_without_protected_headers(self.config.headers),
             "Mcp-Session-Id": session_id,
             "MCP-Protocol-Version": self.protocol_version,
-            **self.config.headers,
         }
         token = os.environ.get(self.config.authorization_env) if self.config.authorization_env else None
         if token:
@@ -2383,6 +2378,19 @@ def upstream_error_result(
         "content": [{"type": "text", "text": message}],
         "structuredContent": payload,
         "isError": True,
+    }
+
+
+_PROTECTED_HTTP_HEADER_NAMES = frozenset(
+    {"mcp-session-id", "mcp-protocol-version", "authorization"}
+)
+
+
+def _without_protected_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    return {
+        str(key): str(value)
+        for key, value in headers.items()
+        if str(key).lower() not in _PROTECTED_HTTP_HEADER_NAMES
     }
 
 
