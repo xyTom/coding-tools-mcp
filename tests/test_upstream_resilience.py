@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+import urllib.error
+from unittest.mock import patch
 
 from coding_tools_mcp.upstream import HttpUpstreamClient, UpstreamError, UpstreamServerConfig
 from coding_tools_mcp.upstream_resilience import (
@@ -189,29 +191,53 @@ class UpstreamResilienceTests(unittest.TestCase):
         self.assertEqual(client.transport_state, UpstreamClientState.READY)
         client.close()
 
-    def test_unknown_session_clears_id_and_only_next_call_reinitializes(self) -> None:
-        clock = FakeClock()
-        client = ScriptedHttpClient(config(), coordinator(clock))
-        client.initialize()
-        client.session_id = "stale-session"
-        client.call_errors.append(
-            UpstreamError(
-                "UPSTREAM_HTTP_ERROR",
-                "synthetic unknown session",
-                category="upstream",
-                retryable=False,
-                details={"status": 404},
-            )
+    def test_unknown_session_404_and_410_clear_id_and_only_next_call_reinitializes(self) -> None:
+        for status in (404, 410):
+            with self.subTest(status=status):
+                clock = FakeClock()
+                client = ScriptedHttpClient(config(), coordinator(clock))
+                client.initialize()
+                client.session_id = "stale-session"
+                client.call_errors.append(
+                    UpstreamError(
+                        "UPSTREAM_HTTP_ERROR",
+                        "synthetic unknown session",
+                        category="upstream",
+                        retryable=False,
+                        details={"status": status},
+                    )
+                )
+                with self.assertRaises(UpstreamError):
+                    client.call_tool_raw("read", {})
+                self.assertIsNone(client.session_id)
+                self.assertEqual(client.transport_state, UpstreamClientState.NEW)
+                self.assertEqual(client.initialize_attempts, 1)
+                client.call_tool_raw("read", {})
+                self.assertEqual(client.initialize_attempts, 2)
+                self.assertEqual(client.tool_call_attempts, 2)
+                client.close()
+
+    def test_remote_delete_fault_matrix_is_bounded_idempotent_and_releases_local_session(self) -> None:
+        faults = (
+            (urllib.error.HTTPError("http://127.0.0.1/mcp", 404, "gone", {}, None), 1, 0),
+            (urllib.error.HTTPError("http://127.0.0.1/mcp", 410, "gone", {}, None), 1, 0),
+            (urllib.error.HTTPError("http://127.0.0.1/mcp", 403, "forbidden", {}, None), 0, 1),
+            (urllib.error.HTTPError("http://127.0.0.1/mcp", 502, "bad gateway", {}, None), 0, 1),
+            (TimeoutError("synthetic close timeout"), 0, 1),
         )
-        with self.assertRaises(UpstreamError):
-            client.call_tool_raw("read", {})
-        self.assertIsNone(client.session_id)
-        self.assertEqual(client.transport_state, UpstreamClientState.NEW)
-        self.assertEqual(client.initialize_attempts, 1)
-        client.call_tool_raw("read", {})
-        self.assertEqual(client.initialize_attempts, 2)
-        self.assertEqual(client.tool_call_attempts, 2)
-        client.close()
+        for fault, success_count, failure_count in faults:
+            with self.subTest(fault=type(fault).__name__, status=getattr(fault, "code", None)):
+                clock = FakeClock()
+                client = ScriptedHttpClient(config(), coordinator(clock))
+                client.session_id = "session-to-close"
+                with patch("coding_tools_mcp.upstream.urllib.request.urlopen", side_effect=fault) as request:
+                    client.close()
+                    client.close()
+                self.assertEqual(request.call_count, 1)
+                self.assertIsNone(client.session_id)
+                self.assertEqual(client.remote_delete_success_total, success_count)
+                self.assertEqual(client.remote_delete_failure_total, failure_count)
+                self.assertEqual(client.transport_state, UpstreamClientState.CLOSED)
 
     def test_auth_failure_does_not_enter_automatic_reconnect_loop(self) -> None:
         clock = FakeClock()

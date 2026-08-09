@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +17,7 @@ from .agent_backends.base import AgentBackendEvent
 from .agent_session_store import AgentSessionRecord
 from .agent_sessions import AgentSessionService, AgentSessionServiceError
 from .handoff import build_session_handoff
+from .validation import ValidationBackend
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError, WorkspaceEntry
 
 
@@ -63,19 +64,27 @@ class OperatorAPIService:
         agent_sessions: AgentSessionService,
         workspace_catalog: WorkspaceCatalog,
         workspace_status: Callable[[WorkspaceEntry], Mapping[str, Any]] | None = None,
+        handoff_jobs: (
+            Callable[[OperatorPrincipal, WorkspaceEntry], Iterable[Mapping[str, Any]]] | None
+        ) = None,
+        validation_backend_factory: Callable[[WorkspaceEntry], ValidationBackend] | None = None,
     ) -> None:
         self.agent_sessions = agent_sessions
         self.workspace_catalog = workspace_catalog
         self.workspace_status = workspace_status
+        self.handoff_jobs = handoff_jobs
+        self.validation_backend_factory = validation_backend_factory
         self._event_lock = threading.RLock()
         self._events: dict[str, deque[dict[str, Any]]] = {}
         self._next_sequence: dict[str, int] = {}
+        self._validation_results: dict[str, dict[str, Any]] = {}
 
     def close(self) -> None:
         self.agent_sessions.close()
         with self._event_lock:
             self._events.clear()
             self._next_sequence.clear()
+            self._validation_results.clear()
 
     def list_workspaces(self, principal: OperatorPrincipal) -> dict[str, Any]:
         workspaces: list[dict[str, Any]] = []
@@ -258,6 +267,44 @@ class OperatorAPIService:
         cursor = events[-1]["sequence"] if events else max(0, int(after))
         return {"events": events, "cursor": cursor}
 
+    def run_validation(
+        self,
+        principal: OperatorPrincipal,
+        session_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        session_id = self._required_string(session_id, "session_id", 256)
+        recipe = self._required_string(body.get("recipe"), "recipe", 128)
+        record = self.agent_sessions.get_session(session_id, principal.principal_id)
+        workspace = self._require_workspace(principal, record.workspace_id)
+        factory = self.validation_backend_factory
+        if factory is None:
+            raise OperatorAPIError(
+                "operator_validation_unavailable",
+                "Structured validation is unavailable.",
+                status=503,
+                retryable=True,
+            )
+        try:
+            backend = factory(workspace)
+            try:
+                result = backend.run(recipe)
+            finally:
+                backend.close()
+        except OperatorAPIError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - backend failures stay behind Operator boundary
+            raise OperatorAPIError(
+                "operator_validation_unavailable",
+                "Structured validation backend is unavailable.",
+                status=503,
+                retryable=True,
+            ) from exc
+        payload = result.payload()
+        with self._event_lock:
+            self._validation_results[session_id] = dict(payload)
+        return {"validation": payload}
+
     def handoff(
         self,
         principal: OperatorPrincipal,
@@ -278,11 +325,20 @@ class OperatorAPIService:
                 raise
             events = self._buffered_events(session_id, after=0)
         record = self.agent_sessions.get_session(session_id, principal.principal_id)
+        jobs = (
+            tuple(self.handoff_jobs(principal, workspace))
+            if self.handoff_jobs is not None
+            else ()
+        )
+        with self._event_lock:
+            validation = dict(self._validation_results[session_id]) if session_id in self._validation_results else None
         return {
             "handoff": build_session_handoff(
                 record,
                 workspace,
                 events=events,
+                validation=validation,
+                jobs=jobs,
             )
         }
 

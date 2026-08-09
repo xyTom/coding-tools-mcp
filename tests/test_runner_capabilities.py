@@ -196,6 +196,7 @@ class RunnerCapabilityRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.remote_fingerprint = {
             "version": 1,
             "git_available": True,
+            "branch": "feature/remote",
             "head": "aaa",
             "worktree_digest": "clean",
             "instruction_digest": "instructions-a",
@@ -271,6 +272,7 @@ class RunnerCapabilityRoutingTests(unittest.IsolatedAsyncioTestCase):
             params={},
         )
         fingerprint = response["fingerprint"]
+        self.assertEqual(fingerprint["branch"], "feature/remote")
         self.assertEqual(fingerprint["head"], "aaa")
         self.assertTrue(fingerprint["remote"])
         self.assertNotIn("root", fingerprint)

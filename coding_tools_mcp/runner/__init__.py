@@ -17,10 +17,12 @@ from .credentials import (
 from .jobs import (
     JobAccessError,
     JobInventoryItem,
+    RunnerJobInventoryRegistry,
     JobReconcileResult,
     JobRecord,
     JobState,
     RunnerJobReconciler,
+    WorkspaceJobManager,
 )
 from .protocol import (
     RUNNER_PROTOCOL_VERSION,
@@ -64,6 +66,7 @@ __all__ = [
     "IssuedRunnerCredential",
     "JobAccessError",
     "JobInventoryItem",
+    "RunnerJobInventoryRegistry",
     "JobReconcileResult",
     "JobRecord",
     "JobState",
@@ -90,6 +93,7 @@ __all__ = [
     "RunnerEvent",
     "RunnerHello",
     "RunnerJobReconciler",
+    "WorkspaceJobManager",
     "RunnerMcpRouter",
     "RunnerMcpSessionHost",
     "RunnerProtocolError",

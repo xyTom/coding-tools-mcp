@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Protocol
 
+from .jobs import JobInventoryItem, JobState, MAX_RUNNER_JOBS
 from .protocol import validate_identifier
 from .transport import RunnerUnavailableError
 
@@ -472,6 +473,24 @@ class RemoteMcpRouteService:
             "runner_id": runner_id,
             "instance_id": getattr(transport, "instance_id", None),
         }
+
+    def next_runner_event_sync(self, runner_id: str, *, timeout: float = 5.0) -> Any:
+        transport = self._transport(runner_id)
+        reader = getattr(transport, "next_event_sync", None)
+        if not callable(reader):
+            raise RemoteMcpRouteError(
+                "RUNNER_EVENT_UNAVAILABLE",
+                "remote Runner event stream is unavailable",
+                retryable=True,
+            )
+        try:
+            return reader(timeout=timeout)
+        except RunnerUnavailableError as exc:
+            raise RemoteMcpRouteError(
+                "RUNNER_UNAVAILABLE",
+                str(exc),
+                retryable=True,
+            ) from exc
 
     def close_transports_sync(self) -> None:
         """Bounded Control Plane shutdown of all attached Runner transports."""
@@ -936,6 +955,57 @@ class RunnerMcpSessionHost:
             raise RemoteMcpRouteError("RUNNER_SESSION_INVENTORY_INVALID", "Runner session inventory exceeds bound")
         return tuple(items)
 
+    def job_inventory(self) -> tuple[JobInventoryItem, ...]:
+        """Return bounded job facts derived from real Runtime ExecSessions."""
+
+        with self._lock:
+            records = tuple(self._by_control.values())
+        items: list[JobInventoryItem] = []
+        seen: set[str] = set()
+        for record in records:
+            for item in _runtime_job_inventory(record.runtime, record.workspace_id):
+                if item.job_id in seen:
+                    raise RemoteMcpRouteError(
+                        "RUNNER_JOB_INVENTORY_INVALID",
+                        "Runner job inventory contains a duplicate job id",
+                    )
+                seen.add(item.job_id)
+                items.append(item)
+                if len(items) > MAX_RUNNER_JOBS:
+                    raise RemoteMcpRouteError(
+                        "RUNNER_JOB_INVENTORY_INVALID",
+                        "Runner job inventory exceeds the bounded limit",
+                    )
+        return tuple(items)
+
+    def describe_job(
+        self,
+        *,
+        control_session_id: str,
+        remote_session_id: str,
+        workspace_id: str,
+        authorization_digest: str,
+        job_id: str,
+    ) -> JobInventoryItem:
+        """Describe one ExecSession after applying the MCP route authorization boundary."""
+
+        authorization_digest = _required_digest(authorization_digest)
+        with self._lock:
+            record = self._by_remote.get(remote_session_id)
+            if record is None:
+                raise RemoteMcpRouteError("RUNNER_ROUTE_NOT_FOUND", "remote MCP Runtime is unknown")
+            if (
+                record.control_session_id != control_session_id
+                or record.workspace_id != workspace_id
+                or not hmac.compare_digest(record.authorization_digest, authorization_digest)
+            ):
+                raise RemoteMcpRouteError("RUNNER_ROUTE_FORBIDDEN", "remote MCP job route does not match")
+            runtime = record.runtime
+        item = _runtime_job_item(runtime, workspace_id, job_id)
+        if item is None:
+            raise RemoteMcpRouteError("RUNNER_JOB_NOT_FOUND", "Runner job is unknown")
+        return item
+
     def call_session(
         self,
         *,
@@ -1031,6 +1101,8 @@ class RunnerMcpRouter:
                     "Runner capability routing is not configured",
                 )
             return self.capability_dispatcher(workspace_id, method, params)
+        if method == "job.inventory":
+            return {"jobs": [item.payload() for item in self.sessions.job_inventory()]}
         if method == "mcp.create":
             record = self.sessions.create(
                 control_session_id=_required_route_id(params.get("control_session_id"), "control_session_id"),
@@ -1048,6 +1120,15 @@ class RunnerMcpRouter:
             return {"closed": closed}
         if method == "mcp.inventory":
             return {"sessions": [item.payload() for item in self.sessions.inventory(workspace_id)]}
+        if method == "mcp.job.describe":
+            item = self.sessions.describe_job(
+                control_session_id=_required_route_id(params.get("control_session_id"), "control_session_id"),
+                remote_session_id=_required_route_id(params.get("remote_session_id"), "remote_session_id"),
+                workspace_id=workspace_id,
+                authorization_digest=_required_digest(params.get("authorization_key_digest")),
+                job_id=_required_route_id(params.get("job_id"), "job_id"),
+            )
+            return {"job": item.payload()}
         if method == "mcp.call":
             nested_method = params.get("method")
             nested_params = params.get("params", {})
@@ -1055,17 +1136,116 @@ class RunnerMcpRouter:
                 raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "remote MCP method is required")
             if not isinstance(nested_params, Mapping):
                 raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "remote MCP params must be an object")
-            return {
-                "result": self.sessions.call_session(
-                    control_session_id=_required_route_id(params.get("control_session_id"), "control_session_id"),
-                    remote_session_id=_required_route_id(params.get("remote_session_id"), "remote_session_id"),
-                    workspace_id=workspace_id,
-                    authorization_digest=_required_digest(params.get("authorization_key_digest")),
-                    method=nested_method,
-                    params=nested_params,
-                )
-            }
+            control_session_id = _required_route_id(params.get("control_session_id"), "control_session_id")
+            remote_session_id = _required_route_id(params.get("remote_session_id"), "remote_session_id")
+            authorization_digest = _required_digest(params.get("authorization_key_digest"))
+            result = self.sessions.call_session(
+                control_session_id=control_session_id,
+                remote_session_id=remote_session_id,
+                workspace_id=workspace_id,
+                authorization_digest=authorization_digest,
+                method=nested_method,
+                params=nested_params,
+            )
+            response: dict[str, Any] = {"result": result}
+            if nested_method == "tools/call":
+                tool_name = nested_params.get("name")
+                job_id = _job_id_from_tool_result(result, nested_params)
+                if tool_name in {"exec_command", "write_stdin", "kill_session"} and job_id is not None:
+                    try:
+                        item = self.sessions.describe_job(
+                            control_session_id=control_session_id,
+                            remote_session_id=remote_session_id,
+                            workspace_id=workspace_id,
+                            authorization_digest=authorization_digest,
+                            job_id=job_id,
+                        )
+                    except RemoteMcpRouteError as exc:
+                        if exc.code != "RUNNER_JOB_NOT_FOUND":
+                            raise
+                    else:
+                        if tool_name != "exec_command" or item.state == JobState.RUNNING:
+                            response["job"] = item.payload()
+            return response
         raise RemoteMcpRouteError("RUNNER_RPC_METHOD_UNSUPPORTED", "Runner MCP method is unsupported")
+
+
+def _runtime_job_inventory(runtime: Any, workspace_id: str) -> tuple[JobInventoryItem, ...]:
+    sessions = getattr(runtime, "sessions", None)
+    output_sessions = getattr(runtime, "output_sessions", None)
+    lock = getattr(runtime, "sessions_lock", None)
+    if not isinstance(sessions, dict) or not isinstance(output_sessions, dict) or lock is None:
+        return ()
+    with lock:
+        items = tuple({**output_sessions, **sessions}.items())
+    result: list[JobInventoryItem] = []
+    for job_id, _session in items:
+        item = _runtime_job_item(runtime, workspace_id, str(job_id))
+        if item is not None:
+            result.append(item)
+    return tuple(result)
+
+
+def _runtime_job_item(runtime: Any, workspace_id: str, job_id: str) -> JobInventoryItem | None:
+    sessions = getattr(runtime, "sessions", None)
+    output_sessions = getattr(runtime, "output_sessions", None)
+    lock = getattr(runtime, "sessions_lock", None)
+    if not isinstance(sessions, dict) or not isinstance(output_sessions, dict) or lock is None:
+        return None
+    with lock:
+        session = sessions.get(job_id) or output_sessions.get(job_id)
+    if session is None:
+        return None
+    refresh = getattr(session, "refresh_status", None)
+    if callable(refresh):
+        refresh()
+    process = getattr(session, "process", None)
+    pid = getattr(process, "pid", None)
+    started_at = getattr(session, "started_at", None)
+    if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(started_at, (int, float)):
+        raise RemoteMcpRouteError(
+            "RUNNER_JOB_INVENTORY_INVALID",
+            "Runner ExecSession process identity is unavailable",
+        )
+    fingerprint = hashlib.sha256(f"{pid}:{float(started_at):.9f}".encode("ascii")).hexdigest()
+    exit_code = getattr(session, "exit_code", None)
+    timed_out = bool(getattr(session, "timed_out", False))
+    signal_name = getattr(session, "signal_name", None)
+    poll = process.poll() if callable(getattr(process, "poll", None)) else exit_code
+    if poll is None:
+        state = JobState.RUNNING
+    elif signal_name is not None:
+        state = JobState.CANCELLED
+    elif timed_out or exit_code not in {0, None}:
+        state = JobState.FAILED
+    else:
+        state = JobState.COMPLETED
+    stdout_cursor = getattr(session, "stdout_total_bytes", 0)
+    stderr_cursor = getattr(session, "stderr_total_bytes", 0)
+    return JobInventoryItem(
+        job_id=job_id,
+        workspace_id=workspace_id,
+        process_fingerprint=fingerprint,
+        state=state,
+        stdout_cursor=stdout_cursor if isinstance(stdout_cursor, int) else 0,
+        stderr_cursor=stderr_cursor if isinstance(stderr_cursor, int) else 0,
+        started_at=f"{float(started_at):.9f}",
+    )
+
+
+def _job_id_from_tool_result(result: Any, params: Mapping[str, Any]) -> str | None:
+    if isinstance(result, Mapping):
+        structured = result.get("structuredContent")
+        if isinstance(structured, Mapping):
+            value = structured.get("session_id")
+            if isinstance(value, str) and value:
+                return value
+    arguments = params.get("arguments")
+    if isinstance(arguments, Mapping):
+        value = arguments.get("session_id")
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _close_intent(route: RemoteMcpRoute) -> RemoteCloseIntent:

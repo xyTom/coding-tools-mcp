@@ -279,7 +279,9 @@ class CodexAppServerBackendTests(unittest.TestCase):
         )
         backend = CodexAppServerBackend(config)
         try:
-            self.assertTrue(backend.health().available)
+            health = backend.health()
+            self.assertTrue(health.available)
+            self.assertEqual(health.version, "test")
             thread = backend.create_thread(instructions="Use the fake backend.")
             self.assertEqual(thread.thread_id, "thread-1")
             resumed = backend.resume_thread(thread.thread_id)

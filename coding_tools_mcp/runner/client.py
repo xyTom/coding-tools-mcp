@@ -6,12 +6,13 @@ import argparse
 import asyncio
 import concurrent.futures
 import os
+import queue
 import secrets
 import sys
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from ..agent_backends import CodexAppServerBackend, CodexAppServerConfig
 from ..repo_fingerprint import build_repo_fingerprint
@@ -21,9 +22,11 @@ from ..workspace_binding import WorkspaceBinding
 from ..workspace_catalog import WorkspaceEntry
 from ..workspace_host import LocalWorkspaceHost
 from .capabilities import RunnerCapabilityError, RunnerCapabilityHost
+from .jobs import JobInventoryItem, MAX_RUNNER_JOBS, RunnerJobInventoryRegistry
 from .protocol import (
     RUNNER_PROTOCOL_VERSION,
     RunnerDisconnect,
+    RunnerEvent,
     RunnerHello,
     RunnerProtocolError,
     WorkspaceInventoryItem,
@@ -42,6 +45,7 @@ from .websocket import (
 
 
 RUNNER_CREDENTIAL_ENV = "CODING_TOOLS_MCP_RUNNER_CREDENTIAL"
+MAX_RUNNER_PENDING_EVENTS = 1000
 
 
 class RunnerClientError(RuntimeError):
@@ -75,16 +79,20 @@ class RunnerPeer:
         config: RunnerClientConfig,
         hello: RunnerHello,
         router: RunnerMcpRouter,
+        *,
+        job_inventory_provider: Callable[[], Iterable[JobInventoryItem]] | None = None,
     ) -> None:
         if hello.runner_id != config.runner_id or hello.instance_id != config.instance_id:
             raise ValueError("Runner hello identity must match client configuration")
         self.config = config
         self.hello = hello
         self.router = router
+        self._job_inventory_provider = job_inventory_provider
         self._stop = asyncio.Event()
         self._websocket: AsyncSocketWebSocket | None = None
         self._heartbeat_sequence = 0
         self._owner_loop: asyncio.AbstractEventLoop | None = None
+        self._events: queue.Queue[RunnerEvent] = queue.Queue(maxsize=MAX_RUNNER_PENDING_EVENTS)
 
     async def run_forever(self) -> None:
         delay = self.config.reconnect_initial_seconds
@@ -112,17 +120,22 @@ class RunnerPeer:
         websocket = connection.websocket
         self._websocket = websocket
         heartbeat: asyncio.Task[None] | None = None
+        event_sender: asyncio.Task[None] | None = None
         try:
             await websocket.send(encode_message(self.hello.message_payload()))
             acknowledgement = decode_message(await websocket.recv())
             self._validate_hello_ack(acknowledgement)
+            await self._send_job_inventory(websocket)
+            event_sender = asyncio.create_task(self._event_sender_loop(websocket))
             heartbeat = asyncio.create_task(self._heartbeat_loop(websocket))
             await self._serve_rpc(websocket)
         finally:
-            if heartbeat is not None:
-                heartbeat.cancel()
+            for task in (heartbeat, event_sender):
+                if task is None:
+                    continue
+                task.cancel()
                 try:
-                    await heartbeat
+                    await task
                 except asyncio.CancelledError:
                     pass
             self._websocket = None
@@ -157,6 +170,23 @@ class RunnerPeer:
             )
         except (OSError, WebSocketClosedError):
             pass
+
+    def publish_event(self, event: RunnerEvent) -> None:
+        if not isinstance(event, RunnerEvent):
+            raise RunnerClientError("Runner event is invalid.")
+        if (
+            event.runner_id != self.config.runner_id
+            or event.instance_id != self.config.instance_id
+        ):
+            raise RunnerClientError("Runner event identity does not match this peer.")
+        if event.workspace_id is not None:
+            advertised = {item.workspace_id for item in self.hello.workspaces}
+            if event.workspace_id not in advertised:
+                raise RunnerClientError("Runner event Workspace is not advertised by this peer.")
+        try:
+            self._events.put_nowait(event)
+        except queue.Full as exc:
+            raise RunnerClientError("Runner event queue is full.") from exc
 
     async def _serve_rpc(self, websocket: AsyncSocketWebSocket) -> None:
         while not self._stop.is_set():
@@ -204,6 +234,26 @@ class RunnerPeer:
                 return
             raise RunnerProtocolError("unsupported Control Plane Runner message type")
 
+    async def _send_job_inventory(self, websocket: AsyncSocketWebSocket) -> None:
+        provider = self._job_inventory_provider
+        if provider is None:
+            return
+        items = tuple(provider())
+        if len(items) > MAX_RUNNER_JOBS:
+            raise RunnerClientError("Runner job inventory exceeds the bounded limit.")
+        if not all(isinstance(item, JobInventoryItem) for item in items):
+            raise RunnerClientError("Runner job inventory provider returned an invalid item.")
+        await websocket.send(
+            encode_message(
+                {
+                    "type": "job_inventory",
+                    "runner_id": self.config.runner_id,
+                    "instance_id": self.config.instance_id,
+                    "jobs": [item.payload() for item in items],
+                }
+            )
+        )
+
     async def _heartbeat_loop(self, websocket: AsyncSocketWebSocket) -> None:
         while not self._stop.is_set():
             await asyncio.sleep(self.config.heartbeat_seconds)
@@ -221,6 +271,15 @@ class RunnerPeer:
                 )
             )
 
+    async def _event_sender_loop(self, websocket: AsyncSocketWebSocket) -> None:
+        while not self._stop.is_set():
+            try:
+                event = self._events.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.02)
+                continue
+            await websocket.send(encode_message(event.message_payload()))
+
     def _validate_hello_ack(self, payload: dict[str, Any]) -> None:
         if payload.get("type") != "hello_ack":
             raise RunnerProtocolError("Control Plane did not acknowledge Runner hello")
@@ -235,7 +294,12 @@ class RunnerPeer:
 class LocalRunnerApplication:
     """Runner-local composition of MCP/Agent/Semantic/Validation capabilities."""
 
-    def __init__(self, workspaces: Iterable[WorkspaceEntry]) -> None:
+    def __init__(
+        self,
+        workspaces: Iterable[WorkspaceEntry],
+        *,
+        upstream_manager_factory: Callable[[], Any] | None = None,
+    ) -> None:
         entries = tuple(workspaces)
         if not entries:
             raise ValueError("Runner requires at least one Workspace")
@@ -245,6 +309,7 @@ class LocalRunnerApplication:
         for entry in entries:
             if entry.target != "local" or not isinstance(entry.root, Path):
                 raise ValueError("Runner-local Workspace entries must use local Path roots")
+        self._upstream_manager_factory = upstream_manager_factory
 
         self.mcp_sessions = RunnerMcpSessionHost(self._runtime_factory)
         self.capabilities = RunnerCapabilityHost(
@@ -253,6 +318,7 @@ class LocalRunnerApplication:
             validation_backend_factory=self._validation_backend_factory,
             fingerprint_factory=self._fingerprint_factory,
         )
+        self.jobs = RunnerJobInventoryRegistry()
         self.router = RunnerMcpRouter(self.mcp_sessions, self.capabilities.dispatch)
 
     def hello(
@@ -266,7 +332,7 @@ class LocalRunnerApplication:
             runner_id=runner_id,
             instance_id=instance_id,
             credential=credential,
-            capabilities=("agent", "mcp", "semantic", "validation"),
+            capabilities=("agent", "jobs", "mcp", "semantic", "validation"),
             workspaces=tuple(
                 WorkspaceInventoryItem(entry.id, entry.name, str(entry.root))
                 for entry in self.workspaces.values()
@@ -277,6 +343,19 @@ class LocalRunnerApplication:
     def close(self) -> None:
         self.capabilities.shutdown()
         self.mcp_sessions.shutdown()
+
+    def job_inventory(self) -> tuple[JobInventoryItem, ...]:
+        """Merge explicit Runner jobs with Runtime-derived ExecSession jobs."""
+
+        merged = {item.job_id: item for item in self.jobs.snapshot()}
+        for item in self.mcp_sessions.job_inventory():
+            existing = merged.get(item.job_id)
+            if existing is not None and existing != item:
+                raise RunnerClientError("Runner job inventory contains conflicting job identities.")
+            merged[item.job_id] = item
+        if len(merged) > MAX_RUNNER_JOBS:
+            raise RunnerClientError("Runner job inventory exceeds the bounded limit.")
+        return tuple(merged[job_id] for job_id in sorted(merged))
 
     def _entry(self, workspace_id: str) -> WorkspaceEntry:
         try:
@@ -298,11 +377,22 @@ class LocalRunnerApplication:
         from ..server import Runtime
 
         entry = self._entry(workspace_id)
-        return Runtime(
-            entry.root,
-            workspace_binding=WorkspaceBinding(entry.id, entry.root, "runner"),
-            transport="http",
+        upstream_manager = (
+            self._upstream_manager_factory()
+            if self._upstream_manager_factory is not None
+            else None
         )
+        try:
+            return Runtime(
+                entry.root,
+                workspace_binding=WorkspaceBinding(entry.id, entry.root, "runner"),
+                upstream_manager=upstream_manager,
+                transport="http",
+            )
+        except BaseException:
+            if upstream_manager is not None:
+                upstream_manager.close()
+            raise
 
     def _agent_backend_factory(self, workspace_id: str, backend_kind: str) -> CodexAppServerBackend:
         entry = self._entry(workspace_id)
@@ -365,12 +455,58 @@ def validate_runner_url(url: str, *, allow_insecure_ws: bool) -> str:
     return url
 
 
+def build_runner_upstream_manager_factory(
+    upstream_config: str | None,
+) -> Callable[[], Any] | None:
+    """Build one Runner-local immutable catalog template and per-Runtime clients."""
+
+    from ..secret_vault import SecretVault, SecretVaultError
+    from ..settings_store import default_settings_dir
+    from ..upstream import UpstreamConfigError
+    from ..server import (
+        ENV_PREFIX,
+        SERVER_SECRET_VAULT_FILENAME,
+        build_upstream_manager,
+        discover_upstream_catalog_template,
+        load_upstream_startup,
+        upstream_secret_resolver,
+    )
+
+    namespace = argparse.Namespace(upstream_config=upstream_config)
+    config_dir = default_settings_dir()
+    try:
+        snapshot = load_upstream_startup(namespace, config_dir)
+        if not snapshot.configs:
+            return None
+        vault = SecretVault(
+            config_dir / SERVER_SECRET_VAULT_FILENAME,
+            os.environ.get(f"{ENV_PREFIX}_SECRETS_KEY"),
+        )
+        secret_resolver = upstream_secret_resolver(snapshot, vault)
+        template = discover_upstream_catalog_template(
+            snapshot,
+            secret_resolver=secret_resolver,
+        )
+    except (OSError, ValueError, UpstreamConfigError, SecretVaultError) as exc:
+        raise RunnerClientError(f"Runner upstream configuration is unavailable: {exc}") from exc
+
+    return lambda: build_upstream_manager(
+        snapshot,
+        secret_resolver=secret_resolver,
+        catalog_template=template,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Coding Tools MCP remote Runner")
     parser.add_argument("--server", required=True, help="Control Plane Runner WebSocket URL (wss://.../runner/ws)")
     parser.add_argument("--runner-id", required=True)
     parser.add_argument("--workspace", action="append", required=True, metavar="ID=PATH")
     parser.add_argument("--credential-file")
+    parser.add_argument(
+        "--upstream-config",
+        help="Runner-local upstream Gateway config; defaults to local server config/env when present",
+    )
     parser.add_argument("--heartbeat-seconds", type=float, default=15.0)
     parser.add_argument("--reconnect-initial-seconds", type=float, default=1.0)
     parser.add_argument("--reconnect-max-seconds", type=float, default=30.0)
@@ -395,7 +531,10 @@ def main(argv: list[str] | None = None) -> int:
             reconnect_initial_seconds=args.reconnect_initial_seconds,
             reconnect_max_seconds=args.reconnect_max_seconds,
         )
-        application = LocalRunnerApplication(workspaces)
+        application = LocalRunnerApplication(
+            workspaces,
+            upstream_manager_factory=build_runner_upstream_manager_factory(args.upstream_config),
+        )
         peer = RunnerPeer(
             config,
             application.hello(
@@ -404,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
                 credential=config.credential,
             ),
             application.router,
+            job_inventory_provider=application.job_inventory,
         )
     except (OSError, ValueError, RunnerClientError, RunnerProtocolError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -427,6 +567,7 @@ __all__ = [
     "RunnerClientConfig",
     "RunnerClientError",
     "RunnerPeer",
+    "build_runner_upstream_manager_factory",
     "load_runner_credential",
     "main",
     "parse_workspace_spec",

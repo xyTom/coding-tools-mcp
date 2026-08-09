@@ -29,6 +29,7 @@ def build_repo_fingerprint(root: str | Path) -> dict[str, Any]:
         return {
             "version": 1,
             "git_available": False,
+            "branch": None,
             "head": None,
             "worktree_digest": None,
             "instruction_digest": None,
@@ -39,6 +40,7 @@ def build_repo_fingerprint(root: str | Path) -> dict[str, Any]:
         }
 
     head_raw = _git_output(resolved, "rev-parse", "--verify", "HEAD")
+    branch_raw = _git_output(resolved, "symbolic-ref", "--quiet", "--short", "HEAD")
     status_raw = _git_output(
         resolved,
         "status",
@@ -48,6 +50,7 @@ def build_repo_fingerprint(root: str | Path) -> dict[str, Any]:
     )
     git_available = head_raw is not None and status_raw is not None
     head = _first_line(head_raw) if head_raw is not None else None
+    branch = _first_line(branch_raw) if branch_raw is not None else None
     changed_paths = _status_paths(status_raw or b"")
     worktree_digest = (
         hashlib.sha256(status_raw).hexdigest() if status_raw is not None else None
@@ -64,6 +67,7 @@ def build_repo_fingerprint(root: str | Path) -> dict[str, Any]:
     return {
         "version": 1,
         "git_available": git_available,
+        "branch": branch,
         "head": head,
         "worktree_digest": worktree_digest,
         "instruction_digest": instruction_digest,
@@ -82,6 +86,8 @@ def fingerprint_changes(
     if not previous:
         return ()
     changes: list[str] = []
+    if "branch" in previous and previous.get("branch") != current.get("branch"):
+        changes.append("Branch changed")
     if previous.get("head") != current.get("head"):
         changes.append("HEAD changed")
     if previous.get("instruction_digest") != current.get("instruction_digest"):

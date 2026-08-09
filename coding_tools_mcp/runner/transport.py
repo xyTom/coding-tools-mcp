@@ -191,6 +191,29 @@ class RunnerWebSocketTransport:
         except TimeoutError as exc:
             raise RunnerUnavailableError("runner event wait timed out") from exc
 
+    def next_event_sync(self, *, timeout: float = 5.0) -> RunnerEvent:
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        if self._closed or not self._owner_loop.is_running():
+            raise RunnerUnavailableError("runner transport is closed")
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is self._owner_loop:
+            raise RunnerTransportError(
+                "synchronous Runner event wait cannot block the transport event loop"
+            )
+        future = asyncio.run_coroutine_threadsafe(
+            self.next_event(timeout=timeout),
+            self._owner_loop,
+        )
+        try:
+            return future.result(timeout=timeout + 1.0)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise RunnerUnavailableError("runner synchronous event wait timed out") from exc
+
     async def call(
         self,
         *,
@@ -423,6 +446,11 @@ class RunnerWebSocketTransport:
         await self._websocket.close()
 
     def _handle_job_inventory(self, payload: dict[str, Any]) -> None:
+        if (
+            payload.get("runner_id") != self.runner_id
+            or payload.get("instance_id") != self.instance_id
+        ):
+            raise RunnerProtocolError("runner job inventory identity does not match authenticated runner")
         if self._reconciler is None:
             return
         raw_jobs = payload.get("jobs")

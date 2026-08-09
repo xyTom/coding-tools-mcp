@@ -654,6 +654,8 @@ class RunnerWebSocketTransportTests(unittest.IsolatedAsyncioTestCase):
         reconnected.feed(
             {
                 "type": "job_inventory",
+                "runner_id": "runner-1",
+                "instance_id": "instance-1",
                 "jobs": [
                     JobInventoryItem(
                         "job-1",

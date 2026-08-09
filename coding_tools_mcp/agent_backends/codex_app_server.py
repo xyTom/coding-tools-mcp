@@ -86,6 +86,7 @@ class CodexAppServerBackend:
     def __init__(self, config: CodexAppServerConfig) -> None:
         self.config = config
         self.process: subprocess.Popen[bytes] | None = None
+        self._server_version: str | None = None
         self._initialized = False
         self._closed = False
         self._next_id = 1
@@ -146,6 +147,11 @@ class CodexAppServerBackend:
                     "AGENT_BACKEND_PROTOCOL_ERROR",
                     "Codex App Server initialize result was not an object.",
                 )
+            server_info = result.get("serverInfo")
+            if isinstance(server_info, dict):
+                version = server_info.get("version")
+                if isinstance(version, str) and version:
+                    self._server_version = version[:128]
             self._notify("initialized")
             self._initialized = True
         except BaseException:
@@ -169,7 +175,7 @@ class CodexAppServerBackend:
                     "details": {},
                 },
             )
-        return BackendHealth(True, self.backend_kind)
+        return BackendHealth(True, self.backend_kind, version=self._server_version)
 
     def create_thread(self, *, instructions: str | None = None) -> BackendThread:
         result = self._request_object("thread/start", self._thread_params(instructions))

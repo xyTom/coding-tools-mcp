@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import itertools
+import threading
 import unittest
 from typing import Any
 from unittest.mock import patch
 
 from coding_tools_mcp import upstream as upstream_module
+from coding_tools_mcp.runner.jobs import JobAccessError, RunnerJobReconciler, WorkspaceJobManager
 from coding_tools_mcp.runner.routing import (
     RemoteMcpRouteError,
     RemoteMcpRouteService,
@@ -17,6 +19,7 @@ from coding_tools_mcp.runner.routing import (
 )
 from coding_tools_mcp.runner.transport import RunnerUnavailableError
 from coding_tools_mcp.upstream import HttpUpstreamClient, UpstreamServerConfig
+from coding_tools_mcp.workspace_host import RemoteMcpHttpRuntimeProxy
 
 
 class FakeRuntime:
@@ -95,6 +98,21 @@ class FakeRunnerTransport:
         self.calls.append((workspace_id, method, payload))
         return self.router.dispatch(workspace_id, method, payload)
 
+    def call_sync(
+        self,
+        *,
+        workspace_id: str,
+        method: str,
+        params: dict[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> Any:
+        del request_id
+        if not self.available:
+            raise RunnerUnavailableError("synthetic Runner disconnect")
+        payload = dict(params or {})
+        self.calls.append((workspace_id, method, payload))
+        return self.router.dispatch(workspace_id, method, payload)
+
     def method_count(self, method: str) -> int:
         return sum(1 for _workspace, called_method, _params in self.calls if called_method == method)
 
@@ -142,6 +160,91 @@ class RunnerMcpRoutingTests(unittest.IsolatedAsyncioTestCase):
             workspace_id="ws-a",
             authorization_key=self.authorization_key,
         )
+
+    async def test_remote_exec_job_sidecar_registers_owner_and_matches_runner_inventory(self) -> None:
+        class FakeProcess:
+            pid = 4321
+
+            @staticmethod
+            def poll() -> None:
+                return None
+
+        class FakeExecSession:
+            session_id = "exec-job-1"
+            process = FakeProcess()
+            started_at = 1234.5
+            stdout_total_bytes = 12
+            stderr_total_bytes = 3
+            timed_out = False
+            signal_name = None
+            exit_code = None
+
+            @staticmethod
+            def refresh_status() -> None:
+                return None
+
+        class JobRuntime(FakeRuntime):
+            def __init__(self) -> None:
+                super().__init__("remote-job-runtime")
+                self.sessions_lock = threading.Lock()
+                self.sessions = {"exec-job-1": FakeExecSession()}
+                self.output_sessions: dict[str, Any] = {}
+
+            def call_tool(
+                self,
+                name: str,
+                arguments: dict[str, Any] | None,
+                *,
+                request_id: str | int | None = None,
+            ) -> dict[str, Any]:
+                if name == "exec_command":
+                    return {
+                        "content": [{"type": "text", "text": "running"}],
+                        "structuredContent": {
+                            "ok": True,
+                            "session_id": "exec-job-1",
+                            "status": "running",
+                        },
+                        "isError": False,
+                    }
+                return super().call_tool(name, arguments, request_id=request_id)
+
+        host = RunnerMcpSessionHost(lambda _workspace, _auth: JobRuntime())
+        service = RemoteMcpRouteService(RemoteMcpRouteStore(max_routes=4))
+        transport = FakeRunnerTransport("runner-job", ("ws-a",), RunnerMcpRouter(host))
+        await service.attach_transport(transport)
+        reconciler = RunnerJobReconciler()
+        manager = WorkspaceJobManager(reconciler, runner_id="runner-job", workspace_id="ws-a")
+        proxy = RemoteMcpHttpRuntimeProxy(
+            service,
+            runner_id="runner-job",
+            workspace_id="ws-a",
+            authorization_key=self.authorization_key,
+            session_authorization_key=("oauth", "client-a", "grant-a", "ws-a"),
+            job_manager=manager,
+            owner_principal_id="oauth:client-a:grant-a",
+        )
+        try:
+            result = proxy.call_tool("exec_command", {"cmd": "synthetic-long-command"})
+            self.assertEqual(result["structuredContent"]["session_id"], "exec-job-1")
+            self.assertNotIn("job", result)
+            job = manager.get_for_owner("exec-job-1", "oauth:client-a:grant-a")
+            inventory = host.job_inventory()
+            self.assertEqual(len(inventory), 1)
+            self.assertEqual(job.process_fingerprint, inventory[0].process_fingerprint)
+            self.assertEqual((job.stdout_cursor, job.stderr_cursor), (12, 3))
+            refreshed = service.call_runner_sync(
+                runner_id="runner-job",
+                workspace_id="ws-a",
+                method="job.inventory",
+                params={},
+            )
+            self.assertEqual(refreshed["jobs"], [inventory[0].payload()])
+            with self.assertRaises(JobAccessError):
+                manager.get_for_owner("exec-job-1", "oauth:other:grant")
+        finally:
+            proxy.close()
+            host.shutdown()
 
     async def test_delete_routes_to_creator_runner_and_duplicate_delete_is_idempotent(self) -> None:
         await self.attach()
@@ -352,6 +455,7 @@ class RunnerMcpRoutingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(reconnect.method_count("mcp.inventory"), 1)
             self.assertEqual(reconnect.method_count("mcp.create"), 0)
             self.assertEqual(len(self.created), 1)
+            self.assertEqual(self.created[0].initialize_count, 0)
         route = self.store.get_authorized(
             "control-1",
             authorization_key=self.authorization_key,

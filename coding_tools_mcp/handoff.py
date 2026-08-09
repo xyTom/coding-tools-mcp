@@ -59,6 +59,7 @@ def build_session_handoff(
             "last_turn_id": record.last_turn_id,
         },
         "repository": {
+            "branch": _optional_bounded_string(fingerprint.get("branch"), 256),
             "head": _optional_bounded_string(fingerprint.get("head"), 128),
             "changed_paths": changed_paths,
             "git_status_summary": {

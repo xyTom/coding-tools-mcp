@@ -70,6 +70,47 @@ class WorkspaceHostFactoryTests(unittest.TestCase):
             finally:
                 host.close()
 
+    def test_sync_host_close_rejects_async_only_capability_instead_of_fake_closing(self) -> None:
+        class AsyncOnlyCapability:
+            async def close(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = WorkspaceEntry("local", "Local", root)
+            capability = AsyncOnlyCapability()
+            host = LocalWorkspaceHost(
+                workspace,
+                semantic_backend_factory=lambda _workspace: capability,
+            )
+            self.assertIs(host.get_semantic_backend(), capability)
+            with self.assertRaises(WorkspaceHostError) as caught:
+                host.close()
+            self.assertEqual(caught.exception.code, "ASYNC_CAPABILITY_CLOSE_UNSUPPORTED")
+
+    def test_sync_host_close_prefers_close_sync_for_async_transport_owner(self) -> None:
+        class BridgedCapability:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                raise AssertionError("async close must not be called by synchronous WorkspaceHost.close")
+
+            def close_sync(self) -> None:
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = WorkspaceEntry("local", "Local", root)
+            capability = BridgedCapability()
+            host = LocalWorkspaceHost(
+                workspace,
+                semantic_backend_factory=lambda _workspace: capability,
+            )
+            host.get_semantic_backend()
+            host.close()
+            self.assertTrue(capability.closed)
+
 
 if __name__ == "__main__":
     unittest.main()

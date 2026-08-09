@@ -502,6 +502,7 @@ def _bounded_fingerprint(raw: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "version": int(raw.get("version") or 1),
         "git_available": bool(raw.get("git_available", False)),
+        "branch": str(raw["branch"])[:128] if isinstance(raw.get("branch"), str) else None,
         "head": str(raw["head"])[:128] if isinstance(raw.get("head"), str) else None,
         "worktree_digest": str(raw["worktree_digest"])[:128] if isinstance(raw.get("worktree_digest"), str) else None,
         "instruction_digest": str(raw["instruction_digest"])[:128] if isinstance(raw.get("instruction_digest"), str) else None,

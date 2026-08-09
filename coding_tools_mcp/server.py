@@ -131,7 +131,7 @@ from .protocol import (
 from .project_context import ProjectContext, load_project_context
 from .repo_fingerprint import build_repo_fingerprint
 from .runner.credentials import RunnerCredentialStore
-from .runner.jobs import RunnerJobReconciler
+from .runner.jobs import JobAccessError, JobInventoryItem, RunnerJobReconciler, WorkspaceJobManager
 from .runner.registry import RunnerRegistry
 from .runner.routing import RemoteMcpRouteError, RemoteMcpRouteService, RemoteMcpRouteStore
 from .runner.transport import RunnerAuthenticationError, RunnerUnavailableError, RunnerWebSocketTransport
@@ -417,6 +417,15 @@ class AuthorizationContext:
             self.oauth_identity.grant_id if self.oauth_identity is not None else None,
             workspace_id,
         )
+
+    def principal_id(self) -> str | None:
+        if self.method == "oauth" and self.oauth_identity is not None:
+            return f"oauth:{self.oauth_identity.client_id}:{self.oauth_identity.grant_id}"
+        if self.method == "bearer":
+            return "bearer:static"
+        if self.method == "noauth":
+            return "noauth:local"
+        return None
 
 
 OAUTH_TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
@@ -5407,7 +5416,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if context.method == "oauth" and context.oauth_identity is not None:
             identity = context.oauth_identity
             return OperatorPrincipal(
-                f"oauth:{identity.client_id}:{identity.grant_id}",
+                context.principal_id() or "",
                 (identity.workspace_id,),
             )
         if context.method == "bearer":
@@ -5420,9 +5429,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 and secrets.compare_digest(bearer, admin_token)
             ):
                 return None
-            return OperatorPrincipal("bearer:static", (service.workspace_catalog.default_id,))
+            return OperatorPrincipal(context.principal_id() or "", (service.workspace_catalog.default_id,))
         if context.method == "noauth":
-            return OperatorPrincipal("noauth:local", (service.workspace_catalog.default_id,))
+            return OperatorPrincipal(context.principal_id() or "", (service.workspace_catalog.default_id,))
         return None
 
     def _send_operator_unauthorized(self, *, head_only: bool = False) -> None:
@@ -5596,6 +5605,14 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 and segments[2] == "turns"
             ):
                 self.send_json(service.send_turn(principal, segments[1], body))
+                return
+            if (
+                method == "POST"
+                and len(segments) == 3
+                and segments[0] == "sessions"
+                and segments[2] == "validation"
+            ):
+                self.send_json(service.run_validation(principal, segments[1], body))
                 return
             if (
                 method == "POST"
@@ -7266,6 +7283,7 @@ class BoundRuntimeFactory:
         upstream_secret_resolver: Callable[[str], str] | None = None,
         upstream_catalog_template: UpstreamCatalogTemplate | None = None,
         runner_route_service: RemoteMcpRouteService | None = None,
+        runner_job_reconciler: RunnerJobReconciler | None = None,
     ) -> None:
         self.args = args
         self.runtime_policy = runtime_policy
@@ -7276,6 +7294,7 @@ class BoundRuntimeFactory:
         self.upstream_secret_resolver = upstream_secret_resolver
         self.upstream_catalog_template = upstream_catalog_template
         self.runner_route_service = runner_route_service
+        self.runner_job_reconciler = runner_job_reconciler
         self._project_contexts: dict[tuple[str, str], ProjectContext] = {}
         self._lock = threading.Lock()
 
@@ -7296,12 +7315,23 @@ class BoundRuntimeFactory:
                 raise RuntimeError("Remote Runner routing is unavailable for this Workspace.")
             session_key = context.authorization_key(entry.id)
             route_key = json.dumps(session_key, separators=(",", ":"), ensure_ascii=True)
+            job_manager = (
+                WorkspaceJobManager(
+                    self.runner_job_reconciler,
+                    runner_id=entry.runner_id,
+                    workspace_id=entry.id,
+                )
+                if self.runner_job_reconciler is not None
+                else None
+            )
             return RemoteMcpHttpRuntimeProxy(
                 self.runner_route_service,
                 runner_id=entry.runner_id,
                 workspace_id=entry.id,
                 authorization_key=route_key,
                 session_authorization_key=session_key,
+                job_manager=job_manager,
+                owner_principal_id=context.principal_id(),
             )
         binding = self.resolver.resolve_http(context.method, context.oauth_identity)
         try:
@@ -7605,6 +7635,7 @@ def run_http(args: argparse.Namespace) -> int:
         upstream_secret_resolver=gateway_secret_resolver,
         upstream_catalog_template=upstream_catalog_template,
         runner_route_service=runner_route_service,
+        runner_job_reconciler=runner_job_reconciler,
     )
 
     try:
@@ -7673,6 +7704,11 @@ def run_http(args: argparse.Namespace) -> int:
         local_agent_backend_factory=local_agent_backend_factory,
         remote_route_service=runner_route_service,
         remote_runner_status=runner_route_service.runner_status,
+        remote_job_manager_factory=lambda runner_id, workspace_id: WorkspaceJobManager(
+            runner_job_reconciler,
+            runner_id=runner_id,
+            workspace_id=workspace_id,
+        ),
     )
 
     def agent_backend_factory(workspace: WorkspaceEntry, backend_kind: str) -> AgentSessionBackend:
@@ -7708,6 +7744,42 @@ def run_http(args: argparse.Namespace) -> int:
             raise RuntimeError("Runner workspace fingerprint response is invalid.")
         return dict(fingerprint)
 
+    def operator_handoff_jobs(
+        principal: OperatorPrincipal,
+        workspace: WorkspaceEntry,
+    ) -> tuple[dict[str, Any], ...]:
+        if workspace.target == "runner" and workspace.runner_id:
+            try:
+                response = runner_route_service.call_runner_sync(
+                    runner_id=workspace.runner_id,
+                    workspace_id=workspace.id,
+                    method="job.inventory",
+                    params={},
+                )
+                raw_jobs = response.get("jobs") if isinstance(response, dict) else None
+                if not isinstance(raw_jobs, list):
+                    raise ValueError("Runner job inventory response is invalid")
+                inventory = [JobInventoryItem.from_payload(item) for item in raw_jobs]
+                runner_status = runner_route_service.runner_status(workspace.runner_id)
+                instance_id = runner_status.get("instance_id")
+                runner_job_reconciler.reconcile(
+                    workspace.runner_id,
+                    inventory,
+                    runner_instance_id=instance_id if isinstance(instance_id, str) else None,
+                )
+            except (RemoteMcpRouteError, RunnerUnavailableError, JobAccessError, ValueError, TypeError):
+                pass
+        return tuple(
+            {"job_id": job.job_id, "status": job.state.value}
+            for job in runner_job_reconciler.list_for_owner(
+                principal.principal_id,
+                workspace.id,
+            )
+        )
+
+    def operator_validation_backend(workspace: WorkspaceEntry) -> ValidationBackend:
+        return workspace_hosts.create(workspace).get_validation_backend()
+
     try:
         operator_service = OperatorAPIService(
             AgentSessionService(
@@ -7718,6 +7790,8 @@ def run_http(args: argparse.Namespace) -> int:
             ),
             workspace_catalog,
             workspace_status=lambda entry: workspace_hosts.create(entry).snapshot_status(),
+            handoff_jobs=operator_handoff_jobs,
+            validation_backend_factory=operator_validation_backend,
         )
     except (AgentSessionStoreError, OSError) as exc:
         runtime.close()

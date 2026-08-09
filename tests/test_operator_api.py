@@ -19,6 +19,7 @@ from coding_tools_mcp.agent_session_store import AgentSessionStore
 from coding_tools_mcp.agent_sessions import AgentSessionService, AgentSessionServiceError
 from coding_tools_mcp.operator_api import OperatorAPIError, OperatorAPIService, OperatorPrincipal
 from coding_tools_mcp.server import MCPHandler, Runtime, RuntimeHTTPServer, configure_allowed_origins
+from coding_tools_mcp.validation import ValidationResult
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 
 
@@ -85,6 +86,26 @@ class FakeAgentBackend:
         self.closed = True
 
 
+class FakeValidationBackend:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def status(self) -> dict[str, object]:
+        return {"ok": True, "backend": "fake", "status": "ready", "recipes": ["python:test"]}
+
+    def run(self, recipe: str) -> ValidationResult:
+        return ValidationResult(
+            "passed",
+            recipe,
+            command="python -m unittest",
+            exit_code=0,
+            duration_ms=7,
+        )
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class OperatorAPIServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -110,7 +131,24 @@ class OperatorAPIServiceTests(unittest.TestCase):
 
         store = AgentSessionStore(root / "agent-sessions.sqlite3")
         sessions = AgentSessionService(store, self.catalog, backend_factory)
-        self.service = OperatorAPIService(sessions, self.catalog)
+        self.handoff_jobs: list[dict[str, object]] = []
+        self.validation_backends: list[FakeValidationBackend] = []
+
+        def validation_factory(_workspace: WorkspaceEntry) -> FakeValidationBackend:
+            backend = FakeValidationBackend()
+            self.validation_backends.append(backend)
+            return backend
+
+        self.service = OperatorAPIService(
+            sessions,
+            self.catalog,
+            handoff_jobs=lambda principal, workspace: (
+                tuple(self.handoff_jobs)
+                if principal.principal_id == "oauth:alice:grant-1" and workspace.id == "ws-a"
+                else ()
+            ),
+            validation_backend_factory=validation_factory,
+        )
         self.alice = OperatorPrincipal("oauth:alice:grant-1", ("ws-a",))
         self.bob = OperatorPrincipal("oauth:bob:grant-2", ("ws-b",))
 
@@ -178,10 +216,34 @@ class OperatorAPIServiceTests(unittest.TestCase):
             [("approval-1", "accept"), ("approval-2", "decline")],
         )
 
+    def test_validation_result_is_bounded_runtime_evidence_in_handoff(self) -> None:
+        created = self.service.create_session(
+            self.alice,
+            {"workspace_id": "ws-a", "backend_kind": "codex"},
+        )["session"]
+        session_id = created["session_id"]
+        validation = self.service.run_validation(
+            self.alice,
+            session_id,
+            {"recipe": "python:test"},
+        )["validation"]
+        self.assertEqual(validation["status"], "passed")
+        self.assertEqual(validation["recipe"], "python:test")
+        self.assertEqual(validation["exit_code"], 0)
+        self.assertTrue(self.validation_backends[-1].closed)
+        handoff = self.service.handoff(self.alice, session_id)["handoff"]
+        self.assertEqual(
+            handoff["validation"],
+            {"status": "passed", "recipe": "python:test", "exit_code": 0},
+        )
+        with self.assertRaises(AgentSessionServiceError):
+            self.service.run_validation(self.bob, session_id, {"recipe": "python:test"})
+
     def test_resume_persists_repo_context_changes_across_windows(self) -> None:
         first = {
             "version": 1,
             "git_available": True,
+            "branch": "main",
             "head": "aaa",
             "worktree_digest": "clean",
             "instruction_digest": "instructions-a",
@@ -191,6 +253,7 @@ class OperatorAPIServiceTests(unittest.TestCase):
         }
         second = {
             **first,
+            "branch": "feature/continuity",
             "head": "bbb",
             "instruction_digest": "instructions-b",
         }
@@ -206,12 +269,34 @@ class OperatorAPIServiceTests(unittest.TestCase):
         self.assertTrue(changed["repo_fingerprint"]["context_changed"])
         self.assertEqual(
             changed["repo_fingerprint"]["changes"],
-            ["HEAD changed", "Project instructions changed"],
+            ["Branch changed", "HEAD changed", "Project instructions changed"],
         )
 
         reopened = self.service.get_session(self.alice, created["session_id"])["session"]
         self.assertTrue(reopened["repo_fingerprint"]["context_changed"])
         self.assertEqual(reopened["repo_fingerprint"]["head"], "bbb")
+
+    def test_legacy_fingerprint_without_branch_does_not_report_upgrade_drift(self) -> None:
+        previous = {
+            "version": 1,
+            "git_available": True,
+            "head": "aaa",
+            "worktree_digest": "clean",
+            "instruction_digest": "instructions-a",
+            "changed_paths": [],
+            "context_changed": False,
+            "changes": [],
+        }
+        current = {**previous, "branch": "main"}
+        self.service.agent_sessions.fingerprint_factory = lambda _workspace: dict(previous)
+        created = self.service.create_session(
+            self.alice,
+            {"workspace_id": "ws-a", "backend_kind": "codex"},
+        )["session"]
+        self.service.agent_sessions.fingerprint_factory = lambda _workspace: dict(current)
+        resumed = self.service.get_session(self.alice, created["session_id"])["session"]
+        self.assertFalse(resumed["repo_fingerprint"]["context_changed"])
+        self.assertEqual(resumed["repo_fingerprint"]["changes"], [])
 
     def test_handoff_is_deterministic_bounded_and_contains_no_workspace_root_or_backend_thread(self) -> None:
         created = self.service.create_session(
@@ -227,6 +312,7 @@ class OperatorAPIServiceTests(unittest.TestCase):
             repo_fingerprint={
                 "version": 1,
                 "git_available": True,
+                "branch": "feature/handoff",
                 "head": "abc123",
                 "worktree_digest": "digest",
                 "instruction_digest": "instructions",
@@ -244,16 +330,30 @@ class OperatorAPIServiceTests(unittest.TestCase):
                 approval_id="approval-1",
             )
         )
+        self.handoff_jobs[:] = [
+            {"job_id": "job-running", "status": "running"},
+            {"job_id": "job-recovering", "status": "recovering"},
+            {"job_id": "job-complete", "status": "completed"},
+        ]
 
         first = self.service.handoff(self.alice, session_id)["handoff"]
         second = self.service.handoff(self.alice, session_id)["handoff"]
         self.assertEqual(first, second)
         self.assertEqual(first["workspace"]["id"], "ws-a")
+        self.assertEqual(first["repository"]["branch"], "feature/handoff")
         self.assertEqual(first["repository"]["head"], "abc123")
         self.assertEqual(first["repository"]["changed_paths"], ["src/main.py"])
+        self.assertEqual(
+            first["active_jobs"],
+            [
+                {"job_id": "job-running", "status": "running"},
+                {"job_id": "job-recovering", "status": "recovering"},
+            ],
+        )
         self.assertEqual(first["unresolved_approval"]["approval_id"], "approval-1")
         self.assertIn("resolve_approval", first["next_actions"])
         self.assertIn("review_context_changes", first["next_actions"])
+        self.assertIn("wait_for_job_recovery", first["next_actions"])
         serialized = json.dumps(first, sort_keys=True)
         self.assertNotIn(str(self.catalog.get("ws-a").root), serialized)
         self.assertNotIn("thread-1", serialized)
@@ -280,7 +380,11 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
             self.catalog,
             lambda _workspace, _kind: FakeAgentBackend(),
         )
-        self.service = OperatorAPIService(sessions, self.catalog)
+        self.service = OperatorAPIService(
+            sessions,
+            self.catalog,
+            validation_backend_factory=lambda _workspace: FakeValidationBackend(),
+        )
         configure_allowed_origins(())
 
     def tearDown(self) -> None:
@@ -428,6 +532,33 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
             with urllib.request.urlopen(
                 self._request(
                     server,
+                    f"/api/app/sessions/{session_id}/validation",
+                    token="ordinary-mcp-token",
+                    method="POST",
+                    body={"recipe": "python:test"},
+                ),
+                timeout=5,
+            ) as response:
+                validation = json.loads(response.read())["validation"]
+            self.assertEqual(validation["status"], "passed")
+            self.assertEqual(validation["recipe"], "python:test")
+
+            with self.assertRaises(urllib.error.HTTPError) as admin_denied:
+                urllib.request.urlopen(
+                    self._request(
+                        server,
+                        f"/api/app/sessions/{session_id}/validation",
+                        token="dedicated-admin-token",
+                        method="POST",
+                        body={"recipe": "python:test"},
+                    ),
+                    timeout=5,
+                )
+            self.assertEqual(admin_denied.exception.code, 401)
+
+            with urllib.request.urlopen(
+                self._request(
+                    server,
                     f"/api/app/sessions/{session_id}/handoff",
                     token="ordinary-mcp-token",
                 ),
@@ -435,6 +566,10 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
             ) as response:
                 handoff = json.loads(response.read())["handoff"]
             self.assertEqual(handoff["agent_session"]["session_id"], session_id)
+            self.assertEqual(
+                handoff["validation"],
+                {"status": "passed", "recipe": "python:test", "exit_code": 0},
+            )
             self.assertNotIn("root", handoff["workspace"])
         finally:
             server.shutdown()

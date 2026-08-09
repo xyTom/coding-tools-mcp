@@ -103,6 +103,31 @@ class JobInventoryItem:
         }
 
 
+class RunnerJobInventoryRegistry:
+    """Bounded Runner-local source of reconnect job inventory facts."""
+
+    def __init__(self) -> None:
+        self._lock = RLock()
+        self._items: dict[str, JobInventoryItem] = {}
+
+    def upsert(self, item: JobInventoryItem) -> None:
+        if not isinstance(item, JobInventoryItem):
+            raise JobAccessError("runner job inventory item is invalid")
+        with self._lock:
+            if item.job_id not in self._items and len(self._items) >= MAX_RUNNER_JOBS:
+                raise JobAccessError("runner job inventory registry is full")
+            self._items[item.job_id] = item
+
+    def remove(self, job_id: str) -> bool:
+        validate_identifier(job_id, "job_id")
+        with self._lock:
+            return self._items.pop(job_id, None) is not None
+
+    def snapshot(self) -> tuple[JobInventoryItem, ...]:
+        with self._lock:
+            return tuple(self._items[job_id] for job_id in sorted(self._items))
+
+
 @dataclass(frozen=True)
 class JobReconcileResult:
     recovered: tuple[str, ...]
@@ -255,6 +280,42 @@ class RunnerJobReconciler:
                 if job.owner_principal_id == owner_principal_id and job.workspace_id == workspace_id
             )
 
+    def observe(
+        self,
+        job_id: str,
+        item: JobInventoryItem,
+        *,
+        runner_instance_id: str | None = None,
+    ) -> JobRecord:
+        """Update one already-authorized job from a live Runner observation."""
+
+        if runner_instance_id is not None:
+            validate_identifier(runner_instance_id, "runner_instance_id")
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise JobAccessError("unknown job")
+            if item.job_id != job.job_id or item.workspace_id != job.workspace_id:
+                raise JobAccessError("job observation identity does not match")
+            if not self._same_process(job, item, runner_instance_id):
+                raise JobAccessError("job observation process identity does not match")
+            if item.stdout_cursor < job.stdout_cursor or item.stderr_cursor < job.stderr_cursor:
+                raise JobAccessError("job observation cursor regressed")
+            if job.state in {
+                JobState.COMPLETED,
+                JobState.FAILED,
+                JobState.CANCELLED,
+                JobState.LOST,
+            }:
+                return job
+            self._jobs[job_id] = self._replace(
+                job,
+                state=item.state,
+                item=item,
+                runner_instance_id=runner_instance_id,
+            )
+            return self._jobs[job_id]
+
     def snapshot(self) -> dict[str, int]:
         with self._lock:
             counts = {state.value: 0 for state in JobState}
@@ -302,6 +363,74 @@ class RunnerJobReconciler:
             stdout_cursor=(item.stdout_cursor if item is not None else job.stdout_cursor),
             stderr_cursor=(item.stderr_cursor if item is not None else job.stderr_cursor),
             started_at=(item.started_at if item is not None and item.started_at is not None else job.started_at),
+        )
+
+
+class WorkspaceJobManager:
+    """Workspace-scoped owner boundary over global Runner reconciliation state."""
+
+    def __init__(
+        self,
+        reconciler: RunnerJobReconciler,
+        *,
+        runner_id: str,
+        workspace_id: str,
+    ) -> None:
+        validate_identifier(runner_id, "runner_id")
+        validate_identifier(workspace_id, "workspace_id")
+        self.reconciler = reconciler
+        self.runner_id = runner_id
+        self.workspace_id = workspace_id
+
+    def register_or_observe(
+        self,
+        owner_principal_id: str,
+        item: JobInventoryItem,
+        *,
+        runner_instance_id: str | None = None,
+    ) -> JobRecord:
+        if item.workspace_id != self.workspace_id:
+            raise JobAccessError("job inventory belongs to a different workspace")
+        try:
+            existing = self.reconciler.get(item.job_id)
+        except JobAccessError:
+            record = JobRecord(
+                item.job_id,
+                self.runner_id,
+                self.workspace_id,
+                owner_principal_id,
+                state=item.state,
+                process_fingerprint=item.process_fingerprint,
+                runner_instance_id=runner_instance_id,
+                stdout_cursor=item.stdout_cursor,
+                stderr_cursor=item.stderr_cursor,
+                started_at=item.started_at,
+            )
+            self.reconciler.register(record)
+            return record
+        if (
+            existing.runner_id != self.runner_id
+            or existing.workspace_id != self.workspace_id
+            or existing.owner_principal_id != owner_principal_id
+        ):
+            raise JobAccessError("job is not available to this principal or workspace")
+        return self.reconciler.observe(
+            item.job_id,
+            item,
+            runner_instance_id=runner_instance_id,
+        )
+
+    def get_for_owner(self, job_id: str, owner_principal_id: str) -> JobRecord:
+        job = self.reconciler.get_for_owner(job_id, owner_principal_id, self.workspace_id)
+        if job.runner_id != self.runner_id:
+            raise JobAccessError("job is not available on this runner")
+        return job
+
+    def list_for_owner(self, owner_principal_id: str) -> tuple[JobRecord, ...]:
+        return tuple(
+            job
+            for job in self.reconciler.list_for_owner(owner_principal_id, self.workspace_id)
+            if job.runner_id == self.runner_id
         )
 
 

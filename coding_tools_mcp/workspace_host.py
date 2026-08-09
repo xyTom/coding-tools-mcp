@@ -15,6 +15,7 @@ from .runner.capabilities import (
     RemoteSemanticBackendProxy,
     RemoteValidationBackendProxy,
 )
+from .runner.jobs import JobAccessError, JobInventoryItem, WorkspaceJobManager
 from .semantic import LspSemanticBackend, SemanticBackend
 from .validation import NullValidationBackend, StructuredValidationBackend, ValidationBackend
 from .workspace_catalog import WorkspaceEntry
@@ -184,14 +185,15 @@ class LocalWorkspaceHost:
 
     def close(self) -> None:
         owned, self._owned = self._owned, []
+        first_error: WorkspaceHostError | None = None
         for capability in reversed(owned):
-            close = getattr(capability, "close", None)
-            if callable(close):
-                result = close()
-                if inspect.isawaitable(result):
-                    # Host close is intentionally synchronous. Async transport
-                    # ownership belongs to RemoteRunnerWorkspaceHost.
-                    result.close() if inspect.iscoroutine(result) else None
+            try:
+                _close_capability_sync(capability)
+            except WorkspaceHostError as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     @staticmethod
     def _default_runtime_factory(workspace: WorkspaceEntry, options: Mapping[str, Any]) -> Any:
@@ -303,12 +305,16 @@ class RemoteMcpHttpRuntimeProxy:
         workspace_id: str,
         authorization_key: str,
         session_authorization_key: tuple[str, str | None, str | None, str],
+        job_manager: WorkspaceJobManager | None = None,
+        owner_principal_id: str | None = None,
     ) -> None:
         self.route_service = route_service
         self.runner_id = runner_id
         self.workspace_binding = _RemoteRuntimeBinding(workspace_id)
         self.authorization_key = authorization_key
         self._session_authorization_key = session_authorization_key
+        self._job_manager = job_manager
+        self._owner_principal_id = owner_principal_id
         self.http_session_id = secrets.token_urlsafe(24)
         self.protocol_version = PROTOCOL_VERSION
         self.initialized = False
@@ -368,9 +374,29 @@ class RemoteMcpHttpRuntimeProxy:
             method=method,
             params=params,
         )
-        if isinstance(response, Mapping) and set(response) == {"result"}:
+        if isinstance(response, Mapping) and "result" in response:
+            self._observe_job(response.get("job"))
             return response["result"]
         return response
+
+    def _observe_job(self, raw: Any) -> None:
+        manager = self._job_manager
+        owner = self._owner_principal_id
+        if manager is None or owner is None or not isinstance(raw, Mapping):
+            return
+        try:
+            item = JobInventoryItem.from_payload(dict(raw))
+            status = self.route_service.runner_status(self.runner_id)
+            instance_id = status.get("instance_id") if isinstance(status, Mapping) else None
+            manager.register_or_observe(
+                owner,
+                item,
+                runner_instance_id=instance_id if isinstance(instance_id, str) else None,
+            )
+        except (JobAccessError, ValueError, TypeError):
+            # The remote tool already executed. Tracking metadata must never
+            # turn it into a retryable tool failure or trigger a replay.
+            return
 
 
 class RemoteRunnerWorkspaceHost:
@@ -503,10 +529,38 @@ class RemoteRunnerWorkspaceHost:
 
     def close(self) -> None:
         owned, self._owned = self._owned, []
+        first_error: WorkspaceHostError | None = None
         for capability in reversed(owned):
-            close = getattr(capability, "close", None)
-            if callable(close):
-                close()
+            try:
+                _close_capability_sync(capability)
+            except WorkspaceHostError as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+
+def _close_capability_sync(capability: Any) -> None:
+    close_sync = getattr(capability, "close_sync", None)
+    if callable(close_sync):
+        close_sync()
+        return
+    close = getattr(capability, "close", None)
+    if not callable(close):
+        return
+    if inspect.iscoroutinefunction(close):
+        raise WorkspaceHostError(
+            "ASYNC_CAPABILITY_CLOSE_UNSUPPORTED",
+            "WorkspaceHost.close() requires a synchronous close or close_sync boundary.",
+        )
+    result = close()
+    if inspect.isawaitable(result):
+        if inspect.iscoroutine(result):
+            result.close()
+        raise WorkspaceHostError(
+            "ASYNC_CAPABILITY_CLOSE_UNSUPPORTED",
+            "WorkspaceHost.close() received an awaitable close result without close_sync.",
+        )
 
 
 class WorkspaceHostFactory:

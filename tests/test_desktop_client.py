@@ -258,6 +258,40 @@ class DesktopRuntimeSafetyTests(unittest.TestCase):
         self.assertEqual(invalid.runner_status(profile), "unknown")
         self.assertEqual(failing.runner_status(profile), "unknown")
 
+    def test_default_runner_status_uses_operator_api_without_admin_credentials(self) -> None:
+        profile = build_profile(str(REPO_ROOT), "review")
+        profile.auth.type = "bearer"
+        profile.auth.bearer_token = "desktop-bearer-secret"
+        manager = runtime.RuntimeManager()
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = json.dumps(
+            {
+                "workspaces": [
+                    {
+                        "id": "remote",
+                        "target": "runner",
+                        "runner_status": "connected",
+                    }
+                ]
+            }
+        ).encode("utf-8")
+        with mock.patch.object(manager, "_port_is_listening", return_value=True), mock.patch.object(
+            runtime.urllib.request,
+            "urlopen",
+            return_value=response,
+        ) as urlopen:
+            self.assertEqual(manager.runner_status(profile), "connected")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, f"http://127.0.0.1:{profile.runtime.local_port}/api/app/workspaces")
+        self.assertEqual(request.get_header("Authorization"), "Bearer desktop-bearer-secret")
+        self.assertNotIn("desktop-bearer-secret", request.full_url)
+
+        profile.auth.type = "oauth"
+        with mock.patch.object(runtime.urllib.request, "urlopen") as oauth_urlopen:
+            self.assertEqual(manager.runner_status(profile), "unknown")
+            oauth_urlopen.assert_not_called()
+
     def test_bearer_token_is_passed_via_environment_only(self) -> None:
         profile = build_profile(str(REPO_ROOT), "review")
         profile.auth.type = "bearer"

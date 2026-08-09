@@ -7,12 +7,18 @@ import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Callable, Iterable
 
-from coding_tools_mcp.runner.client import RunnerClientConfig, RunnerPeer
+from coding_tools_mcp.runner.client import LocalRunnerApplication, RunnerClientConfig, RunnerPeer
 from coding_tools_mcp.runner.credentials import RunnerCredentialStore
-from coding_tools_mcp.runner.jobs import RunnerJobReconciler
-from coding_tools_mcp.runner.protocol import RunnerHello, WorkspaceInventoryItem
+from coding_tools_mcp.runner.jobs import (
+    JobInventoryItem,
+    JobRecord,
+    JobState,
+    RunnerJobInventoryRegistry,
+    RunnerJobReconciler,
+)
+from coding_tools_mcp.runner.protocol import RunnerEvent, RunnerHello, WorkspaceInventoryItem
 from coding_tools_mcp.runner.registry import RunnerRegistry
 from coding_tools_mcp.runner.routing import (
     RemoteMcpRouteService,
@@ -26,6 +32,8 @@ from coding_tools_mcp.runner.websocket import (
     websocket_accept_value,
 )
 from coding_tools_mcp.server import MCPHandler, Runtime, RuntimeHTTPServer
+from coding_tools_mcp.upstream import UpstreamManager
+from coding_tools_mcp.workspace_catalog import WorkspaceEntry
 
 
 class FakeRunnerRuntime:
@@ -87,6 +95,34 @@ class RunnerWebSocketFrameTests(unittest.TestCase):
             server.close()
 
 
+class RunnerLocalApplicationTests(unittest.TestCase):
+    def test_remote_mcp_runtimes_get_isolated_runner_local_upstream_managers(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            managers: list[UpstreamManager] = []
+
+            def upstream_factory() -> UpstreamManager:
+                manager = UpstreamManager.empty()
+                managers.append(manager)
+                return manager
+
+            application = LocalRunnerApplication(
+                [WorkspaceEntry("ws-one", "Workspace One", root, True, True)],
+                upstream_manager_factory=upstream_factory,
+            )
+            first = application._runtime_factory("ws-one", "auth-one")
+            second = application._runtime_factory("ws-one", "auth-two")
+            try:
+                self.assertEqual(len(managers), 2)
+                self.assertIs(first.upstream_manager, managers[0])
+                self.assertIs(second.upstream_manager, managers[1])
+                self.assertIsNot(first.upstream_manager, second.upstream_manager)
+            finally:
+                first.close()
+                second.close()
+                application.close()
+
+
 class RunnerWebSocketEndToEndTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = TemporaryDirectory()
@@ -119,7 +155,13 @@ class RunnerWebSocketEndToEndTests(unittest.TestCase):
         self.server_thread.join(timeout=2)
         self.temp.cleanup()
 
-    def _peer(self, credential: str, *, instance_id: str) -> RunnerPeer:
+    def _peer(
+        self,
+        credential: str,
+        *,
+        instance_id: str,
+        job_inventory_provider: Callable[[], Iterable[JobInventoryItem]] | None = None,
+    ) -> RunnerPeer:
         port = self.server.server_address[1]
         config = RunnerClientConfig(
             server_url=f"ws://127.0.0.1:{port}/runner/ws",
@@ -135,7 +177,12 @@ class RunnerWebSocketEndToEndTests(unittest.TestCase):
             capabilities=("mcp",),
             workspaces=(WorkspaceInventoryItem("ws-one", "Workspace One", r"G:\\repo"),),
         )
-        return RunnerPeer(config, hello, self.router)
+        return RunnerPeer(
+            config,
+            hello,
+            self.router,
+            job_inventory_provider=job_inventory_provider,
+        )
 
     def _wait_connected(self, expected: bool, timeout: float = 3.0) -> None:
         deadline = time.monotonic() + timeout
@@ -183,6 +230,30 @@ class RunnerWebSocketEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(tools["result"]["tools"][0]["name"], "read_file")
 
+        peer.publish_event(
+            RunnerEvent(
+                "runner-one",
+                "instance-one",
+                "job/progress",
+                {"job_id": "job-one", "progress": 50},
+                "ws-one",
+            )
+        )
+        pushed = self.routes.next_runner_event_sync("runner-one", timeout=2.0)
+        self.assertEqual(pushed.name, "job/progress")
+        self.assertEqual(pushed.workspace_id, "ws-one")
+        self.assertEqual(pushed.payload["progress"], 50)
+        with self.assertRaisesRegex(Exception, "Workspace"):
+            peer.publish_event(
+                RunnerEvent(
+                    "runner-one",
+                    "instance-one",
+                    "job/progress",
+                    {"progress": 75},
+                    "ws-other",
+                )
+            )
+
         peer.stop_sync("test complete")
         thread.join(timeout=3)
         self.assertFalse(thread.is_alive())
@@ -220,6 +291,75 @@ class RunnerWebSocketEndToEndTests(unittest.TestCase):
             errors,
         )
         self.assertFalse(self.routes.runner_status("runner-one")["connected"])
+
+    def test_job_inventory_is_sent_on_reconnect_and_recovers_known_job(self) -> None:
+        instance_id = "instance-jobs"
+        inventory = RunnerJobInventoryRegistry()
+        inventory.upsert(
+            JobInventoryItem(
+                "job-one",
+                "ws-one",
+                "process-one",
+                JobState.RUNNING,
+                stdout_cursor=12,
+                stderr_cursor=3,
+                started_at="2026-08-09T08:00:00Z",
+            )
+        )
+        self.reconciler.register(
+            JobRecord(
+                "job-one",
+                "runner-one",
+                "ws-one",
+                "owner-one",
+                process_fingerprint="process-one",
+                runner_instance_id=instance_id,
+                stdout_cursor=4,
+                stderr_cursor=1,
+                started_at="2026-08-09T08:00:00Z",
+            )
+        )
+
+        def start_peer() -> tuple[RunnerPeer, threading.Thread, list[BaseException]]:
+            peer = self._peer(
+                self.issued.credential,
+                instance_id=instance_id,
+                job_inventory_provider=inventory.snapshot,
+            )
+            errors: list[BaseException] = []
+
+            def run_peer() -> None:
+                try:
+                    asyncio.run(peer.run_once())
+                except BaseException as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            thread = threading.Thread(target=run_peer, daemon=True)
+            thread.start()
+            self._wait_connected(True)
+            return peer, thread, errors
+
+        first, first_thread, first_errors = start_peer()
+        first.stop_sync("planned reconnect")
+        first_thread.join(timeout=3)
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(first_errors, first_errors)
+        self._wait_connected(False)
+        self.assertEqual(self.reconciler.get("job-one").state, JobState.RECOVERING)
+
+        second, second_thread, second_errors = start_peer()
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if self.reconciler.get("job-one").state == JobState.RUNNING:
+                break
+            time.sleep(0.01)
+        recovered = self.reconciler.get("job-one")
+        self.assertEqual(recovered.state, JobState.RUNNING)
+        self.assertEqual((recovered.stdout_cursor, recovered.stderr_cursor), (12, 3))
+        second.stop_sync("test complete")
+        second_thread.join(timeout=3)
+        self.assertFalse(second_thread.is_alive())
+        self.assertFalse(second_errors, second_errors)
 
 
 if __name__ == "__main__":
