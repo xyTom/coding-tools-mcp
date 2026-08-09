@@ -845,6 +845,15 @@ class _ClosedSession:
     authorization_digest: str
 
 
+@dataclass
+class _SessionState:
+    record: RunnerMcpSessionRecord
+    active_call_leases: int = 0
+    closing: bool = False
+    close_started: bool = False
+    close_completed: bool = False
+
+
 class RunnerMcpSessionHost:
     """Runner-side owner of real Runtime instances for remote MCP routes."""
 
@@ -856,11 +865,28 @@ class RunnerMcpSessionHost:
     ) -> None:
         self._runtime_factory = runtime_factory
         self.max_sessions = max_sessions
-        self._lock = threading.RLock()
-        self._by_control: dict[str, RunnerMcpSessionRecord] = {}
-        self._by_remote: dict[str, RunnerMcpSessionRecord] = {}
+        self._condition = threading.Condition()
+        self._by_control: dict[str, _SessionState] = {}
+        self._by_remote: dict[str, _SessionState] = {}
+        self._creating = 0
+        self._creating_by_control: dict[str, tuple[str, str]] = {}
         self._closed: OrderedDict[str, _ClosedSession] = OrderedDict()
         self._shutting_down = False
+        self._shutdown_complete = False
+
+    def _remember_closed_locked(self, record: RunnerMcpSessionRecord) -> None:
+        self._closed[record.remote_session_id] = _ClosedSession(
+            record.workspace_id,
+            record.authorization_digest,
+        )
+        self._closed.move_to_end(record.remote_session_id)
+        while len(self._closed) > MAX_REMOTE_MCP_TOMBSTONES:
+            self._closed.popitem(last=False)
+
+    def _release_creation_locked(self, control_session_id: str) -> None:
+        self._creating_by_control.pop(control_session_id, None)
+        self._creating -= 1
+        self._condition.notify_all()
 
     def create(
         self,
@@ -872,41 +898,68 @@ class RunnerMcpSessionHost:
         control_session_id = _required_route_id(control_session_id, "control_session_id")
         workspace_id = validate_identifier(workspace_id, "workspace_id")
         authorization_digest = _required_digest(authorization_digest)
-        with self._lock:
-            if self._shutting_down:
-                raise RemoteMcpRouteError("RUNNER_SHUTTING_DOWN", "Runner MCP host is shutting down", retryable=True)
-            existing = self._by_control.get(control_session_id)
-            if existing is not None:
-                if existing.workspace_id == workspace_id and hmac.compare_digest(
-                    existing.authorization_digest, authorization_digest
-                ):
-                    return existing
-                raise RemoteMcpRouteError("RUNNER_ROUTE_CONFLICT", "control session already exists on Runner")
-            if len(self._by_control) >= self.max_sessions:
-                raise RemoteMcpRouteError("RUNNER_SESSION_CAPACITY", "Runner MCP session capacity reached", retryable=True)
-        runtime = self._runtime_factory(workspace_id, authorization_digest)
-        remote_session_id = _required_route_id(runtime.http_session_id, "remote_session_id")
-        record = RunnerMcpSessionRecord(
-            control_session_id=control_session_id,
-            remote_session_id=remote_session_id,
-            workspace_id=workspace_id,
-            authorization_digest=authorization_digest,
-            runtime=runtime,
-        )
+        with self._condition:
+            while True:
+                if self._shutting_down:
+                    raise RemoteMcpRouteError(
+                        "RUNNER_SHUTTING_DOWN", "Runner MCP host is shutting down", retryable=True
+                    )
+                existing_state = self._by_control.get(control_session_id)
+                if existing_state is not None:
+                    existing = existing_state.record
+                    if existing.workspace_id == workspace_id and hmac.compare_digest(
+                        existing.authorization_digest, authorization_digest
+                    ):
+                        return existing
+                    raise RemoteMcpRouteError("RUNNER_ROUTE_CONFLICT", "control session already exists on Runner")
+                creating_identity = self._creating_by_control.get(control_session_id)
+                if creating_identity is not None:
+                    if creating_identity != (workspace_id, authorization_digest):
+                        raise RemoteMcpRouteError("RUNNER_ROUTE_CONFLICT", "control session already exists on Runner")
+                    self._condition.wait()
+                    continue
+                if len(self._by_control) + self._creating >= self.max_sessions:
+                    raise RemoteMcpRouteError(
+                        "RUNNER_SESSION_CAPACITY", "Runner MCP session capacity reached", retryable=True
+                    )
+                self._creating += 1
+                self._creating_by_control[control_session_id] = (workspace_id, authorization_digest)
+                break
+
+        runtime: RunnerRuntime | None = None
         installed = False
         try:
-            with self._lock:
+            runtime = self._runtime_factory(workspace_id, authorization_digest)
+            remote_session_id = _required_route_id(runtime.http_session_id, "remote_session_id")
+            record = RunnerMcpSessionRecord(
+                control_session_id=control_session_id,
+                remote_session_id=remote_session_id,
+                workspace_id=workspace_id,
+                authorization_digest=authorization_digest,
+                runtime=runtime,
+            )
+            with self._condition:
                 if self._shutting_down:
-                    raise RemoteMcpRouteError("RUNNER_SHUTTING_DOWN", "Runner MCP host is shutting down", retryable=True)
+                    raise RemoteMcpRouteError(
+                        "RUNNER_SHUTTING_DOWN", "Runner MCP host is shutting down", retryable=True
+                    )
                 if control_session_id in self._by_control or remote_session_id in self._by_remote:
                     raise RemoteMcpRouteError("RUNNER_ROUTE_CONFLICT", "Runner generated a duplicate MCP session id")
-                self._by_control[control_session_id] = record
-                self._by_remote[remote_session_id] = record
+                state = _SessionState(record=record)
+                self._by_control[control_session_id] = state
+                self._by_remote[remote_session_id] = state
                 installed = True
             return record
         finally:
-            if not installed:
-                runtime.close()
+            if runtime is not None and not installed:
+                try:
+                    runtime.close()
+                finally:
+                    with self._condition:
+                        self._release_creation_locked(control_session_id)
+            else:
+                with self._condition:
+                    self._release_creation_locked(control_session_id)
 
     def close_session(
         self,
@@ -917,39 +970,54 @@ class RunnerMcpSessionHost:
         authorization_digest: str,
     ) -> bool:
         authorization_digest = _required_digest(authorization_digest)
-        with self._lock:
-            record = self._by_remote.get(remote_session_id)
-            if record is None:
-                tombstone = self._closed.get(remote_session_id)
-                if tombstone is None:
+        with self._condition:
+            while True:
+                state = self._by_remote.get(remote_session_id)
+                if state is None:
+                    tombstone = self._closed.get(remote_session_id)
+                    if tombstone is None:
+                        return True
+                    if tombstone.workspace_id != workspace_id or not hmac.compare_digest(
+                        tombstone.authorization_digest, authorization_digest
+                    ):
+                        raise RemoteMcpRouteError(
+                            "RUNNER_ROUTE_FORBIDDEN", "closed route authorization does not match"
+                        )
                     return True
-                if tombstone.workspace_id != workspace_id or not hmac.compare_digest(
-                    tombstone.authorization_digest, authorization_digest
+                record = state.record
+                if (
+                    record.control_session_id != control_session_id
+                    or record.workspace_id != workspace_id
+                    or not hmac.compare_digest(record.authorization_digest, authorization_digest)
                 ):
-                    raise RemoteMcpRouteError("RUNNER_ROUTE_FORBIDDEN", "closed route authorization does not match")
-                return True
-            if (
-                record.control_session_id != control_session_id
-                or record.workspace_id != workspace_id
-                or not hmac.compare_digest(record.authorization_digest, authorization_digest)
-            ):
-                raise RemoteMcpRouteError("RUNNER_ROUTE_FORBIDDEN", "remote MCP close does not match Runner route")
-            self._by_remote.pop(remote_session_id, None)
-            self._by_control.pop(control_session_id, None)
-            self._closed[remote_session_id] = _ClosedSession(workspace_id, authorization_digest)
-            self._closed.move_to_end(remote_session_id)
-            while len(self._closed) > MAX_REMOTE_MCP_TOMBSTONES:
-                self._closed.popitem(last=False)
-        record.runtime.close()
+                    raise RemoteMcpRouteError("RUNNER_ROUTE_FORBIDDEN", "remote MCP close does not match Runner route")
+                if state.closing:
+                    self._condition.wait()
+                    continue
+                state.closing = True
+                while state.active_call_leases:
+                    self._condition.wait()
+                state.close_started = True
+                self._by_remote.pop(remote_session_id, None)
+                self._by_control.pop(control_session_id, None)
+                self._remember_closed_locked(record)
+                self._condition.notify_all()
+                break
+        try:
+            record.runtime.close()
+        finally:
+            with self._condition:
+                state.close_completed = True
+                self._condition.notify_all()
         return True
 
     def inventory(self, workspace_id: str) -> tuple[RemoteMcpSessionInventoryItem, ...]:
         validate_identifier(workspace_id, "workspace_id")
-        with self._lock:
+        with self._condition:
             items = [
-                record.inventory_item()
-                for record in self._by_control.values()
-                if record.workspace_id == workspace_id
+                state.record.inventory_item()
+                for state in self._by_control.values()
+                if state.record.workspace_id == workspace_id
             ]
         if len(items) > MAX_REMOTE_MCP_INVENTORY:
             raise RemoteMcpRouteError("RUNNER_SESSION_INVENTORY_INVALID", "Runner session inventory exceeds bound")
@@ -958,8 +1026,8 @@ class RunnerMcpSessionHost:
     def job_inventory(self) -> tuple[JobInventoryItem, ...]:
         """Return bounded job facts derived from real Runtime ExecSessions."""
 
-        with self._lock:
-            records = tuple(self._by_control.values())
+        with self._condition:
+            records = tuple(state.record for state in self._by_control.values())
         items: list[JobInventoryItem] = []
         seen: set[str] = set()
         for record in records:
@@ -990,10 +1058,11 @@ class RunnerMcpSessionHost:
         """Describe one ExecSession after applying the MCP route authorization boundary."""
 
         authorization_digest = _required_digest(authorization_digest)
-        with self._lock:
-            record = self._by_remote.get(remote_session_id)
-            if record is None:
+        with self._condition:
+            state = self._by_remote.get(remote_session_id)
+            if state is None:
                 raise RemoteMcpRouteError("RUNNER_ROUTE_NOT_FOUND", "remote MCP Runtime is unknown")
+            record = state.record
             if (
                 record.control_session_id != control_session_id
                 or record.workspace_id != workspace_id
@@ -1017,69 +1086,112 @@ class RunnerMcpSessionHost:
         params: Mapping[str, Any],
     ) -> Any:
         authorization_digest = _required_digest(authorization_digest)
-        with self._lock:
-            record = self._by_remote.get(remote_session_id)
-            if record is None:
+        with self._condition:
+            state = self._by_remote.get(remote_session_id)
+            if state is None:
                 raise RemoteMcpRouteError("RUNNER_ROUTE_NOT_FOUND", "remote MCP Runtime is unknown")
+            record = state.record
             if (
                 record.control_session_id != control_session_id
                 or record.workspace_id != workspace_id
                 or not hmac.compare_digest(record.authorization_digest, authorization_digest)
             ):
                 raise RemoteMcpRouteError("RUNNER_ROUTE_FORBIDDEN", "remote MCP call does not match Runner route")
+            if state.closing:
+                code = "RUNNER_SHUTTING_DOWN" if self._shutting_down else "RUNNER_SESSION_CLOSING"
+                raise RemoteMcpRouteError(code, "remote MCP Runtime is closing", retryable=code == "RUNNER_SHUTTING_DOWN")
             runtime = record.runtime
+            state.active_call_leases += 1
 
-        if method == "initialize":
-            client_info = params.get("clientInfo")
-            if client_info is not None and not isinstance(client_info, dict):
-                raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "initialize clientInfo must be an object")
-            protocol_version = params.get("protocolVersion")
-            if protocol_version is not None:
-                if not isinstance(protocol_version, str) or not protocol_version:
-                    raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "initialize protocolVersion must be a string")
-                if hasattr(runtime, "protocol_version"):
-                    runtime.protocol_version = protocol_version
-            return runtime.initialize(client_info)
-        if method == "notifications/cancelled":
-            request_id = params.get("requestId")
-            if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
-                raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "cancel requestId must be a string or integer")
-            cancel = getattr(runtime, "cancel_request", None)
-            if callable(cancel):
-                cancel(request_id)
-            return {}
-        if method == "ping":
-            return {}
-        if method == "tools/list":
-            return runtime.list_tools()
-        if method == "tools/call":
-            name = params.get("name")
-            arguments = params.get("arguments", {})
-            request_id = params.get("request_id")
-            if not isinstance(name, str) or not name:
-                raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "tools/call name is required")
-            if not isinstance(arguments, dict):
-                raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "tools/call arguments must be an object")
-            if request_id is not None and not isinstance(request_id, (str, int)):
-                raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "tools/call request_id must be a string or integer")
-            return runtime.call_tool(name, arguments, request_id=request_id)
-        raise RemoteMcpRouteError("RUNNER_RPC_METHOD_UNSUPPORTED", "remote MCP method is unsupported")
+        try:
+            if method == "initialize":
+                client_info = params.get("clientInfo")
+                if client_info is not None and not isinstance(client_info, dict):
+                    raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "initialize clientInfo must be an object")
+                protocol_version = params.get("protocolVersion")
+                if protocol_version is not None:
+                    if not isinstance(protocol_version, str) or not protocol_version:
+                        raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "initialize protocolVersion must be a string")
+                    if hasattr(runtime, "protocol_version"):
+                        runtime.protocol_version = protocol_version
+                return runtime.initialize(client_info)
+            if method == "notifications/cancelled":
+                request_id = params.get("requestId")
+                if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
+                    raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "cancel requestId must be a string or integer")
+                cancel = getattr(runtime, "cancel_request", None)
+                if callable(cancel):
+                    cancel(request_id)
+                return {}
+            if method == "ping":
+                return {}
+            if method == "tools/list":
+                return runtime.list_tools()
+            if method == "tools/call":
+                name = params.get("name")
+                arguments = params.get("arguments", {})
+                request_id = params.get("request_id")
+                if not isinstance(name, str) or not name:
+                    raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "tools/call name is required")
+                if not isinstance(arguments, dict):
+                    raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "tools/call arguments must be an object")
+                if request_id is not None and not isinstance(request_id, (str, int)):
+                    raise RemoteMcpRouteError("RUNNER_RPC_INVALID_PARAMS", "tools/call request_id must be a string or integer")
+                return runtime.call_tool(name, arguments, request_id=request_id)
+            raise RemoteMcpRouteError("RUNNER_RPC_METHOD_UNSUPPORTED", "remote MCP method is unsupported")
+        finally:
+            with self._condition:
+                state.active_call_leases -= 1
+                self._condition.notify_all()
 
     def shutdown(self) -> None:
-        with self._lock:
-            if self._shutting_down and not self._by_control:
+        with self._condition:
+            if self._shutdown_complete:
+                return
+            if self._shutting_down:
+                while not self._shutdown_complete:
+                    self._condition.wait()
                 return
             self._shutting_down = True
-            records = tuple(self._by_control.values())
+            states = tuple(self._by_control.values())
+            for state in states:
+                state.closing = True
+            self._condition.notify_all()
+            while self._creating or any(state.active_call_leases for state in states):
+                self._condition.wait()
+            owned_states: list[_SessionState] = []
+            for state in states:
+                if state.close_started:
+                    while not state.close_completed:
+                        self._condition.wait()
+                    continue
+                state.close_started = True
+                owned_states.append(state)
+                record = state.record
+                self._by_control.pop(record.control_session_id, None)
+                self._by_remote.pop(record.remote_session_id, None)
+                self._remember_closed_locked(record)
             self._by_control.clear()
             self._by_remote.clear()
-            for record in records:
-                self._closed[record.remote_session_id] = _ClosedSession(
-                    record.workspace_id,
-                    record.authorization_digest,
-                )
-        for record in records:
-            record.runtime.close()
+            self._condition.notify_all()
+        first_error: BaseException | None = None
+        try:
+            for state in owned_states:
+                try:
+                    state.record.runtime.close()
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                finally:
+                    with self._condition:
+                        state.close_completed = True
+                        self._condition.notify_all()
+        finally:
+            with self._condition:
+                self._shutdown_complete = True
+                self._condition.notify_all()
+        if first_error is not None:
+            raise first_error
 
 
 class RunnerMcpRouter:
