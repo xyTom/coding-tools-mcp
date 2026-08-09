@@ -25,11 +25,11 @@ The integrated implementation is recorded by commit `d8c1cc855f71303a525da288a6c
 | 15 | complete | `d8c1cc8` | Runtime helper suite | Windows truthful capability test green; Linux Landlock behavior remains platform-conditional |
 | 16 | complete | `d8c1cc8` | WorkspaceHost/catalog/binding tests | local/runner targets; remote root opaque; no local fallback |
 | 17 | complete | `d8c1cc8` (source Runner workstream) | Runner transport/WebSocket tests | credential/registry + production outbound Runner peer and `/runner/ws` |
-| 18 | complete | `d8c1cc8` | `phase-18-session-resilience-final.md`, `phase-18-session-resilience-retrospective.md`, `integration-remediation/RM13-final-release-handoff.md` | RM00–RM12 evidence closed; final handoff records the exact release gates and residual platform limits |
+| 18 | complete | `73888d5` | `phase-18-session-resilience-final.md`, `phase-18-session-resilience-retrospective.md`, `integration-remediation/RM13-final-release-handoff.md`, `integration-remediation/RM13A-post-review-remediation.md` | RM00–RM12 and post-review P1 findings closed; final handoff records exact gates and residual platform limits |
 | 19 | complete | `d8c1cc8` (source `2e705d7`) | Runner job reconciliation tests | recovering/running/completed/failed/cancelled/lost reconciliation |
 | 20 | complete | `d8c1cc8` | Desktop tests | tunnel providers, external URL, mobile onboarding, Runner status |
 | 21 | not enabled (optional) | none by design | `phase-22.md` | no second MCP/OpenAPI facade; stable Core 25-tool surface preserved |
-| 22 | complete | `d8c1cc8` | `phase-22.md`, `integration-remediation/RM12B-linux-posix-evidence.md`, `integration-remediation/RM13-final-release-handoff.md` | RM12 Core 25, aggregate, security, Linux POSIX, and range gates passed; final handoff recorded |
+| 22 | complete | `73888d5` | `phase-22.md`, `integration-remediation/RM12B-linux-posix-evidence.md`, `integration-remediation/RM13-final-release-handoff.md`, `integration-remediation/RM13A-post-review-remediation.md` | RM12 gates and post-review shutdown/redaction findings passed; final handoff recorded |
 
 ## Current Release Evidence
 
@@ -41,6 +41,7 @@ The integrated implementation is recorded by commit `d8c1cc855f71303a525da288a6c
 - `docs/webcodex-integration-handoffs/phase-22.md`
 - `docs/webcodex-integration-handoffs/integration-remediation/RM12B-linux-posix-evidence.md`
 - `docs/webcodex-integration-handoffs/integration-remediation/RM13-final-release-handoff.md`
+- `docs/webcodex-integration-handoffs/integration-remediation/RM13A-post-review-remediation.md`
 
 ## Non-claims
 

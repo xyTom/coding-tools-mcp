@@ -145,6 +145,7 @@ Phase 21 is optional by product contract. It is **not enabled** in this integrat
 - Remote root remains opaque in the Control Plane and is rejected by local filesystem scope helpers.
 - Ambiguous mutating calls are never automatically replayed.
 - Ubuntu WSL independently verified transcript/config/SQLite sidecar POSIX modes for candidate commit `81072da`; no real user data was used.
+- RM13A post-review regressions cover detached HTTP/Runner shutdown completion and URL userinfo redaction on candidate commit `73888d5`.
 
 ## Release Notes / Limitations
 

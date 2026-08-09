@@ -138,6 +138,7 @@ Capacity/identity/initialization pressure returns explicit JSON-RPC backpressure
 - `docs/webcodex-integration-handoffs/phase-18-session-resilience-retrospective.md` (real RS00–RS07 provenance)
 - `docs/webcodex-integration-handoffs/integration-remediation/RM12B-linux-posix-evidence.md`
 - `docs/webcodex-integration-handoffs/integration-remediation/RM13-final-release-handoff.md`
+- `docs/webcodex-integration-handoffs/integration-remediation/RM13A-post-review-remediation.md`
 - tests: HTTP session resilience, upstream resilience/lazy catalog, Runner remote/MCP/capabilities/WebSocket, WorkspaceHost/binding.
 
 ## Remaining Deployment Limit
