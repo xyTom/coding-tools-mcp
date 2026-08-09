@@ -131,6 +131,37 @@ def build_template(counters: Counter[str], *, tag: str = "v1") -> UpstreamCatalo
         return build_upstream_catalog_template(snapshot, reserved_names={"read_file"})
 
 
+def build_mapping_template(
+    counters: Counter[str],
+) -> tuple[UpstreamCatalogTemplate, dict[str, Any], dict[str, str], dict[str, str]]:
+    env = {"REMOTE": {"secret_ref": {"name": "upstream-token"}}}
+    headers = {"X-Upstream": "original"}
+    tool_policy = {"search": "read-only"}
+    config = UpstreamServerConfig(
+        alias="mapped",
+        transport="streamable_http",
+        url="http://127.0.0.1/mapped",
+        expose_mode="broker",
+        env=env,
+        headers=headers,
+        tool_policy=tool_policy,
+    )
+    snapshot = UpstreamConfigSnapshot(configs=(config,))
+
+    def discovery_factory(
+        discovery_config: UpstreamServerConfig,
+        protocol_version: str,
+        secret_resolver: object | None = None,
+    ) -> DiscoveryClient:
+        del protocol_version, secret_resolver
+        counters[f"discover_create:{discovery_config.alias}"] += 1
+        return DiscoveryClient(discovery_config, counters)
+
+    with patch.object(upstream_module, "build_client", side_effect=discovery_factory):
+        template = build_upstream_catalog_template(snapshot)
+    return template, env, headers, tool_policy
+
+
 class UpstreamLazyCatalogTests(unittest.TestCase):
     def test_one_discovery_template_serves_one_hundred_runtime_managers_without_live_clients(self) -> None:
         counters: Counter[str] = Counter()
@@ -267,6 +298,57 @@ class UpstreamLazyCatalogTests(unittest.TestCase):
         self.assertEqual(old.catalog_entry("alpha__search").tags, ("old",))  # type: ignore[union-attr]
         old.close()
         new.close()
+
+    def test_template_config_mappings_are_deeply_frozen_and_defensively_copied(self) -> None:
+        counters: Counter[str] = Counter()
+        template, source_env, source_headers, source_tool_policy = build_mapping_template(counters)
+        config = template.configs[0]
+
+        source_env["REMOTE"]["secret_ref"]["name"] = "changed-source"
+        source_headers["X-Upstream"] = "changed-source"
+        source_tool_policy["search"] = "mutating-source"
+
+        self.assertEqual(config.env["REMOTE"]["secret_ref"]["name"], "upstream-token")
+        self.assertEqual(config.headers["X-Upstream"], "original")
+        self.assertEqual(config.tool_policy["search"], "read-only")
+        with self.assertRaises(TypeError):
+            config.env["REMOTE"]["secret_ref"]["name"] = "attacker"  # type: ignore[index]
+        with self.assertRaises(TypeError):
+            config.headers["X-Upstream"] = "attacker"  # type: ignore[index]
+        with self.assertRaises(TypeError):
+            config.tool_policy["search"] = "attacker"  # type: ignore[index]
+
+    def test_template_managers_do_not_share_config_mutations_with_live_clients(self) -> None:
+        counters: Counter[str] = Counter()
+        template, _source_env, _source_headers, _source_tool_policy = build_mapping_template(counters)
+        seen_configs: list[UpstreamServerConfig] = []
+
+        def live_factory(
+            config: UpstreamServerConfig,
+            protocol_version: str,
+            secret_resolver: object | None = None,
+        ) -> LiveClient:
+            del protocol_version, secret_resolver
+            seen_configs.append(config)
+            config.env["REMOTE"]["secret_ref"]["name"] = f"client-{len(seen_configs)}"  # type: ignore[index]
+            config.headers["X-Upstream"] = f"client-{len(seen_configs)}"
+            config.tool_policy["search"] = "mutating"
+            return LiveClient(config, counters)
+
+        first = UpstreamManager.from_template(template)
+        second = UpstreamManager.from_template(template)
+        try:
+            with patch.object(upstream_module, "build_client", side_effect=live_factory):
+                first.call_tool("mapped__search", {})
+                second.call_tool("mapped__search", {})
+            self.assertEqual(len(seen_configs), 2)
+            self.assertIsNot(seen_configs[0], seen_configs[1])
+            self.assertEqual(template.configs[0].env["REMOTE"]["secret_ref"]["name"], "upstream-token")
+            self.assertEqual(template.configs[0].headers["X-Upstream"], "original")
+            self.assertEqual(template.configs[0].tool_policy["search"], "read-only")
+        finally:
+            first.close()
+            second.close()
 
 
 if __name__ == "__main__":

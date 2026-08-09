@@ -1700,7 +1700,7 @@ class UpstreamManager:
                         retryable=True,
                     )
             client = build_client(
-                config,
+                _copy_upstream_config(config),
                 self.protocol_version,
                 secret_resolver=self.secret_resolver,
             )
@@ -1873,6 +1873,38 @@ class UpstreamManager:
         self._clients = dict(next_clients)
 
 
+def _copy_upstream_config(
+    config: UpstreamServerConfig,
+    *,
+    freeze_mappings: bool = False,
+) -> UpstreamServerConfig:
+    env: Any = copy.deepcopy(dict(config.env))
+    headers: Any = copy.deepcopy(dict(config.headers))
+    tool_policy: Any = copy.deepcopy(dict(config.tool_policy))
+    if freeze_mappings:
+        env = _freeze_json(env)
+        headers = _freeze_json(headers)
+        tool_policy = _freeze_json(tool_policy)
+    return UpstreamServerConfig(
+        alias=config.alias,
+        transport=config.transport,
+        enabled=config.enabled,
+        url=config.url,
+        command=config.command,
+        args=tuple(config.args),
+        env=env,
+        headers=headers,
+        authorization_env=config.authorization_env,
+        include_tools=tuple(config.include_tools),
+        exclude_tools=tuple(config.exclude_tools),
+        expose_mode=config.expose_mode,
+        pinned_tools=tuple(config.pinned_tools),
+        tags=tuple(config.tags),
+        tool_policy=tool_policy,
+        timeout_ms=config.timeout_ms,
+    )
+
+
 def build_upstream_catalog_template(
     snapshot: UpstreamConfigSnapshot,
     *,
@@ -1919,24 +1951,7 @@ def build_upstream_catalog_template(
                 )
             )
         cloned_configs = tuple(
-            UpstreamServerConfig(
-                alias=config.alias,
-                transport=config.transport,
-                enabled=config.enabled,
-                url=config.url,
-                command=config.command,
-                args=tuple(config.args),
-                env=copy.deepcopy(config.env),
-                headers=dict(config.headers),
-                authorization_env=config.authorization_env,
-                include_tools=tuple(config.include_tools),
-                exclude_tools=tuple(config.exclude_tools),
-                expose_mode=config.expose_mode,
-                pinned_tools=tuple(config.pinned_tools),
-                tags=tuple(config.tags),
-                tool_policy=dict(config.tool_policy),
-                timeout_ms=config.timeout_ms,
-            )
+            _copy_upstream_config(config, freeze_mappings=True)
             for config in snapshot.configs
         )
         return UpstreamCatalogTemplate(
