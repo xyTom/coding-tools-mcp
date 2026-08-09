@@ -23,6 +23,18 @@ class _Runtime:
         self.closed += 1
 
 
+class _BlockingCloseRuntime(_Runtime):
+    def __init__(self, session_id: str, entered: threading.Event, release: threading.Event) -> None:
+        super().__init__(session_id)
+        self._entered = entered
+        self._release = release
+
+    def close(self) -> None:
+        self._entered.set()
+        self._release.wait(timeout=2)
+        super().close()
+
+
 class _Clock:
     def __init__(self) -> None:
         self.value = 100.0
@@ -334,10 +346,14 @@ class HTTPSessionLeaseTests(unittest.TestCase):
     def test_shutdown_racing_initialize_closes_uninstalled_runtime_and_returns_reservation(self) -> None:
         entered = threading.Event()
         release = threading.Event()
+        close_entered = threading.Event()
+        close_release = threading.Event()
+        self.addCleanup(release.set)
+        self.addCleanup(close_release.set)
         runtimes: list[_Runtime] = []
 
         def factory(_context: object) -> _Runtime:
-            runtime = _Runtime("race-1")
+            runtime = _BlockingCloseRuntime("race-1", close_entered, close_release)
             runtimes.append(runtime)
             entered.set()
             release.wait(timeout=2)
@@ -360,9 +376,10 @@ class HTTPSessionLeaseTests(unittest.TestCase):
         self.assertTrue(entered.wait(timeout=2))
         closer = threading.Thread(target=manager.close)
         closer.start()
-        time.sleep(0.02)
-        self.assertTrue(closer.is_alive())
         release.set()
+        self.assertTrue(close_entered.wait(timeout=2))
+        self.assertTrue(closer.is_alive())
+        close_release.set()
         creator.join(timeout=2)
         closer.join(timeout=2)
         self.assertFalse(creator.is_alive())

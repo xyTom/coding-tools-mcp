@@ -182,16 +182,18 @@ class HTTPSessionManager:
                 installed = True
             return runtime
         finally:
-            with self._condition:
-                self._creating -= 1
-                remaining = self._creating_by_identity.get(quota_key, 0) - 1
-                if remaining > 0:
-                    self._creating_by_identity[quota_key] = remaining
-                else:
-                    self._creating_by_identity.pop(quota_key, None)
-                self._condition.notify_all()
-            if runtime is not None and not installed:
-                _close_runtime(runtime)
+            try:
+                if runtime is not None and not installed:
+                    _close_runtime(runtime)
+            finally:
+                with self._condition:
+                    self._creating -= 1
+                    remaining = self._creating_by_identity.get(quota_key, 0) - 1
+                    if remaining > 0:
+                        self._creating_by_identity[quota_key] = remaining
+                    else:
+                        self._creating_by_identity.pop(quota_key, None)
+                    self._condition.notify_all()
 
     @contextmanager
     def lease(self, session_id: str) -> Iterator[Any | None]:
