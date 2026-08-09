@@ -28,16 +28,18 @@ Ten fresh local Runtime samples were measured with no configured upstream server
 
 These points use real `Runtime` objects and Windows process working set.
 
-| Active Runtime objects | Process working set |
-| ---: | ---: |
-| 0 | 49,381,376 B |
-| 50 | 49,852,416 B |
-| 100 | 50,814,976 B |
-| 128 | 51,232,768 B |
+| Active Runtime objects | Run 1 working set | Run 2 working set |
+| ---: | ---: | ---: |
+| 0 | 49,090,560 B | 48,963,584 B |
+| 100 | 50,421,760 B | 50,196,480 B |
+| 128 | 50,909,184 B | 50,876,416 B |
+| 500 | 57,311,232 B | 57,200,640 B |
 
-The observed slope estimate was about **14,531 B per Runtime**, with a noisy interval of roughly **9,421–19,251 B per Runtime** across adjacent samples. This is only an allocator/process-level estimate; a live upstream client, running command, Codex process, LSP process, or large result store can dominate it.
+Both runs used `python scripts\benchmark_webcodex_release.py --section runtime --runtime-counts 0,100,128,500` with RSS method `windows-working-set` on Python 3.12.0 / Windows 11 `10.0.28000` / 32 logical CPUs. Raw JSON is saved under `.tmp/agent-integration/RM10/` (gitignored). Each run completed in roughly 56–57 seconds of wall clock for the whole runtime section.
 
-A 500-full-Runtime sample was attempted but exceeded the 30-second validation command window and was terminated by the test harness. Therefore this report **does not claim a successful 500-full-Runtime measurement**.
+The observed incremental slope was about **15,976.6 B per Runtime** in run 1 (range 13,312–17,408) and **17,871.0 B per Runtime** in run 2 (range 12,328.96–24,283.43). The two runs differ because RSS includes allocator/process noise; the reported range is preferred over a single exact cost. This is only an allocator/process-level estimate; a live upstream client, running command, Codex process, LSP process, or large result store can dominate it.
+
+The 500-full-Runtime measurement is **capacity evidence only**; it does not change the production default of 128 and is not a recommendation to raise it.
 
 ## HTTP Session Capacity / Lookup / Soak
 
@@ -149,7 +151,7 @@ Keep the integrated defaults for the release candidate:
 Rationale:
 
 1. 128 is exercised by full Runtime working-set measurement and the 10× lifecycle soak.
-2. 500 Session-manager records show flat lease latency, but 500 full Runtime objects were **not** successfully measured within the release harness window; this is not evidence to raise the total Runtime default to 500.
+2. 500 full Runtime objects were successfully measured twice, but the 500 point is capacity evidence only; it is not evidence to raise the total Runtime default to 500.
 3. Per-identity 64 preserves fairness under a 128 global cap.
 4. Initialization 16 bounds burst cost from project context, upstream initialization, and other Runtime construction work even when Session metadata itself is cheap.
 
@@ -162,6 +164,6 @@ Deployments may tune these values after measuring their actual language servers,
 - Real Codex App Server/model latency is not included.
 - Real third-party LSP startup is not included.
 - No external-network RTT is included in Runner numbers.
-- 500 full Runtime objects were not validated; only Session-manager metadata reached 500.
+- 500 full Runtime objects were measured twice on this Windows validation host only; other platforms and hosts may differ.
 
 No comparative claim against WebCodex, Codex, or another product should be made from these measurements.
