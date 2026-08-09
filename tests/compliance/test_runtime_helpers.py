@@ -81,6 +81,7 @@ def fake_landlock_exec() -> Iterator[dict[str, object]]:
 
     def fake_open(_workspace: Path, _read_roots: list[str], **kwargs: object) -> int:
         captured["write_roots"] = kwargs.get("write_roots")
+        captured["workspace_writable"] = kwargs.get("workspace_writable")
         return read_fd
 
     def fake_popen(*args: object, **kwargs: object) -> FakeProcess:
@@ -747,6 +748,96 @@ class RuntimeHelperTests(unittest.TestCase):
                     runtime.exec_command({"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0})
 
                 self.assertEqual(captured.get("write_roots"), [runtime.runtime_dir])
+                self.assertIs(captured.get("workspace_writable"), True)
+
+    def test_inspect_mode_passes_readonly_workspace_to_landlock(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp),
+                permission_mode="trusted",
+                execution_fs_mode="inspect",
+            )
+            try:
+                with fake_landlock_exec() as captured:
+                    runtime.exec_command(
+                        {"cmd": "printf ok", "timeout_ms": 5000, "yield_time_ms": 0}
+                    )
+                self.assertEqual(captured.get("write_roots"), [runtime.runtime_dir])
+                self.assertIs(captured.get("workspace_writable"), False)
+            finally:
+                runtime.close()
+
+    def test_inspect_mode_reports_truthfully_when_landlock_is_unavailable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            runtime = Runtime(
+                Path(tmp),
+                permission_mode="trusted",
+                execution_fs_mode="inspect",
+            )
+            try:
+                unavailable = {"available": False, "abi_version": None, "reason": "test"}
+                with patch.object(server_module, "landlock_status_payload", return_value=unavailable):
+                    check = runtime.check_exec_environment({})
+                    info = runtime.server_info_payload()
+                self.assertEqual(check["execution_fs_mode"], "inspect")
+                self.assertFalse(check["inspect_enforced"])
+                self.assertFalse(info["inspect_enforced"])
+                self.assertTrue(
+                    any("inspect" in warning for warning in check.get("warnings", []))
+                )
+            finally:
+                runtime.close()
+
+    def test_execution_fs_mode_is_orthogonal_runtime_policy(self) -> None:
+        parser = server_module.build_parser()
+        args = parser.parse_args(
+            ["--permission-mode", "trusted", "--execution-fs-mode", "inspect"]
+        )
+        policy = server_module.runtime_policy_from_args(args)
+        self.assertEqual(policy.permission_mode, "trusted")
+        self.assertEqual(policy.execution_fs_mode, "inspect")
+
+    @unittest.skipIf(os.name == "nt", "Linux Landlock enforcement test")
+    def test_inspect_mode_blocks_workspace_writes_but_allows_runtime_scratch(self) -> None:
+        landlock = server_module.landlock_status_payload()
+        if not landlock.get("available"):
+            self.skipTest("Linux Landlock is unavailable")
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "readable.txt").write_text("hello\n", encoding="utf-8")
+            runtime = Runtime(
+                workspace,
+                permission_mode="trusted",
+                execution_fs_mode="inspect",
+            )
+            try:
+                read_result = runtime.exec_command(
+                    {"cmd": "cat readable.txt", "timeout_ms": 5000, "yield_time_ms": 5000}
+                )
+                self.assertEqual(read_result.get("exit_code"), 0, read_result)
+
+                blocked = runtime.exec_command(
+                    {
+                        "cmd": "printf blocked > blocked.txt",
+                        "timeout_ms": 5000,
+                        "yield_time_ms": 5000,
+                    }
+                )
+                self.assertNotEqual(blocked.get("exit_code"), 0, blocked)
+                self.assertFalse((workspace / "blocked.txt").exists())
+
+                scratch = runtime.command_tmp_dir() / "inspect-scratch.txt"
+                scratch_result = runtime.exec_command(
+                    {
+                        "cmd": f"printf ok > {shlex.quote(str(scratch))}",
+                        "timeout_ms": 5000,
+                        "yield_time_ms": 5000,
+                    }
+                )
+                self.assertEqual(scratch_result.get("exit_code"), 0, scratch_result)
+                self.assertEqual(scratch.read_text(encoding="utf-8"), "ok")
+            finally:
+                runtime.close()
 
     def test_dangerously_skip_all_permissions_auto_grants_permission_gates(self) -> None:
         with TemporaryDirectory() as tmp:

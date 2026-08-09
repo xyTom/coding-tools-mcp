@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import base64
 import ctypes
@@ -35,6 +36,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from . import __version__
+from .agent_backends.base import AgentSessionBackend
+from .agent_backends.codex_app_server import CodexAppServerBackend, CodexAppServerConfig
+from .agent_session_store import AgentSessionStore, AgentSessionStoreError
+from .agent_sessions import AgentSessionService, AgentSessionServiceError
 from .admin import (
     ADMIN_API_PREFIX,
     SERVER_SECRET_VAULT_FILENAME,
@@ -44,6 +49,7 @@ from .admin import (
     gateway_file_revision,
 )
 from .envutils import ENV_PREFIX, truthy_env
+from .execution import ExecutionBackend, LocalExecutionBackend
 from .codex_sessions import CodexSessionScanner
 from .errors import JsonRpcError, ToolFailure
 from .json_utils import strict_json_bytes, strict_json_loads
@@ -78,6 +84,13 @@ from .oauth import (
     verify_pkce,
 )
 from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from .operator_api import (
+    OPERATOR_API_PREFIX,
+    OperatorAPIError,
+    OperatorAPIService,
+    OperatorPrincipal,
+    operator_error_status,
+)
 from .secret_vault import SecretVault, SecretVaultError
 from .settings_definition import (
     SettingsValidationError,
@@ -116,16 +129,25 @@ from .protocol import (
     validate_rpc_envelope,
 )
 from .project_context import ProjectContext, load_project_context
+from .repo_fingerprint import build_repo_fingerprint
+from .runner.credentials import RunnerCredentialStore
+from .runner.jobs import RunnerJobReconciler
+from .runner.registry import RunnerRegistry
+from .runner.routing import RemoteMcpRouteError, RemoteMcpRouteService, RemoteMcpRouteStore
+from .runner.transport import RunnerAuthenticationError, RunnerUnavailableError, RunnerWebSocketTransport
+from .runner.websocket import AsyncSocketWebSocket, BlockingWebSocket, WebSocketProtocolError, websocket_accept_value
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
 from .transcript import TranscriptStore
-from .transport_http import HTTPSessionManager
+from .transport_http import HTTPSessionAdmissionError, HTTPSessionLimits, HTTPSessionManager
 from .transport_stdio import serve_stdio
 from .upstream import (
+    UpstreamCatalogTemplate,
     UpstreamConfigError,
     UpstreamConfigSnapshot,
     UpstreamManager,
+    build_upstream_catalog_template,
     load_upstream_config_snapshot,
     upstream_error_result,
 )
@@ -136,8 +158,9 @@ from .workspace_binding import (
     WorkspaceBindingError,
     WorkspaceBindingResolver,
 )
-from .webui import admin_console_html
-from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
+from .webui import admin_console_html, operator_app_html
+from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError, WorkspaceEntry
+from .workspace_host import RemoteMcpHttpRuntimeProxy, WorkspaceHostError, WorkspaceHostFactory
 
 
 SERVER_NAME = "coding-tools-mcp"
@@ -179,6 +202,7 @@ RISKY_ENV_NAMES = {
     "RUBYLIB",
 }
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
+EXECUTION_FS_MODE_CHOICES = ("normal", "inspect")
 
 
 @dataclass(frozen=True)
@@ -378,6 +402,7 @@ class RuntimePolicy:
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
     fake_readonly_annotations: bool = False
+    execution_fs_mode: str = "normal"
 
 
 @dataclass(frozen=True)
@@ -574,6 +599,19 @@ def fake_readonly_annotations_from_args(args: argparse.Namespace, permission_mod
     return requested
 
 
+def execution_fs_mode_from_args(args: argparse.Namespace) -> str:
+    raw_mode = (
+        getattr(args, "execution_fs_mode", None)
+        or os.environ.get(f"{ENV_PREFIX}_EXECUTION_FS_MODE")
+        or "normal"
+    )
+    mode = raw_mode.strip().lower()
+    if mode not in EXECUTION_FS_MODE_CHOICES:
+        supported = ", ".join(EXECUTION_FS_MODE_CHOICES)
+        raise ValueError(f"execution fs mode must be one of: {supported}")
+    return mode
+
+
 def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
     permission_mode = permission_mode_from_args(args)
     allow_network = (
@@ -586,6 +624,7 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
         shell_env_policy=shell_env_policy_from_args(args),
         allow_network=allow_network,
         fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
+        execution_fs_mode=execution_fs_mode_from_args(args),
     )
 
 
@@ -1326,7 +1365,9 @@ class Runtime:
         workspace_binding: WorkspaceBinding | None = None,
         authorization_context: AuthorizationContext | None = None,
         upstream_manager: UpstreamManager | None = None,
+        execution_backend: ExecutionBackend | None = None,
         fake_readonly_annotations: bool = False,
+        execution_fs_mode: str = "normal",
         transport: str = "stdio",
     ) -> None:
         self.workspace = Workspace(workspace)
@@ -1341,6 +1382,21 @@ class Runtime:
             self.workspace.root,
             transport,
         )
+        self.execution_backend = execution_backend or LocalExecutionBackend(
+            self.workspace.root,
+            spawn_process=lambda command, **kwargs: spawn_process(command, **kwargs),
+            terminate_process=lambda process, signum, **kwargs: terminate_process_group(
+                process,
+                signum,
+                **kwargs,
+            ),
+        )
+        if self.execution_backend.workspace_root != self.workspace.root:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "Execution backend workspace does not match Runtime workspace.",
+                category="validation",
+            )
         self.authorization_context = authorization_context or AuthorizationContext(
             self.workspace_binding.authorization_method
         )
@@ -1366,6 +1422,14 @@ class Runtime:
                 details={"permission_mode": permission_mode},
             )
         self.fake_readonly_annotations = fake_readonly_annotations
+        if execution_fs_mode not in EXECUTION_FS_MODE_CHOICES:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Unknown execution fs mode: {execution_fs_mode}",
+                category="validation",
+                details={"supported": list(EXECUTION_FS_MODE_CHOICES)},
+            )
+        self.execution_fs_mode = execution_fs_mode
         self.shell_env_policy = shell_env_policy or ShellEnvPolicy()
         if self.shell_env_policy.inherit not in SHELL_ENV_INHERIT_CHOICES:
             raise ToolFailure(
@@ -1452,7 +1516,7 @@ class Runtime:
         for session in sessions:
             session.refresh_status()
             if session.process.poll() is None:
-                terminate_process_group(session.process, signal.SIGTERM)
+                self.execution_backend.terminate(session.process, signal.SIGTERM)
             session.drain_readers()
         self.upstream_manager.close()
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
@@ -1512,6 +1576,15 @@ class Runtime:
 
     def landlock_write_roots(self) -> list[Path]:
         return [self.runtime_dir]
+
+    def inspect_mode_requested(self) -> bool:
+        return self.execution_fs_mode == "inspect"
+
+    def inspect_mode_enforced(self, landlock: dict[str, Any] | None = None) -> bool:
+        if not self.inspect_mode_requested():
+            return False
+        status = landlock if landlock is not None else landlock_status_payload()
+        return self._landlock_enforced(status)
 
     def is_allowed_command_tmp_path(self, candidate: str) -> bool:
         if self.capabilities.skip_all_permissions:
@@ -1589,6 +1662,7 @@ class Runtime:
         return {
             "workspace": str(self.workspace.root),
             "permission_mode": self.permission_mode,
+            "execution_fs_mode": self.execution_fs_mode,
             "network_allowed": self.allow_network,
             "runtime_dir": str(self.runtime_dir),
             "home": str(self.command_home_dir()),
@@ -1613,6 +1687,7 @@ class Runtime:
             "auth_enabled": self.auth_enabled(),
             "dangerously_skip_all_permissions": self.dangerously_skip_all_permissions,
             "annotation_override": "fake_readonly" if self.fake_readonly_annotations else None,
+            "inspect_enforced": self.inspect_mode_enforced(landlock),
             "landlock": landlock,
             "exec_policy": {
                 "shell_expansion": self.shell_expansion_policy(),
@@ -1888,6 +1963,11 @@ class Runtime:
         warnings: list[str] = []
         if not landlock.get("available"):
             warnings.append("Linux Landlock filesystem confinement is unavailable")
+        inspect_enforced = self.inspect_mode_enforced(landlock)
+        if self.inspect_mode_requested() and not inspect_enforced:
+            warnings.append(
+                "execution_fs_mode=inspect is requested but filesystem write isolation is not enforced on this host"
+            )
         if self.capabilities.skip_all_permissions:
             warnings.append("permission_mode=dangerous disables MCP safety gates")
         if self.fake_readonly_annotations:
@@ -1901,6 +1981,7 @@ class Runtime:
             **self._exec_environment_summary(),
             "landlock_enabled": self._landlock_enforced(landlock),
             "landlock_abi": landlock.get("abi_version"),
+            "inspect_enforced": inspect_enforced,
             "global_tmp_write": self.global_tmp_write_policy(),
             "warnings": warnings,
         }
@@ -2601,6 +2682,7 @@ class Runtime:
                     self.workspace.root,
                     guard_allow_roots(),
                     write_roots=self.landlock_write_roots(),
+                    workspace_writable=not self.inspect_mode_requested(),
                 )
                 popen_cmd = landlock_exec_argv(landlock_fd, cmd)
                 popen_shell = False
@@ -2630,7 +2712,7 @@ class Runtime:
         registered = False
         slot_released = False
         try:
-            process, pty_master_fd = spawn_process(
+            process, pty_master_fd = self.execution_backend.spawn(
                 popen_cmd,
                 cwd=str(workdir.path),
                 shell=popen_shell,
@@ -2657,7 +2739,7 @@ class Runtime:
                 if not registered and not slot_released:
                     self.starting_sessions -= 1
             if process is not None and process.poll() is None:
-                terminate_process_group(process, signal.SIGTERM)
+                self.execution_backend.terminate(process, signal.SIGTERM)
             raise
         finally:
             if landlock_fd is not None:
@@ -2699,7 +2781,7 @@ class Runtime:
             now = time.time()
             if not tty and now >= deadline:
                 session.timed_out = True
-                terminate_process_group(process, signal.SIGTERM)
+                self.execution_backend.terminate(process, signal.SIGTERM)
                 session.refresh_status()
                 session.drain_readers()
                 return finish()
@@ -3241,11 +3323,11 @@ class Runtime:
         evict = True
         if session.process.poll() is None:
             session.terminating = True
-            terminate_process_group(session.process, signum, force=force)
+            self.execution_backend.terminate(session.process, signum, force=force)
             exited = self._wait_for_session_exit(session, int(args.get("wait_ms", 5000)) / 1000.0)
             if not exited and not force:
                 force = True
-                terminate_process_group(session.process, HARD_KILL_SIGNAL, force=True)
+                self.execution_backend.terminate(session.process, HARD_KILL_SIGNAL, force=True)
                 exited = self._wait_for_session_exit(session, int(args.get("kill_wait_ms", 2000)) / 1000.0)
             if exited:
                 killed = True
@@ -3278,7 +3360,7 @@ class Runtime:
             return
         session.refresh_status()
         if session.process.poll() is None:
-            terminate_process_group(session.process, signal.SIGTERM)
+            self.execution_backend.terminate(session.process, signal.SIGTERM)
 
     def cancel_request(self, request_id: str | int) -> None:
         with self.request_sessions_lock:
@@ -4322,7 +4404,13 @@ def landlock_device_access(handled: int) -> int:
     )
 
 
-def open_landlock_ruleset(workspace: Path, read_roots: list[str], *, write_roots: list[Path] | None = None) -> int:
+def open_landlock_ruleset(
+    workspace: Path,
+    read_roots: list[str],
+    *,
+    write_roots: list[Path] | None = None,
+    workspace_writable: bool = True,
+) -> int:
     version = landlock_abi_version()
     handled = landlock_handled_access(version)
     ruleset_attr = LandlockRulesetAttr(handled)
@@ -4341,10 +4429,10 @@ def open_landlock_ruleset(workspace: Path, read_roots: list[str], *, write_roots
             details={"errno": err, "reason": os.strerror(err) if err else "unknown"},
         )
     try:
-        workspace_access = handled
         readonly_access = handled & (
             LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
         )
+        workspace_access = handled if workspace_writable else readonly_access
         device_access = landlock_device_access(handled)
         add_landlock_path(ruleset_fd, workspace, workspace_access)
         for write_root in write_roots or []:
@@ -5307,6 +5395,319 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         service = getattr(self.server, "admin_service", None)  # type: ignore[attr-defined]
         return service if isinstance(service, AdminService) else None
 
+    def _operator_service(self) -> OperatorAPIService | None:
+        service = getattr(self.server, "operator_service", None)  # type: ignore[attr-defined]
+        return service if isinstance(service, OperatorAPIService) else None
+
+    def _operator_principal(self) -> OperatorPrincipal | None:
+        context = getattr(self, "_authorization_context", None)
+        service = self._operator_service()
+        if not isinstance(context, AuthorizationContext) or service is None:
+            return None
+        if context.method == "oauth" and context.oauth_identity is not None:
+            identity = context.oauth_identity
+            return OperatorPrincipal(
+                f"oauth:{identity.client_id}:{identity.grant_id}",
+                (identity.workspace_id,),
+            )
+        if context.method == "bearer":
+            bearer = self.headers.get("Authorization", "").strip().removeprefix("Bearer ").strip()
+            admin_token = getattr(self.server, "admin_token", None)  # type: ignore[attr-defined]
+            if (
+                isinstance(admin_token, str)
+                and admin_token
+                and bearer
+                and secrets.compare_digest(bearer, admin_token)
+            ):
+                return None
+            return OperatorPrincipal("bearer:static", (service.workspace_catalog.default_id,))
+        if context.method == "noauth":
+            return OperatorPrincipal("noauth:local", (service.workspace_catalog.default_id,))
+        return None
+
+    def _send_operator_unauthorized(self, *, head_only: bool = False) -> None:
+        self.send_json(
+            {
+                "error": {
+                    "code": "operator_auth_required",
+                    "message": "Operator authentication is required.",
+                }
+            },
+            status=401,
+            extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-operator"'},
+            head_only=head_only,
+        )
+
+    def _read_operator_json(self) -> dict[str, Any] | None:
+        if self.command in {"GET", "HEAD"}:
+            return {}
+        if self.headers.get_content_type().lower() != "application/json":
+            self.send_json(
+                {
+                    "error": {
+                        "code": "operator_invalid_content_type",
+                        "message": "Content-Type must be application/json.",
+                    }
+                },
+                status=415,
+            )
+            return None
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self.send_json(
+                {
+                    "error": {
+                        "code": "operator_invalid_request",
+                        "message": "Content-Length is required.",
+                    }
+                },
+                status=411,
+            )
+            return None
+        try:
+            length = int(raw_length)
+        except ValueError:
+            length = -1
+        if length < 0 or length > MAX_HTTP_REQUEST_BYTES:
+            self.send_json(
+                {
+                    "error": {
+                        "code": "operator_invalid_request",
+                        "message": "Operator request body size is invalid.",
+                    }
+                },
+                status=413,
+            )
+            return None
+        try:
+            value = strict_json_loads(self.rfile.read(length))
+        except (UnicodeDecodeError, ValueError):
+            self.send_json(
+                {"error": {"code": "operator_invalid_json", "message": "Body must be valid JSON."}},
+                status=400,
+            )
+            return None
+        if not isinstance(value, dict):
+            self.send_json(
+                {"error": {"code": "operator_invalid_request", "message": "Body must be a JSON object."}},
+                status=400,
+            )
+            return None
+        return value
+
+    def handle_operator_request(self, method: str, *, head_only: bool = False) -> None:
+        service = self._operator_service()
+        if service is None:
+            self.send_json(
+                {"error": {"code": "operator_unavailable", "message": "Operator API is unavailable."}},
+                status=503,
+                head_only=head_only,
+            )
+            return
+        origin = self.headers.get("Origin")
+        if origin and not is_allowed_origin(origin):
+            self.send_json(
+                {"error": {"code": "origin_denied", "message": "Origin denied"}},
+                status=403,
+                head_only=head_only,
+            )
+            return
+        if not self.is_authorized():
+            self._send_operator_unauthorized(head_only=head_only)
+            return
+        principal = self._operator_principal()
+        if principal is None:
+            self._send_operator_unauthorized(head_only=head_only)
+            return
+
+        parsed = urllib.parse.urlsplit(self.path)
+        normalized = posixpath.normpath(parsed.path)
+        relative = normalized.removeprefix(OPERATOR_API_PREFIX).strip("/")
+        segments = [urllib.parse.unquote(segment) for segment in relative.split("/") if segment]
+        query = {
+            key: values[-1]
+            for key, values in urllib.parse.parse_qs(parsed.query, keep_blank_values=True).items()
+            if values
+        }
+        if method == "GET" and segments == ["workspaces"]:
+            self.send_json(service.list_workspaces(principal), head_only=head_only)
+            return
+        if method == "GET" and segments == ["sessions"]:
+            workspace_id = query.get("workspace_id") or (
+                principal.workspace_ids[0] if len(principal.workspace_ids) == 1 else ""
+            )
+            try:
+                limit = int(query.get("limit", "100"))
+            except ValueError:
+                limit = 0
+            try:
+                payload = service.list_sessions(principal, workspace_id, limit=limit)
+            except (OperatorAPIError, AgentSessionServiceError) as exc:
+                self._send_operator_error(exc, head_only=head_only)
+                return
+            self.send_json(payload, head_only=head_only)
+            return
+        if method == "GET" and len(segments) == 2 and segments[0] == "sessions":
+            try:
+                payload = service.get_session(principal, segments[1])
+            except (OperatorAPIError, AgentSessionServiceError) as exc:
+                self._send_operator_error(exc, head_only=head_only)
+                return
+            self.send_json(payload, head_only=head_only)
+            return
+        if (
+            method == "GET"
+            and len(segments) == 3
+            and segments[0] == "sessions"
+            and segments[2] == "handoff"
+        ):
+            try:
+                payload = service.handoff(principal, segments[1])
+            except (OperatorAPIError, AgentSessionServiceError) as exc:
+                self._send_operator_error(exc, head_only=head_only)
+                return
+            self.send_json(payload, head_only=head_only)
+            return
+        if (
+            method == "GET"
+            and len(segments) == 3
+            and segments[0] == "sessions"
+            and segments[2] == "events"
+        ):
+            try:
+                after = max(0, int(query.get("after", "0")))
+            except ValueError:
+                after = 0
+            self._handle_operator_event_stream(service, principal, segments[1], after)
+            return
+
+        body = self._read_operator_json() if method == "POST" else {}
+        if body is None:
+            return
+        try:
+            if method == "POST" and segments == ["sessions"]:
+                payload = service.create_session(principal, body)
+                self.send_json(payload, status=201)
+                return
+            if (
+                method == "POST"
+                and len(segments) == 3
+                and segments[0] == "sessions"
+                and segments[2] == "turns"
+            ):
+                self.send_json(service.send_turn(principal, segments[1], body))
+                return
+            if (
+                method == "POST"
+                and len(segments) == 3
+                and segments[0] == "sessions"
+                and segments[2] == "interrupt"
+            ):
+                self.send_json(service.interrupt(principal, segments[1]))
+                return
+            if (
+                method == "POST"
+                and len(segments) == 4
+                and segments[0] == "sessions"
+                and segments[2] == "approvals"
+            ):
+                self.send_json(service.approve(principal, segments[1], segments[3], body))
+                return
+        except (OperatorAPIError, AgentSessionServiceError) as exc:
+            self._send_operator_error(exc)
+            return
+        self.send_json(
+            {"error": {"code": "operator_not_found", "message": "Unknown Operator endpoint."}},
+            status=404,
+            head_only=head_only,
+        )
+
+    def _send_operator_error(
+        self,
+        exc: OperatorAPIError | AgentSessionServiceError,
+        *,
+        head_only: bool = False,
+    ) -> None:
+        if isinstance(exc, OperatorAPIError):
+            status = exc.status
+            code = exc.code
+            retryable = exc.retryable
+        else:
+            status = operator_error_status(exc)
+            code = exc.code
+            retryable = exc.retryable
+        self.send_json(
+            {
+                "error": {
+                    "code": code,
+                    "message": str(exc),
+                    "retryable": retryable,
+                }
+            },
+            status=status,
+            head_only=head_only,
+        )
+
+    def _handle_operator_event_stream(
+        self,
+        service: OperatorAPIService,
+        principal: OperatorPrincipal,
+        session_id: str,
+        after: int,
+    ) -> None:
+        try:
+            initial = service.events(principal, session_id, after=after, pull_backend=False)
+        except (OperatorAPIError, AgentSessionServiceError) as exc:
+            self._send_operator_error(exc)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_cors_headers()
+        self.end_headers()
+        cursor = after
+        last_keepalive = time.monotonic()
+
+        def emit(event: dict[str, Any]) -> None:
+            nonlocal cursor
+            cursor = max(cursor, int(event.get("sequence", cursor)))
+            data = strict_json_bytes(event)
+            self.wfile.write(f"id: {cursor}\n".encode("ascii"))
+            self.wfile.write(b"data: " + data + b"\n\n")
+            self.wfile.flush()
+
+        try:
+            for event in initial["events"]:
+                emit(event)
+            while True:
+                try:
+                    payload = service.events(principal, session_id, after=cursor, pull_backend=True)
+                except (OperatorAPIError, AgentSessionServiceError) as exc:
+                    error_payload = {
+                        "sequence": cursor + 1,
+                        "kind": "error",
+                        "method": "session/error",
+                        "params": {
+                            "code": exc.code,
+                            "message": str(exc),
+                            "retryable": bool(getattr(exc, "retryable", False)),
+                        },
+                    }
+                    emit(error_payload)
+                    return
+                if payload["events"]:
+                    for event in payload["events"]:
+                        emit(event)
+                    last_keepalive = time.monotonic()
+                elif time.monotonic() - last_keepalive >= 10.0:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    last_keepalive = time.monotonic()
+                time.sleep(0.25)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+            return
+
     def _is_admin_authorized(self) -> bool:
         configured = getattr(self.server, "admin_token", None)  # type: ignore[attr-defined]
         if not isinstance(configured, str) or not configured:
@@ -5415,8 +5816,95 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         self.send_json(payload, head_only=head_only)
 
+    def handle_runner_websocket(self) -> None:
+        credentials = getattr(self.server, "runner_credentials", None)
+        registry = getattr(self.server, "runner_registry", None)
+        reconciler = getattr(self.server, "runner_job_reconciler", None)
+        route_service = getattr(self.server, "runner_route_service", None)
+        if not isinstance(credentials, RunnerCredentialStore) or not isinstance(registry, RunnerRegistry):
+            self.send_json({"error": "Runner transport is unavailable"}, status=404)
+            return
+        if not isinstance(reconciler, RunnerJobReconciler) or not isinstance(route_service, RemoteMcpRouteService):
+            self.send_json({"error": "Runner transport is unavailable"}, status=404)
+            return
+        if self.headers.get("Upgrade", "").strip().lower() != "websocket":
+            self.send_json({"error": "WebSocket upgrade required"}, status=426)
+            return
+        connection_tokens = {
+            token.strip().lower()
+            for token in self.headers.get("Connection", "").split(",")
+            if token.strip()
+        }
+        if "upgrade" not in connection_tokens or self.headers.get("Sec-WebSocket-Version", "") != "13":
+            self.send_json({"error": "Invalid WebSocket upgrade"}, status=400)
+            return
+        try:
+            accept_value = websocket_accept_value(self.headers.get("Sec-WebSocket-Key", ""))
+        except WebSocketProtocolError:
+            self.send_json({"error": "Invalid WebSocket upgrade"}, status=400)
+            return
+
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept_value)
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+        websocket = AsyncSocketWebSocket(
+            BlockingWebSocket(self.connection, client_side=False, close_socket=True)
+        )
+
+        async def serve_runner() -> None:
+            transport: RunnerWebSocketTransport | None = None
+            runner_id: str | None = None
+            try:
+                transport = await RunnerWebSocketTransport.accept(
+                    websocket,
+                    credentials,
+                    registry,
+                    reconciler=reconciler,
+                )
+                runner_id = transport.runner_id
+                await route_service.attach_transport(transport)
+                await transport.wait_closed()
+            finally:
+                if runner_id is not None:
+                    route_service.detach_transport(runner_id, expected_transport=transport)
+                if transport is not None:
+                    await transport.close()
+                else:
+                    await websocket.close()
+
+        try:
+            asyncio.run(serve_runner())
+        except RunnerAuthenticationError:
+            self.log_error("Runner WebSocket authentication rejected")
+        except Exception as exc:  # noqa: BLE001 - upgraded sockets cannot send an HTTP error safely.
+            self.log_error("Runner WebSocket closed after transport error: %s", type(exc).__name__)
+
     def do_GET(self) -> None:
         normalized = posixpath.normpath(self.path.split("?", 1)[0])
+        if normalized == "/runner/ws":
+            self.handle_runner_websocket()
+            return
+        if normalized == "/app":
+            origin = self.headers.get("Origin")
+            if origin and not is_allowed_origin(origin):
+                self.send_json(
+                    {"error": {"code": "origin_denied", "message": "Origin denied"}},
+                    status=403,
+                )
+                return
+            body = operator_app_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if normalized == "/admin":
             if self._admin_service() is None:
                 self.send_json({"error": "Unknown endpoint"}, status=404)
@@ -5440,12 +5928,18 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized.startswith(ADMIN_API_PREFIX):
             self.handle_admin_request("GET")
             return
+        if normalized.startswith(OPERATOR_API_PREFIX):
+            self.handle_operator_request("GET")
+            return
         self.handle_metadata_request(head_only=False)
 
     def do_HEAD(self) -> None:
         normalized = posixpath.normpath(self.path.split("?", 1)[0])
         if normalized.startswith(ADMIN_API_PREFIX):
             self.handle_admin_request("GET", head_only=True)
+            return
+        if normalized.startswith(OPERATOR_API_PREFIX):
+            self.handle_operator_request("GET", head_only=True)
             return
         self.handle_metadata_request(head_only=True)
 
@@ -5469,22 +5963,25 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_unauthorized()
             return
         session_id = self.headers.get("Mcp-Session-Id")
-        runtime = self.server.sessions.get(session_id) if session_id else None  # type: ignore[attr-defined]
-        if runtime is None:
+        if not session_id:
             self.send_rpc_error(-32001, "Unknown MCP session", status=404)
             return
-        authorization_context = getattr(self, "_authorization_context", None)
-        if (
-            not isinstance(authorization_context, AuthorizationContext)
-            or runtime.session_authorization_key()
-            != authorization_context.authorization_key(runtime.workspace_binding.workspace_id)
-        ):
-            self.send_rpc_error(
-                -32000,
-                "Authorization context does not match the initialized MCP session",
-                status=403,
-            )
-            return
+        with self.server.sessions.lease(session_id) as runtime:  # type: ignore[attr-defined]
+            if runtime is None:
+                self.send_rpc_error(-32001, "Unknown MCP session", status=404)
+                return
+            authorization_context = getattr(self, "_authorization_context", None)
+            if (
+                not isinstance(authorization_context, AuthorizationContext)
+                or runtime.session_authorization_key()
+                != authorization_context.authorization_key(runtime.workspace_binding.workspace_id)
+            ):
+                self.send_rpc_error(
+                    -32000,
+                    "Authorization context does not match the initialized MCP session",
+                    status=403,
+                )
+                return
         if not self.server.sessions.delete(session_id):  # type: ignore[attr-defined]
             self.send_rpc_error(-32001, "Unknown MCP session", status=404)
             return
@@ -5496,7 +5993,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         request_path = self.path.split("?", 1)[0]
         normalized = posixpath.normpath(request_path)
-        if not normalized.startswith(ADMIN_API_PREFIX) and normalized not in {
+        if (
+            not normalized.startswith(ADMIN_API_PREFIX)
+            and not normalized.startswith(OPERATOR_API_PREFIX)
+            and normalized not in {
+            "/app",
             "/admin",
             MCP_ENDPOINT_PATH,
             "/.well-known/mcp.json",
@@ -5506,7 +6007,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             "/oauth/authorize",
             "/oauth/token",
             "/oauth/register",
-        }:
+            }
+        ):
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
         origin = self.headers.get("Origin")
@@ -5556,6 +6058,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         normalized = posixpath.normpath(request_path)
         if normalized.startswith(ADMIN_API_PREFIX):
             self.handle_admin_request("POST")
+            return
+        if normalized.startswith(OPERATOR_API_PREFIX):
+            self.handle_operator_request("POST")
             return
         if normalized == "/oauth/authorize":
             self.handle_oauth_authorize_post()
@@ -5630,6 +6135,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         method = request.get("method")
         session_id = self.headers.get("Mcp-Session-Id")
         created_session = False
+        leased_session_id: str | None = None
         if method == "initialize":
             if session_id:
                 self.send_rpc_error(
@@ -5647,47 +6153,75 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return
             try:
                 self._runtime = self.server.sessions.create(authorization_context)  # type: ignore[attr-defined]
+            except HTTPSessionAdmissionError as exc:
+                self.send_rpc_error(
+                    -32003,
+                    exc.message,
+                    status=503,
+                    request_id=request.get("id"),
+                    data={"code": exc.code, "retry_after_seconds": exc.retry_after_seconds},
+                    extra_headers={"Retry-After": str(exc.retry_after_seconds)},
+                )
+                return
+            except (RemoteMcpRouteError, RunnerUnavailableError, WorkspaceHostError) as exc:
+                self.send_rpc_error(
+                    -32003,
+                    str(exc),
+                    status=503,
+                    request_id=request.get("id"),
+                    data={
+                        "code": getattr(exc, "code", "RUNNER_UNAVAILABLE"),
+                        "retryable": bool(getattr(exc, "retryable", True)),
+                    },
+                )
+                return
             except (RuntimeError, WorkspaceBindingError) as exc:
                 self.send_rpc_error(-32000, str(exc), status=503, request_id=request.get("id"))
                 return
             self._send_session_header = True
             created_session = True
+            leased_session_id = self.runtime.http_session_id
         elif session_id:
-            runtime = self.server.sessions.get(session_id)  # type: ignore[attr-defined]
-            if runtime is None:
-                self.send_rpc_error(
-                    -32001, "Unknown MCP session", status=404, request_id=response_id(request)
-                )
-                return
-            authorization_context = getattr(self, "_authorization_context", None)
-            if (
-                not isinstance(authorization_context, AuthorizationContext)
-                or runtime.session_authorization_key()
-                != authorization_context.authorization_key(runtime.workspace_binding.workspace_id)
-            ):
-                self.send_rpc_error(
-                    -32000,
-                    "Authorization context does not match the initialized MCP session",
-                    status=403,
-                    request_id=request.get("id"),
-                )
-                return
-            self._runtime = runtime
-            self._send_session_header = True
-            if protocol_version != runtime.protocol_version:
-                self.send_rpc_error(
-                    -32600,
-                    "MCP-Protocol-Version does not match the initialized session",
-                    request_id=request.get("id"),
-                    data={"expected": runtime.protocol_version, "received": protocol_version},
-                )
-                return
+            leased_session_id = session_id
         elif method == "ping":
             self._runtime = self.server.control_runtime  # type: ignore[attr-defined]
         else:
             self.send_rpc_error(-32002, "Server not initialized", request_id=request.get("id"))
             return
-        response = self.handle_rpc(request)
+        if leased_session_id is not None:
+            with self.server.sessions.lease(leased_session_id) as runtime:  # type: ignore[attr-defined]
+                if runtime is None:
+                    self.send_rpc_error(
+                        -32001, "Unknown MCP session", status=404, request_id=response_id(request)
+                    )
+                    return
+                if not created_session:
+                    authorization_context = getattr(self, "_authorization_context", None)
+                    if (
+                        not isinstance(authorization_context, AuthorizationContext)
+                        or runtime.session_authorization_key()
+                        != authorization_context.authorization_key(runtime.workspace_binding.workspace_id)
+                    ):
+                        self.send_rpc_error(
+                            -32000,
+                            "Authorization context does not match the initialized MCP session",
+                            status=403,
+                            request_id=request.get("id"),
+                        )
+                        return
+                    if protocol_version != runtime.protocol_version:
+                        self.send_rpc_error(
+                            -32600,
+                            "MCP-Protocol-Version does not match the initialized session",
+                            request_id=request.get("id"),
+                            data={"expected": runtime.protocol_version, "received": protocol_version},
+                        )
+                        return
+                self._runtime = runtime
+                self._send_session_header = True
+                response = self.handle_rpc(request)
+        else:
+            response = self.handle_rpc(request)
         if created_session and response is not None and "error" in response:
             self.server.sessions.delete(self.runtime.http_session_id)  # type: ignore[attr-defined]
             self._send_session_header = False
@@ -5703,6 +6237,16 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
     def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
         try:
             return dispatch_rpc(self.runtime, request)
+        except (RemoteMcpRouteError, RunnerUnavailableError, WorkspaceHostError) as exc:
+            return jsonrpc_error(
+                response_id(request),
+                -32003,
+                str(exc),
+                {
+                    "code": getattr(exc, "code", "RUNNER_UNAVAILABLE"),
+                    "retryable": bool(getattr(exc, "retryable", True)),
+                },
+            )
         except Exception as exc:  # noqa: BLE001 - HTTP must always answer with JSON-RPC
             return jsonrpc_error(response_id(request), -32603, str(exc))
 
@@ -6276,15 +6820,30 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         *,
         admin_service: AdminService | None = None,
         admin_token: str | None = None,
+        operator_service: OperatorAPIService | None = None,
+        session_limits: HTTPSessionLimits | None = None,
+        runner_route_service: RemoteMcpRouteService | None = None,
+        runner_credentials: RunnerCredentialStore | None = None,
+        runner_registry: RunnerRegistry | None = None,
+        runner_job_reconciler: RunnerJobReconciler | None = None,
     ) -> None:
         super().__init__(address, handler)
         self.control_runtime = control_runtime
-        self.sessions = HTTPSessionManager(runtime_factory)
+        self.sessions = HTTPSessionManager(runtime_factory, limits=session_limits)
         self.admin_service = admin_service
         self.admin_token = admin_token or None
+        self.operator_service = operator_service
+        self.runner_route_service = runner_route_service
+        self.runner_credentials = runner_credentials
+        self.runner_registry = runner_registry
+        self.runner_job_reconciler = runner_job_reconciler
 
     def server_close(self) -> None:
+        if self.runner_route_service is not None:
+            self.runner_route_service.close_transports_sync()
         self.sessions.close()
+        if self.operator_service is not None:
+            self.operator_service.close()
         self.control_runtime.close()
         super().server_close()
 
@@ -6321,6 +6880,7 @@ def build_runtime(
             authorization_context=authorization_context,
             upstream_manager=upstream_manager,
             fake_readonly_annotations=runtime_policy.fake_readonly_annotations,
+            execution_fs_mode=runtime_policy.execution_fs_mode,
             transport=transport,
         )
     except BaseException:
@@ -6487,6 +7047,7 @@ def build_persistent_oauth_config(
 SERVER_SETTINGS_FILENAME = "server-settings.json"
 UPSTREAM_CONFIG_FILENAME = "mcp-servers.json"
 TRANSCRIPT_DB_FILENAME = "transcripts.sqlite3"
+AGENT_SESSION_DB_FILENAME = "agent-sessions.sqlite3"
 
 
 def load_workspace_startup(
@@ -6521,6 +7082,8 @@ def apply_persisted_runtime_settings(
         args.port = settings.get("port") or env_int(f"{ENV_PREFIX}_PORT", 8000)
     if getattr(args, "permission_mode", None) is None:
         args.permission_mode = settings.get("permission_mode")
+    if getattr(args, "execution_fs_mode", None) is None:
+        args.execution_fs_mode = settings.get("execution_fs_mode")
     if getattr(args, "shell_env_inherit", None) is None:
         args.shell_env_inherit = settings.get("shell_env_inherit")
 
@@ -6589,8 +7152,28 @@ def build_upstream_manager(
     snapshot: UpstreamConfigSnapshot,
     *,
     secret_resolver: Callable[[str], str] | None = None,
+    catalog_template: UpstreamCatalogTemplate | None = None,
 ) -> UpstreamManager:
+    if catalog_template is not None:
+        return UpstreamManager.from_template(
+            catalog_template,
+            protocol_version=PROTOCOL_VERSION,
+            secret_resolver=secret_resolver,
+        )
     return UpstreamManager.from_snapshot(
+        snapshot,
+        protocol_version=PROTOCOL_VERSION,
+        secret_resolver=secret_resolver,
+        reserved_names=TOOL_REGISTRY,
+    )
+
+
+def discover_upstream_catalog_template(
+    snapshot: UpstreamConfigSnapshot,
+    *,
+    secret_resolver: Callable[[str], str] | None = None,
+) -> UpstreamCatalogTemplate:
+    return build_upstream_catalog_template(
         snapshot,
         protocol_version=PROTOCOL_VERSION,
         secret_resolver=secret_resolver,
@@ -6642,6 +7225,7 @@ def active_settings_payload(
             "host": str(args.host),
             "port": int(args.port),
             "permission_mode": runtime_policy.permission_mode,
+            "execution_fs_mode": runtime_policy.execution_fs_mode,
             "shell_env_inherit": runtime_policy.shell_env_policy.inherit,
             "allowed_origins": sorted(allowed_origins),
         }
@@ -6680,6 +7264,8 @@ class BoundRuntimeFactory:
         oauth_config: OAuthConfig | None,
         upstream_snapshot: UpstreamConfigSnapshot | None = None,
         upstream_secret_resolver: Callable[[str], str] | None = None,
+        upstream_catalog_template: UpstreamCatalogTemplate | None = None,
+        runner_route_service: RemoteMcpRouteService | None = None,
     ) -> None:
         self.args = args
         self.runtime_policy = runtime_policy
@@ -6688,6 +7274,8 @@ class BoundRuntimeFactory:
         self.oauth_config = oauth_config
         self.upstream_snapshot = upstream_snapshot or UpstreamConfigSnapshot.empty()
         self.upstream_secret_resolver = upstream_secret_resolver
+        self.upstream_catalog_template = upstream_catalog_template
+        self.runner_route_service = runner_route_service
         self._project_contexts: dict[tuple[str, str], ProjectContext] = {}
         self._lock = threading.Lock()
 
@@ -6701,12 +7289,26 @@ class BoundRuntimeFactory:
         with self._lock:
             return self._project_contexts.setdefault(key, loaded)
 
-    def __call__(self, context: AuthorizationContext) -> Runtime:
+    def __call__(self, context: AuthorizationContext) -> Any:
+        entry = self.resolver.resolve_http_entry(context.method, context.oauth_identity)
+        if entry.target == "runner":
+            if not entry.runner_id or self.runner_route_service is None:
+                raise RuntimeError("Remote Runner routing is unavailable for this Workspace.")
+            session_key = context.authorization_key(entry.id)
+            route_key = json.dumps(session_key, separators=(",", ":"), ensure_ascii=True)
+            return RemoteMcpHttpRuntimeProxy(
+                self.runner_route_service,
+                runner_id=entry.runner_id,
+                workspace_id=entry.id,
+                authorization_key=route_key,
+                session_authorization_key=session_key,
+            )
         binding = self.resolver.resolve_http(context.method, context.oauth_identity)
         try:
             upstream_manager = build_upstream_manager(
                 self.upstream_snapshot,
                 secret_resolver=self.upstream_secret_resolver,
+                catalog_template=self.upstream_catalog_template,
             )
         except UpstreamConfigError as exc:
             raise RuntimeError("Upstream Gateway initialization failed.") from exc
@@ -6728,6 +7330,38 @@ class BoundRuntimeFactory:
             raise
 
 
+def http_session_limits_from_args(args: argparse.Namespace) -> HTTPSessionLimits:
+    def integer_value(attribute: str, env_suffix: str, default: int) -> int:
+        value = getattr(args, attribute, None)
+        if value is None:
+            value = os.environ.get(f"{ENV_PREFIX}_{env_suffix}")
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{env_suffix.lower()} must be a positive integer") from exc
+
+    return HTTPSessionLimits(
+        max_total=integer_value("max_http_sessions_total", "MAX_HTTP_SESSIONS_TOTAL", 128),
+        max_per_identity=integer_value(
+            "max_http_sessions_per_identity",
+            "MAX_HTTP_SESSIONS_PER_IDENTITY",
+            64,
+        ),
+        idle_ttl_seconds=integer_value(
+            "http_session_idle_ttl_seconds",
+            "HTTP_SESSION_IDLE_TTL_SECONDS",
+            60 * 60,
+        ),
+        max_initializations=integer_value(
+            "max_http_session_initializations",
+            "MAX_HTTP_SESSION_INITIALIZATIONS",
+            16,
+        ),
+    )
+
+
 def run_http(args: argparse.Namespace) -> int:
     auth_mode = (os.environ.get(f"{ENV_PREFIX}_AUTH_MODE") or "").strip().lower()
     if auth_mode and auth_mode not in AUTH_MODE_CHOICES:
@@ -6739,6 +7373,7 @@ def run_http(args: argparse.Namespace) -> int:
         config_dir, startup_settings, workspace_catalog = load_workspace_startup(args)
         apply_persisted_runtime_settings(args, startup_settings)
         runtime_policy = runtime_policy_from_args(args)
+        session_limits = http_session_limits_from_args(args)
         workspace_bindings = normalize_oauth_client_workspace_bindings(
             startup_settings.get("oauth_client_workspace_bindings"),
             workspace_catalog,
@@ -6886,15 +7521,42 @@ def run_http(args: argparse.Namespace) -> int:
         return 2
 
     default_workspace = workspace_catalog.default()
+    control_workspace = (
+        default_workspace
+        if default_workspace.target == "local" and isinstance(default_workspace.root, Path)
+        else next(
+            (
+                entry
+                for entry in workspace_catalog.enabled_entries()
+                if entry.target == "local" and isinstance(entry.root, Path)
+            ),
+            None,
+        )
+    )
+    if control_workspace is not None:
+        control_workspace_id = control_workspace.id
+        control_root = control_workspace.root
+    else:
+        control_workspace_id = "control-local"
+        control_root = Path(
+            args.workspace
+            or os.environ.get(f"{ENV_PREFIX}_WORKSPACE")
+            or os.getcwd()
+        ).expanduser().resolve(strict=True)
     control_binding = WorkspaceBinding(
-        default_workspace.id,
-        default_workspace.root,
+        control_workspace_id,
+        control_root,
         "control",
     )
     try:
+        upstream_catalog_template = discover_upstream_catalog_template(
+            upstream_snapshot,
+            secret_resolver=gateway_secret_resolver,
+        )
         control_upstream = build_upstream_manager(
             upstream_snapshot,
             secret_resolver=gateway_secret_resolver,
+            catalog_template=upstream_catalog_template,
         )
     except UpstreamConfigError as exc:
         print(f"ERROR: Upstream Gateway configuration is unavailable: {exc}", file=sys.stderr)
@@ -6910,6 +7572,29 @@ def run_http(args: argparse.Namespace) -> int:
         upstream_manager=control_upstream,
         transport="http",
     )
+    runner_route_service = RemoteMcpRouteService(RemoteMcpRouteStore())
+    runner_credentials = RunnerCredentialStore(server_vault)
+    runner_registry = RunnerRegistry()
+    runner_job_reconciler = RunnerJobReconciler()
+
+    def runner_admin_status() -> dict[str, Any]:
+        snapshots = runner_registry.list()
+        return {
+            "known": len(snapshots),
+            "connected": sum(1 for item in snapshots if item.connected),
+            "routes": runner_route_service.store.snapshot(),
+            "items": [
+                {
+                    "runner_id": item.runner_id,
+                    "instance_id": item.instance_id,
+                    "connected": item.connected,
+                    "last_seen": item.last_seen,
+                    "capabilities": list(item.capabilities),
+                    "workspace_ids": list(item.workspace_ids),
+                }
+                for item in snapshots
+            ],
+        }
     runtime_factory = BoundRuntimeFactory(
         args,
         runtime_policy,
@@ -6918,6 +7603,8 @@ def run_http(args: argparse.Namespace) -> int:
         oauth_config=oauth_config,
         upstream_snapshot=upstream_snapshot,
         upstream_secret_resolver=gateway_secret_resolver,
+        upstream_catalog_template=upstream_catalog_template,
+        runner_route_service=runner_route_service,
     )
 
     try:
@@ -6942,7 +7629,7 @@ def run_http(args: argparse.Namespace) -> int:
             admin_service = AdminService(
                 settings_store=ServerSettingsStore(config_dir / SERVER_SETTINGS_FILENAME),
                 active_settings=admin_active_settings,
-                fallback_workspace=workspace_catalog.default().root,
+                fallback_workspace=control_binding.root,
                 gateway_path=gateway_path,
                 active_gateway_revision=active_gateway_revision,
                 secret_vault=server_vault,
@@ -6954,6 +7641,8 @@ def run_http(args: argparse.Namespace) -> int:
                     oauth_config.authorization_password if oauth_config is not None else None
                 ),
                 active_gateway_status=runtime.upstream_manager.status_payload,
+                runner_credentials=runner_credentials,
+                runner_status=runner_admin_status,
                 transcript_store=TranscriptStore(config_dir / TRANSCRIPT_DB_FILENAME),
                 session_scanner=CodexSessionScanner(),
             )
@@ -6962,6 +7651,79 @@ def run_http(args: argparse.Namespace) -> int:
             print(f"ERROR: Admin service is unavailable: {exc}", file=sys.stderr)
             return 2
 
+    def local_agent_backend_factory(
+        workspace: WorkspaceEntry,
+        backend_kind: str,
+    ) -> CodexAppServerBackend:
+        if backend_kind != "codex-app-server":
+            raise AgentSessionServiceError(
+                "AGENT_BACKEND_UNSUPPORTED",
+                "Unsupported Agent backend kind.",
+            )
+        if workspace.target != "local" or not isinstance(workspace.root, Path):
+            raise AgentSessionServiceError(
+                "AGENT_BACKEND_UNAVAILABLE",
+                "Remote Agent backend routing is unavailable.",
+                retryable=True,
+                details={"workspace_id": workspace.id, "target": workspace.target},
+            )
+        return CodexAppServerBackend(CodexAppServerConfig.create(workspace.root))
+
+    workspace_hosts = WorkspaceHostFactory(
+        local_agent_backend_factory=local_agent_backend_factory,
+        remote_route_service=runner_route_service,
+        remote_runner_status=runner_route_service.runner_status,
+    )
+
+    def agent_backend_factory(workspace: WorkspaceEntry, backend_kind: str) -> AgentSessionBackend:
+        try:
+            backend = workspace_hosts.create(workspace).get_agent_backend(backend_kind)
+        except WorkspaceHostError as exc:
+            raise AgentSessionServiceError(
+                exc.code,
+                str(exc),
+                retryable=exc.retryable,
+                details={"workspace_id": workspace.id, "target": workspace.target},
+            ) from exc
+        if backend.backend_kind != backend_kind:
+            raise AgentSessionServiceError(
+                "AGENT_BACKEND_KIND_MISMATCH",
+                "WorkspaceHost returned an unexpected Agent backend.",
+            )
+        return backend
+
+    def agent_fingerprint_factory(workspace: WorkspaceEntry) -> dict[str, Any]:
+        if workspace.target == "local" and isinstance(workspace.root, Path):
+            return build_repo_fingerprint(workspace.root)
+        if workspace.target != "runner" or not workspace.runner_id:
+            raise RuntimeError("Workspace fingerprint target is unavailable.")
+        response = runner_route_service.call_runner_sync(
+            runner_id=workspace.runner_id,
+            workspace_id=workspace.id,
+            method="workspace.fingerprint",
+            params={},
+        )
+        fingerprint = response.get("fingerprint") if isinstance(response, dict) else None
+        if not isinstance(fingerprint, dict):
+            raise RuntimeError("Runner workspace fingerprint response is invalid.")
+        return dict(fingerprint)
+
+    try:
+        operator_service = OperatorAPIService(
+            AgentSessionService(
+                AgentSessionStore(config_dir / AGENT_SESSION_DB_FILENAME),
+                workspace_catalog,
+                agent_backend_factory,
+                fingerprint_factory=agent_fingerprint_factory,
+            ),
+            workspace_catalog,
+            workspace_status=lambda entry: workspace_hosts.create(entry).snapshot_status(),
+        )
+    except (AgentSessionStoreError, OSError) as exc:
+        runtime.close()
+        print(f"ERROR: Agent Session persistence is unavailable: {exc}", file=sys.stderr)
+        return 2
+
     server = RuntimeHTTPServer(
         (args.host, args.port),
         MCPHandler,
@@ -6969,7 +7731,15 @@ def run_http(args: argparse.Namespace) -> int:
         runtime_factory,
         admin_service=admin_service,
         admin_token=admin_token,
+        operator_service=operator_service,
+        session_limits=session_limits,
+        runner_route_service=runner_route_service,
+        runner_credentials=runner_credentials,
+        runner_registry=runner_registry,
+        runner_job_reconciler=runner_job_reconciler,
     )
+    if admin_service is not None:
+        admin_service.bind_http_session_status(server.sessions.snapshot)
     if oauth_config:
         url_label = oauth_config.server_url or "dynamic request URL"
         suffix = " + bearer" if runtime.auth_token else ""
@@ -7048,6 +7818,42 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"bind port; defaults to {ENV_PREFIX}_PORT or 8000",
     )
+    parser.add_argument(
+        "--max-http-sessions-total",
+        type=int,
+        default=None,
+        help=(
+            "maximum concurrent Streamable HTTP MCP sessions; defaults to "
+            f"{ENV_PREFIX}_MAX_HTTP_SESSIONS_TOTAL or 128"
+        ),
+    )
+    parser.add_argument(
+        "--max-http-sessions-per-identity",
+        type=int,
+        default=None,
+        help=(
+            "maximum concurrent Streamable HTTP MCP sessions per verified identity; defaults to "
+            f"{ENV_PREFIX}_MAX_HTTP_SESSIONS_PER_IDENTITY or 64"
+        ),
+    )
+    parser.add_argument(
+        "--http-session-idle-ttl-seconds",
+        type=int,
+        default=None,
+        help=(
+            "idle Streamable HTTP MCP session TTL in seconds; defaults to "
+            f"{ENV_PREFIX}_HTTP_SESSION_IDLE_TTL_SECONDS or 3600"
+        ),
+    )
+    parser.add_argument(
+        "--max-http-session-initializations",
+        type=int,
+        default=None,
+        help=(
+            "maximum concurrent Streamable HTTP MCP Runtime initializations; defaults to "
+            f"{ENV_PREFIX}_MAX_HTTP_SESSION_INITIALIZATIONS or 16"
+        ),
+    )
     parser.add_argument("--stdio", action="store_true", help="serve newline-delimited JSON-RPC over stdio")
     parser.add_argument(
         "--auth-token",
@@ -7089,6 +7895,16 @@ def build_parser() -> argparse.ArgumentParser:
             "exec_command permission mode: safe denies network/shell-expansion/inline-script gates; "
             "trusted allows local development network, shell expansion, and inline scripts; "
             "dangerous disables permission gates"
+        ),
+    )
+    parser.add_argument(
+        "--execution-fs-mode",
+        choices=EXECUTION_FS_MODE_CHOICES,
+        default=None,
+        help=(
+            "filesystem mode for exec_command: normal preserves existing behavior; inspect requests "
+            "read-only Workspace execution with writable Runtime scratch when Linux Landlock is available; "
+            f"defaults to {ENV_PREFIX}_EXECUTION_FS_MODE or normal"
         ),
     )
     parser.add_argument(

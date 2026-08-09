@@ -12,6 +12,7 @@ from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
 
 
 PERMISSION_MODE_CHOICES = ("safe", "trusted", "dangerous")
+EXECUTION_FS_MODE_CHOICES = ("normal", "inspect")
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
 LEGACY_TOOL_PROFILE_WARNING = "legacy_tool_profile_ignored"
 SECRET_REFERENCE_FIELDS = frozenset(
@@ -33,6 +34,7 @@ RESTART_FIELDS = frozenset(
         "oauth_compatibility_mode",
         "oauth_client_workspace_bindings",
         "permission_mode",
+        "execution_fs_mode",
         "shell_env_inherit",
         "allowed_origins",
     }
@@ -231,6 +233,7 @@ def normalize_startup_settings_with_warnings(
         "oauth_compatibility_mode",
         "oauth_client_workspace_bindings",
         "permission_mode",
+        "execution_fs_mode",
         "shell_env_inherit",
         "allowed_origins",
         *SECRET_REFERENCE_FIELDS,
@@ -268,6 +271,7 @@ def normalize_startup_settings_with_warnings(
         settings["oauth_server_url"] = _normalize_url(settings["oauth_server_url"])
     for key, choices in (
         ("permission_mode", PERMISSION_MODE_CHOICES),
+        ("execution_fs_mode", EXECUTION_FS_MODE_CHOICES),
         ("shell_env_inherit", SHELL_ENV_INHERIT_CHOICES),
     ):
         if key in settings:
@@ -325,6 +329,7 @@ def pending_restart_fields(
 def schema_payload() -> dict[str, Any]:
     return {
         "permission_mode": list(PERMISSION_MODE_CHOICES),
+        "execution_fs_mode": list(EXECUTION_FS_MODE_CHOICES),
         "shell_env_inherit": list(SHELL_ENV_INHERIT_CHOICES),
         "restart_fields": sorted(RESTART_FIELDS),
         "migration_warnings": [LEGACY_TOOL_PROFILE_WARNING],

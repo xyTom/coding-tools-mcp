@@ -205,6 +205,58 @@ class SettingsDefinitionTests(unittest.TestCase):
 
 
 class WorkspaceCatalogTests(unittest.TestCase):
+    def test_remote_workspace_root_is_opaque_and_coexists_with_local_workspace(self) -> None:
+        with TemporaryDirectory() as tmp:
+            local_root = Path(tmp) / "local"
+            local_root.mkdir()
+            remote_root = r"G:\LLM\coding-tools-mcp"
+            catalog = WorkspaceCatalog(
+                [
+                    WorkspaceEntry("local", "Local", local_root, True, True),
+                    WorkspaceEntry(
+                        "remote",
+                        "Remote Windows",
+                        remote_root,
+                        True,
+                        False,
+                        target="runner",
+                        runner_id="home-win",
+                    ),
+                ],
+                "local",
+            )
+
+            remote = catalog.get("remote")
+            self.assertIsInstance(remote.root, str)
+            self.assertEqual(remote.root, remote_root)
+            self.assertEqual(remote.target, "runner")
+            self.assertEqual(remote.runner_id, "home-win")
+            payload = remote.payload()
+            self.assertEqual(payload["root"], remote_root)
+            self.assertEqual(payload["target"], "runner")
+            self.assertEqual(payload["runner_id"], "home-win")
+
+            reopened = WorkspaceCatalog.from_settings(catalog.settings_payload(), local_root)
+            self.assertEqual(reopened.get("remote").root, remote_root)
+            self.assertEqual(reopened.get("remote").runner_id, "home-win")
+
+    def test_remote_workspace_validation_never_resolves_remote_root_locally(self) -> None:
+        remote_root = r"G:\LLM\coding-tools-mcp"
+        with patch.object(Path, "resolve", side_effect=AssertionError("remote root resolved locally")):
+            catalog = WorkspaceCatalog(
+                [
+                    WorkspaceEntry(
+                        "remote",
+                        "Remote Windows",
+                        remote_root,
+                        target="runner",
+                        runner_id="home-win",
+                    )
+                ],
+                "remote",
+            )
+        self.assertEqual(catalog.default().root, remote_root)
+
     def test_catalog_canonicalizes_one_default_and_hides_disabled_entries(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

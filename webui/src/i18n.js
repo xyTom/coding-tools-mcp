@@ -2,6 +2,7 @@ const DEFAULT_LOCALE = 'zh-CN';
 const SUPPORTED_LOCALES = new Set(['zh-CN', 'en']);
 
 export const EN_MESSAGES = Object.freeze({
+  'Agent 工作台': 'Agent workbench',
   'MCP 管理台': 'MCP Console',
   '跳到主要内容': 'Skip to main content',
   '安全管理入口': 'Secure admin access',

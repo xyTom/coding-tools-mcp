@@ -21,6 +21,7 @@ from .oauth import (
     oauth_client_authorization_password_secret_ref,
 )
 from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from .runner.credentials import RunnerCredentialError, RunnerCredentialStore
 from .secret_vault import SecretVault, SecretVaultError
 from .settings_definition import (
     SECRET_REFERENCE_FIELDS,
@@ -40,7 +41,7 @@ from .upstream import (
     parse_credential_policy,
     validate_credential_policy,
 )
-from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError
+from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError, WorkspaceEntry
 
 ADMIN_API_PREFIX = "/admin/api"
 SERVER_SECRET_VAULT_FILENAME = "server-secrets.json"
@@ -316,6 +317,9 @@ class AdminService:
         oauth_secret_vault: SecretVault | None = None,
         oauth_password: OAuthAuthorizationPassword | None = None,
         active_gateway_status: Callable[[], dict[str, Any]] | None = None,
+        http_session_status: Callable[[], dict[str, Any]] | None = None,
+        runner_credentials: RunnerCredentialStore | None = None,
+        runner_status: Callable[[], dict[str, Any]] | None = None,
         transcript_store: TranscriptStore | None = None,
         session_scanner: CodexSessionScanner | None = None,
     ) -> None:
@@ -329,6 +333,9 @@ class AdminService:
         self.oauth_secret_vault = oauth_secret_vault
         self.oauth_password = oauth_password
         self.active_gateway_status = active_gateway_status
+        self.http_session_status = http_session_status
+        self.runner_credentials = runner_credentials
+        self.runner_status = runner_status
         self.transcript_store = transcript_store
         self.session_scanner = session_scanner or CodexSessionScanner()
         self._settings_lock = threading.Lock()
@@ -340,19 +347,73 @@ class AdminService:
 
     def status_payload(self) -> dict[str, Any]:
         mode = telemetry_mode()
-        return {
+        payload = {
             "ok": True,
             "admin_api": 1,
             "settings": {"available": True},
             "oauth": {"available": self.oauth_store is not None},
             "gateway": {"available": True, "dynamic_reload": False},
             "chat": {"available": self.transcript_store is not None},
+            "runner": {"available": self.runner_credentials is not None},
             "vault": {"enabled": self.secret_vault.enabled()},
             "telemetry": {
                 "mode": mode,
                 "docs": "docs/telemetry.md",
             },
         }
+        if self.http_session_status is not None:
+            payload["http_sessions"] = self.http_session_status()
+        if self.runner_status is not None:
+            payload["runner"]["status"] = self.runner_status()
+        return payload
+
+    def runner_credential_payload(self, runner_id: str) -> dict[str, Any]:
+        store = self._require_runner_credentials()
+        try:
+            fingerprint = store.fingerprint(runner_id)
+        except RunnerCredentialError as exc:
+            raise AdminServiceError(str(exc)) from exc
+        if fingerprint is None:
+            raise AdminNotFoundError("Runner credential is not configured.")
+        return {
+            "ok": True,
+            "runner_id": runner_id,
+            "configured": True,
+            "fingerprint": fingerprint,
+        }
+
+    def issue_runner_credential(self, runner_id: str) -> dict[str, Any]:
+        store = self._require_runner_credentials()
+        try:
+            issued = store.issue(runner_id)
+        except RunnerCredentialError as exc:
+            raise AdminServiceError(str(exc)) from exc
+        return {
+            "ok": True,
+            "runner_id": issued.runner_id,
+            "credential": issued.credential,
+            "fingerprint": issued.fingerprint,
+            "created_at": issued.created_at,
+            "warning": "This credential is returned only for provisioning; store it securely.",
+        }
+
+    def revoke_runner_credential(self, runner_id: str) -> dict[str, Any]:
+        store = self._require_runner_credentials()
+        try:
+            revoked = store.revoke(runner_id)
+        except RunnerCredentialError as exc:
+            raise AdminServiceError(str(exc)) from exc
+        return {"ok": True, "runner_id": runner_id, "revoked": revoked}
+
+    def _require_runner_credentials(self) -> RunnerCredentialStore:
+        if self.runner_credentials is None:
+            raise AdminUnavailableError("Runner credential management is not configured.")
+        return self.runner_credentials
+
+    def bind_http_session_status(self, provider: Callable[[], dict[str, Any]]) -> None:
+        """Bind redacted Runtime HTTP counters after the HTTP server is constructed."""
+
+        self.http_session_status = provider
 
     def settings_payload(self) -> dict[str, Any]:
         result = self.settings_store.read_result()
@@ -1102,7 +1163,7 @@ class AdminService:
         store = self._require_transcript_store()
         workspace_id = query.get("workspace_id") or None
         if workspace_id is not None:
-            self._workspace_scope(workspace_id)
+            self._workspace_entry(workspace_id)
         page = _query_int(query, "page", 1)
         page_size = _query_int(query, "page_size", 50)
         payload = store.list_conversations(
@@ -1115,7 +1176,7 @@ class AdminService:
 
     def chat_conversation_detail(self, workspace_id: str, conversation_id: str, query: dict[str, str]) -> dict[str, Any]:
         store = self._require_transcript_store()
-        self._workspace_scope(workspace_id)
+        self._workspace_entry(workspace_id)
         payload = store.conversation_detail(
             workspace_id,
             conversation_id,
@@ -1130,7 +1191,7 @@ class AdminService:
 
     def chat_record_messages(self, workspace_id: str, conversation_id: str, body: dict[str, Any]) -> dict[str, Any]:
         store = self._require_transcript_store()
-        self._workspace_scope(workspace_id)
+        self._workspace_entry(workspace_id)
         messages = body.get("messages")
         if not isinstance(messages, list):
             raise AdminServiceError("messages must be a list.")
@@ -1147,7 +1208,7 @@ class AdminService:
 
     def chat_record_context(self, workspace_id: str, conversation_id: str, body: dict[str, Any]) -> dict[str, Any]:
         store = self._require_transcript_store()
-        self._workspace_scope(workspace_id)
+        self._workspace_entry(workspace_id)
         entries = body.get("entries")
         if not isinstance(entries, list):
             raise AdminServiceError("entries must be a list.")
@@ -1164,7 +1225,7 @@ class AdminService:
 
     def chat_delete(self, resource: str, workspace_id: str, identifier: str) -> dict[str, Any]:
         store = self._require_transcript_store()
-        self._workspace_scope(workspace_id)
+        self._workspace_entry(workspace_id)
         if resource == "messages":
             result = store.delete_message(workspace_id, identifier)
         elif resource == "context":
@@ -1179,7 +1240,7 @@ class AdminService:
 
     def chat_clear_workspace(self, workspace_id: str) -> dict[str, Any]:
         store = self._require_transcript_store()
-        self._workspace_scope(workspace_id)
+        self._workspace_entry(workspace_id)
         return {"ok": True, **store.clear_workspace(workspace_id)}
 
     def codex_scan(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1226,7 +1287,7 @@ class AdminService:
         store = self._require_transcript_store()
         workspace_id = query.get("workspace_id") or None
         if workspace_id is not None:
-            self._workspace_scope(workspace_id)
+            self._workspace_entry(workspace_id)
         return {
             "ok": True,
             **store.list_imported_sessions(
@@ -1236,13 +1297,20 @@ class AdminService:
             ),
         }
 
-    def _workspace_scope(self, workspace_id: str) -> WorkspaceScope:
+    def _workspace_entry(self, workspace_id: str) -> WorkspaceEntry:
         current = self.settings_store.read()
         try:
             catalog = WorkspaceCatalog.from_settings(current, self.fallback_workspace)
-            entry = catalog.get(workspace_id)
+            return catalog.get(workspace_id)
         except WorkspaceCatalogError as exc:
             raise AdminNotFoundError("Workspace is unknown or disabled.") from exc
+
+    def _workspace_scope(self, workspace_id: str) -> WorkspaceScope:
+        entry = self._workspace_entry(workspace_id)
+        if entry.target != "local" or not isinstance(entry.root, Path):
+            raise AdminServiceError(
+                "Remote Workspace filesystem operations must run on its Runner Data Plane."
+            )
         return WorkspaceScope.create(entry.id, entry.root)
 
     def _require_transcript_store(self) -> TranscriptStore:
@@ -1315,6 +1383,13 @@ class AdminService:
                 return self.workspace_default(parts[1], body)
         if len(parts) == 3 and parts[0] == "workspaces" and parts[2] == "check" and method == "GET":
             return self.workspace_check(parts[1])
+        if len(parts) == 3 and parts[0] == "runners" and parts[2] == "credential":
+            if method == "GET":
+                return self.runner_credential_payload(parts[1])
+            if method == "POST":
+                return self.issue_runner_credential(parts[1])
+            if method == "DELETE":
+                return self.revoke_runner_credential(parts[1])
         if len(parts) == 2 and parts[0] == "oauth" and method == "GET":
             return self.oauth_payload(parts[1], query)
         if (

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const srcDir = path.join(root, 'webui', 'src');
 const outDir = path.join(root, 'coding_tools_mcp', 'webui_dist');
-const scripts = [
+const adminScripts = [
   'settings-copy.js',
   'settings-model.js',
   'workspace-editor.js',
@@ -14,26 +14,38 @@ const scripts = [
   'admin.js',
 ];
 
-const [html, css, modules] = await Promise.all([
-  readFile(path.join(srcDir, 'admin.html'), 'utf8'),
-  readFile(path.join(srcDir, 'admin.css'), 'utf8'),
-  Promise.all(scripts.map(async (name) => [name, await readFile(path.join(srcDir, name), 'utf8')])),
-]);
+const appScripts = ['app/model.js', 'app/api-client.js', 'app/app.js'];
 
-let built = html.replace(
-  '<link rel="stylesheet" href="./admin.css">',
-  `<style data-build-source="admin.css">\n${css.trim()}\n</style>`,
-);
-for (const [name, source] of modules) {
-  built = built.replace(
-    `<script type="module" src="./${name}"></script>`,
-    `<script type="module" data-build-source="${name}">\n${source.trim()}\n</script>`,
-  );
+async function buildPage(htmlName, styles, scripts) {
+  let built = await readFile(path.join(srcDir, htmlName), 'utf8');
+  for (const name of styles) {
+    const source = await readFile(path.join(srcDir, name), 'utf8');
+    built = built.replace(
+      `<link rel="stylesheet" href="./${name}">`,
+      `<style data-build-source="${name}">\n${source.trim()}\n</style>`,
+    );
+  }
+  for (const name of scripts) {
+    const source = await readFile(path.join(srcDir, name), 'utf8');
+    built = built.replace(
+      `<script type="module" src="./${name}"></script>`,
+      `<script type="module" data-build-source="${name}">\n${source.trim()}\n</script>`,
+    );
+  }
+  if (/<link\b[^>]*href=["'][^"']+\.css|<script\b[^>]*src=["'][^"']+\.js/i.test(built)) {
+    throw new Error(`Build left an external WebUI asset reference in ${htmlName}.`);
+  }
+  return `${built.trim()}\n`;
 }
-if (/<link\b[^>]*href=["'][^"']+\.css|<script\b[^>]*src=["'][^"']+\.js/i.test(built)) {
-  throw new Error('Build left an external WebUI asset reference in admin.html.');
-}
+
+const [adminBuilt, appBuilt] = await Promise.all([
+  buildPage('admin.html', ['admin.css'], adminScripts),
+  buildPage('app.html', ['admin.css', 'app/app.css'], appScripts),
+]);
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
-await writeFile(path.join(outDir, 'admin.html'), `${built.trim()}\n`, 'utf8');
-console.log('Built coding_tools_mcp/webui_dist/admin.html from webui/src/**');
+await Promise.all([
+  writeFile(path.join(outDir, 'admin.html'), adminBuilt, 'utf8'),
+  writeFile(path.join(outDir, 'app.html'), appBuilt, 'utf8'),
+]);
+console.log('Built coding_tools_mcp/webui_dist/{admin,app}.html from webui/src/**');

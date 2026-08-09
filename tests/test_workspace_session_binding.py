@@ -159,6 +159,32 @@ def call_tool(
 
 
 class WorkspaceSessionBindingTests(unittest.TestCase):
+    def test_local_binding_resolver_never_treats_runner_root_as_local_path(self) -> None:
+        with test_root() as root:
+            local = root / "local"
+            local.mkdir()
+            catalog = WorkspaceCatalog(
+                [
+                    WorkspaceEntry("local", "Local", local, enabled=True, default=True),
+                    WorkspaceEntry(
+                        "remote",
+                        "Remote",
+                        r"G:\LLM\coding-tools-mcp",
+                        enabled=True,
+                        target="runner",
+                        runner_id="home-win",
+                    ),
+                ],
+                "local",
+            )
+            resolver = WorkspaceBindingResolver(catalog)
+            self.assertEqual(resolver.resolve_stdio().workspace_id, "local")
+            with self.assertRaisesRegex(WorkspaceBindingError, "WorkspaceHost routing"):
+                resolver.resolve_http(
+                    "oauth",
+                    OAuthIdentity("client-remote", "grant-remote", "remote", "jti-remote"),
+                )
+
     def test_oauth_sessions_bind_immutable_isolated_workspaces(self) -> None:
         with test_root() as root:
             first = root / "first"

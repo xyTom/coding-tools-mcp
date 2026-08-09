@@ -22,6 +22,7 @@ from coding_tools_mcp.admin import (
 )
 from coding_tools_mcp.oauth import OAUTH_PASSWORD_SECRET, OAuthAuthorizationPassword
 from coding_tools_mcp.oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from coding_tools_mcp.runner.credentials import RunnerCredentialStore
 from coding_tools_mcp.secret_vault import SecretVault
 from coding_tools_mcp.server import (
     MCPHandler,
@@ -614,6 +615,32 @@ class AdminServiceTests(unittest.TestCase):
         self.assertNotIn("start_server", admin_source)
         self.assertNotIn("stop_server", admin_source)
 
+    def test_remote_workspace_metadata_is_valid_but_filesystem_scope_fails_closed(self) -> None:
+        current = self.store.read()
+        catalog = WorkspaceCatalog(
+            [
+                WorkspaceEntry("a", "A", self.workspace_a, enabled=True, default=True),
+                WorkspaceEntry(
+                    "remote",
+                    "Remote",
+                    r"G:\\repo",
+                    enabled=True,
+                    default=False,
+                    target="runner",
+                    runner_id="home-win",
+                ),
+            ],
+            "a",
+        )
+        current.update(catalog.settings_payload())
+        self.store.write(current)
+
+        entry = self.service._workspace_entry("remote")
+        self.assertEqual(entry.target, "runner")
+        self.assertEqual(entry.root, r"G:\\repo")
+        with self.assertRaisesRegex(AdminServiceError, "Runner Data Plane"):
+            self.service._workspace_scope("remote")
+
 
 class AdminHTTPAuthenticationTests(unittest.TestCase):
     def test_admin_shell_is_public_but_api_requires_dedicated_token(self) -> None:
@@ -623,13 +650,16 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
             workspace = root / "workspace"
             workspace.mkdir()
             settings.write({"workspace": str(workspace)})
+            vault = SecretVault(root / "vault.json", "key")
+            runner_credentials = RunnerCredentialStore(vault)
             service = AdminService(
                 settings_store=settings,
                 active_settings={"workspace": str(workspace)},
                 fallback_workspace=workspace,
                 gateway_path=root / "gateway.json",
                 active_gateway_revision=document_revision({"servers": {}}),
-                secret_vault=SecretVault(root / "vault.json", "key"),
+                secret_vault=vault,
+                runner_credentials=runner_credentials,
                 transcript_store=TranscriptStore(root / "transcripts.sqlite3"),
             )
             runtime = Runtime(workspace, auth_token="ordinary-mcp-token", transport="http")
@@ -659,8 +689,18 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                     timeout=5,
                 ) as response:
                     page = response.read().decode("utf-8")
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{server.server_address[1]}/app",
+                    timeout=5,
+                ) as response:
+                    operator_page = response.read().decode("utf-8")
                 self.assertIn('data-build-source="i18n.js"', page)
                 self.assertIn('data-build-source="admin.js"', page)
+                self.assertIn('data-build-source="app/model.js"', operator_page)
+                self.assertIn('data-build-source="app/api-client.js"', operator_page)
+                self.assertIn('data-build-source="app/app.js"', operator_page)
+                self.assertIn("/api/app", operator_page)
+                self.assertNotIn("/admin/api", operator_page)
                 before = service.settings_payload()["persisted_revision"]
                 with self.assertRaises(urllib.error.HTTPError) as write_denied:
                     urllib.request.urlopen(
@@ -692,6 +732,59 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                         timeout=5,
                     )
                 self.assertEqual(delete_denied.exception.code, 401)
+                runner_url = (
+                    f"http://127.0.0.1:{server.server_address[1]}"
+                    "/admin/api/runners/home-win/credential"
+                )
+                with self.assertRaises(urllib.error.HTTPError) as runner_denied:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            runner_url,
+                            data=b"{}",
+                            headers={
+                                "Authorization": "Bearer ordinary-mcp-token",
+                                "Content-Type": "application/json",
+                            },
+                            method="POST",
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(runner_denied.exception.code, 401)
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        runner_url,
+                        data=b"{}",
+                        headers={
+                            "Authorization": "Bearer dedicated-admin-token",
+                            "Content-Type": "application/json",
+                        },
+                        method="POST",
+                    ),
+                    timeout=5,
+                ) as response:
+                    issued_runner = json.loads(response.read())
+                self.assertEqual(issued_runner["runner_id"], "home-win")
+                self.assertTrue(issued_runner["credential"])
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        runner_url,
+                        headers={"Authorization": "Bearer dedicated-admin-token"},
+                    ),
+                    timeout=5,
+                ) as response:
+                    runner_metadata = json.loads(response.read())
+                self.assertNotIn("credential", runner_metadata)
+                self.assertEqual(runner_metadata["fingerprint"], issued_runner["fingerprint"])
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        runner_url,
+                        headers={"Authorization": "Bearer dedicated-admin-token"},
+                        method="DELETE",
+                    ),
+                    timeout=5,
+                ) as response:
+                    revoked_runner = json.loads(response.read())
+                self.assertTrue(revoked_runner["revoked"])
                 with urllib.request.urlopen(
                     urllib.request.Request(
                         url,

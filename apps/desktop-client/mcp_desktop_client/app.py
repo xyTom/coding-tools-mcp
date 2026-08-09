@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from copy import deepcopy
 
@@ -59,6 +60,7 @@ class MainWindow(QMainWindow):
     TUNNEL_OPTIONS = [
         ("frp", "FRP (externally managed)"),
         ("cloudflare", "Cloudflare"),
+        ("external", "External URL"),
     ]
     CLOUDFLARE_MODE_OPTIONS = [
         ("quick", "Quick tunnel"),
@@ -178,10 +180,14 @@ class MainWindow(QMainWindow):
         self.copy_frp_button = QPushButton(tr("MainWindow", "Copy FRP snippet"))
         self.copy_frp_button.setProperty("secondary", True)
         self.copy_frp_button.clicked.connect(self._copy_frp_snippet)
+        self.copy_onboarding_button = QPushButton(tr("MainWindow", "Copy mobile onboarding"))
+        self.copy_onboarding_button.setProperty("secondary", True)
+        self.copy_onboarding_button.clicked.connect(self._copy_mobile_onboarding)
         header_actions.addWidget(self.start_button)
         header_actions.addWidget(self.stop_button)
         header_actions.addWidget(self.copy_button)
         header_actions.addWidget(self.copy_frp_button)
+        header_actions.addWidget(self.copy_onboarding_button)
         header_actions.addStretch(1)
 
         content = QGridLayout()
@@ -294,11 +300,13 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel(tr("MainWindow", "Not started"))
         self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("font-weight:700; color:#b42318;")
+        self.runner_status_label = QLabel(tr("MainWindow", "Runner: unknown"))
 
         self.runtime_form.addRow(tr("MainWindow", "Local port"), self.local_port)
         self.runtime_form.addRow(tr("MainWindow", "Permission mode"), self.permission_mode)
         self.runtime_form.addRow(tr("MainWindow", "Custom command"), self.runtime_command)
         self.runtime_form.addRow(tr("MainWindow", "Status"), self.status_label)
+        self.runtime_form.addRow(tr("MainWindow", "Runner"), self.runner_status_label)
         return box
 
     def _build_auth_group(self) -> QGroupBox:
@@ -619,7 +627,9 @@ class MainWindow(QMainWindow):
         profile.tunnel.type = self._combo_value(self.tunnel_type)
         profile.tunnel.cloudflare_mode = self._combo_value(self.cloudflare_mode)
         profile.tunnel.cloudflare_token = self.cloudflare_token_edit.text().strip()
-        if profile.tunnel.type == "cloudflare" and profile.tunnel.cloudflare_mode == "named":
+        if (
+            profile.tunnel.type == "cloudflare" and profile.tunnel.cloudflare_mode == "named"
+        ) or profile.tunnel.type == "external":
             profile.tunnel.public_url = self.public_url_edit.text().strip()
         else:
             profile.tunnel.public_url = ""
@@ -694,6 +704,14 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(profile.frp_proxy_snippet())
         self.statusBar().showMessage(tr("MainWindow", "FRP proxy snippet copied to the clipboard"), 3000)
 
+    def _copy_mobile_onboarding(self) -> None:
+        if not self._save_current():
+            return
+        profile = self._require_profile()
+        payload = self.runtime.mobile_onboarding(profile)
+        QApplication.clipboard().setText(json.dumps(payload, ensure_ascii=False, indent=2))
+        self.statusBar().showMessage(tr("MainWindow", "Mobile onboarding copied"), 3000)
+
     def _copy_oauth_password(self) -> None:
         if not self._save_current():
             return
@@ -715,15 +733,18 @@ class MainWindow(QMainWindow):
         tunnel_type = self._combo_value(self.tunnel_type)
         is_frp = tunnel_type == "frp"
         is_cloudflare = tunnel_type == "cloudflare"
+        is_external = tunnel_type == "external"
         is_cloudflare_named = is_cloudflare and self._combo_value(self.cloudflare_mode) == "named"
         self._set_row_visible(self.cloudflare_mode_label, self.cloudflare_mode, is_cloudflare)
-        self._set_row_visible(self.public_url_label, self.public_url_edit, is_cloudflare)
+        self._set_row_visible(self.public_url_label, self.public_url_edit, is_cloudflare or is_external)
         self._set_row_visible(self.cloudflare_token_label, self.cloudflare_token_edit, is_cloudflare_named)
         self._set_row_visible(self.frp_server_label, self.frp_server_edit, is_frp)
         self._set_row_visible(self.subdomain_label, self.subdomain_edit, is_frp)
         self.public_url_edit.setReadOnly(is_cloudflare and not is_cloudflare_named)
         self.copy_frp_button.setEnabled(is_frp and self.current_profile is not None)
-        if is_cloudflare_named:
+        if is_external:
+            self.public_url_edit.setPlaceholderText(tr("MainWindow", "Example: https://mcp.example.com"))
+        elif is_cloudflare_named:
             self.public_url_edit.setPlaceholderText(tr("MainWindow", "Example: https://mcp.example.com"))
         elif is_cloudflare:
             self.public_url_edit.setPlaceholderText(
@@ -805,6 +826,11 @@ class MainWindow(QMainWindow):
         details = [f"{state_text}  PID={status.pid or '-'}", status.local_message]
         if status.public_message:
             details.append(tr("MainWindow", "Public: {message}").format(message=status.public_message))
+        self.runner_status_label.setText(
+            tr("MainWindow", "Runner: {status}").format(
+                status=self.runtime.runner_status(self.current_profile) if self.current_profile else "unknown"
+            )
+        )
         self.status_label.setText("\n".join(details))
         color = "#067647" if status.state == "running" else "#b42318"
         self.status_label.setStyleSheet(f"font-weight:700; color:{color};")

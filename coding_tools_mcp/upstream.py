@@ -25,6 +25,12 @@ from typing import Any, NoReturn
 from .json_utils import strict_json_bytes, strict_json_loads
 from .upstream_result import RESULT_INLINE_MAX, budget_tool_result, result_json_bytes
 from .upstream_result_store import ResultStore
+from .upstream_resilience import (
+    DEFAULT_UPSTREAM_RESILIENCE_COORDINATOR,
+    UpstreamClientState,
+    UpstreamResilienceCoordinator,
+    UpstreamResilienceGateError,
+)
 from .upstream_sanitize import raw_schema_digest, sanitize_definition, schema_digest
 from .upstream_search import (
     CatalogSearchIndex,
@@ -37,6 +43,7 @@ from .upstream_search import (
 
 DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 DEFAULT_TIMEOUT_MS = 30_000
+UPSTREAM_CLOSE_TIMEOUT_SECONDS = 2.0
 DEFAULT_CREDENTIAL_POLICY = "local"
 CREDENTIAL_POLICIES = frozenset({"local", "strict"})
 SENSITIVE_ENV_NAME_RE = re.compile(
@@ -543,6 +550,32 @@ class UpstreamRegistryState:
     clients: Mapping[str, BaseUpstreamClient]
 
 
+@dataclass(frozen=True)
+class UpstreamStatusTemplate:
+    alias: str
+    transport: str
+    enabled: bool
+    initialized: bool
+    tool_count: int
+    error: Mapping[str, Any] | None
+    target: str | None
+
+
+@dataclass(frozen=True)
+class UpstreamCatalogTemplate:
+    """Immutable discovery metadata shared by Runtimes of one config revision.
+
+    The template intentionally contains no live client, remote MCP session ID,
+    ResultStore, bearer token, or principal/workspace state.
+    """
+
+    configs: tuple[UpstreamServerConfig, ...]
+    custom_synonyms: Mapping[str, tuple[str, ...]]
+    registry_state: UpstreamRegistryState
+    statuses: tuple[UpstreamStatusTemplate, ...]
+    reserved_names: frozenset[str]
+
+
 @dataclass
 class UpstreamStatus:
     alias: str
@@ -766,6 +799,8 @@ class HttpUpstreamClient(BaseUpstreamClient):
         config: UpstreamServerConfig,
         protocol_version: str,
         secret_resolver: Callable[[str], str] | None = None,
+        *,
+        resilience_coordinator: UpstreamResilienceCoordinator | None = None,
     ) -> None:
         super().__init__(config, protocol_version, secret_resolver=secret_resolver)
         if not config.url:
@@ -774,6 +809,146 @@ class HttpUpstreamClient(BaseUpstreamClient):
             )
         self.url = config.url
         self.session_id: str | None = None
+        self._session_lock = threading.Lock()
+        self.remote_delete_success_total = 0
+        self.remote_delete_failure_total = 0
+        self._resilience = resilience_coordinator or DEFAULT_UPSTREAM_RESILIENCE_COORDINATOR
+        self._resilience_key = f"{config.alias}|{safe_target(config) or 'streamable_http'}"
+        self._state_condition = threading.Condition(threading.Lock())
+        self._transport_state = UpstreamClientState.NEW
+        self._last_state_error: UpstreamError | None = None
+
+    @property
+    def transport_state(self) -> UpstreamClientState:
+        with self._state_condition:
+            return self._transport_state
+
+    def resilience_payload(self) -> dict[str, Any]:
+        shared = self._resilience.snapshot(self._resilience_key)
+        with self._session_lock:
+            has_session = self.session_id is not None
+        return {
+            "state": self.transport_state.value,
+            "active_client_sessions": 1 if has_session else 0,
+            "initializing_count": shared.initializing_count,
+            "consecutive_failures": shared.consecutive_failures,
+            "next_retry_in_ms": shared.next_retry_in_ms,
+            "last_error_code": shared.last_error_code,
+            "remote_delete_success_total": self.remote_delete_success_total,
+            "remote_delete_failure_total": self.remote_delete_failure_total,
+            "circuit_open_total": shared.circuit_open_total,
+        }
+
+    def initialize(self) -> None:
+        self._acquire_call_lease()
+        try:
+            self._initialize_with_resilience()
+        finally:
+            self._release_call_lease()
+
+    def _initialize_with_resilience(self) -> None:
+        while True:
+            with self._state_condition:
+                if self.closed:
+                    self._transport_state = UpstreamClientState.CLOSED
+                    raise UpstreamError(
+                        "UPSTREAM_NOT_AVAILABLE",
+                        "Upstream MCP client is closed.",
+                        retryable=True,
+                    )
+                if self._transport_state == UpstreamClientState.READY:
+                    return
+                if self._transport_state == UpstreamClientState.INITIALIZING:
+                    self._state_condition.wait()
+                    continue
+                if self._transport_state == UpstreamClientState.SUSPECT and self._last_state_error is not None:
+                    raise self._last_state_error
+                probe = self._transport_state == UpstreamClientState.BACKING_OFF
+                self._transport_state = UpstreamClientState.INITIALIZING
+                break
+        try:
+            with self._resilience.initialization_slot(self._resilience_key, probe=probe):
+                BaseUpstreamClient.initialize(self)
+        except UpstreamResilienceGateError as exc:
+            error = UpstreamError(
+                exc.code,
+                exc.message,
+                retryable=True,
+                details={"retry_after_ms": exc.retry_after_ms},
+            )
+            with self._state_condition:
+                self._transport_state = UpstreamClientState.BACKING_OFF
+                self._last_state_error = error
+                self._state_condition.notify_all()
+            raise error from exc
+        except UpstreamError as exc:
+            self._record_failure_state(exc, during_initialize=True)
+            raise
+        except OSError as exc:
+            error = UpstreamError(
+                "UPSTREAM_CONNECTION_FAILED",
+                "Could not connect to upstream MCP server.",
+                retryable=True,
+            )
+            self._record_failure_state(error, during_initialize=True)
+            raise error from exc
+        else:
+            if self.closed:
+                with self._state_condition:
+                    self._transport_state = UpstreamClientState.CLOSED
+                    self._state_condition.notify_all()
+                raise UpstreamError(
+                    "UPSTREAM_NOT_AVAILABLE",
+                    "Upstream MCP client closed while initialization was completing.",
+                    retryable=True,
+                )
+            self._resilience.record_success(self._resilience_key)
+            with self._state_condition:
+                self._transport_state = UpstreamClientState.READY
+                self._last_state_error = None
+                self._state_condition.notify_all()
+
+    def call_tool_raw(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        # Re-establish transport state only before the current call is sent. An
+        # ambiguous failure from this tools/call is returned to the caller and
+        # is never replayed automatically.
+        if self.transport_state != UpstreamClientState.READY:
+            self.initialize()
+        try:
+            return BaseUpstreamClient.call_tool_raw(self, name, arguments)
+        except UpstreamError as exc:
+            self._record_failure_state(exc, during_initialize=False)
+            raise
+
+    def _record_failure_state(self, exc: UpstreamError, *, during_initialize: bool) -> None:
+        status = exc.details.get("status") if isinstance(exc.details, dict) else None
+        stale_session = status in {404, 410}
+        auth_failure = status in {401, 403}
+        ambiguous_transport = (
+            exc.code in {"UPSTREAM_TIMEOUT", "UPSTREAM_CONNECTION_FAILED", "UPSTREAM_DISCONNECTED"}
+            or (isinstance(status, int) and 500 <= status < 600)
+        )
+        if stale_session:
+            with self._session_lock:
+                self.session_id = None
+            next_state = UpstreamClientState.NEW
+        elif ambiguous_transport:
+            self._resilience.record_failure(self._resilience_key, exc.code)
+            next_state = UpstreamClientState.BACKING_OFF
+        elif auth_failure or exc.category == "protocol":
+            next_state = UpstreamClientState.SUSPECT
+        elif during_initialize and exc.retryable:
+            self._resilience.record_failure(self._resilience_key, exc.code)
+            next_state = UpstreamClientState.BACKING_OFF
+        else:
+            next_state = UpstreamClientState.SUSPECT
+        with self._state_condition:
+            if self.closed:
+                self._transport_state = UpstreamClientState.CLOSED
+            else:
+                self._transport_state = next_state
+            self._last_state_error = exc
+            self._state_condition.notify_all()
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = self._next_request_id()
@@ -811,8 +986,10 @@ class HttpUpstreamClient(BaseUpstreamClient):
             "Content-Type": "application/json",
             **self.config.headers,
         }
-        if self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
+        with self._session_lock:
+            current_session_id = self.session_id
+        if current_session_id:
+            headers["Mcp-Session-Id"] = current_session_id
             headers["MCP-Protocol-Version"] = self.protocol_version
         token = os.environ.get(self.config.authorization_env) if self.config.authorization_env else None
         if token:
@@ -823,7 +1000,9 @@ class HttpUpstreamClient(BaseUpstreamClient):
             with urllib.request.urlopen(request, timeout=timeout_s) as response:
                 session_id = response.headers.get("Mcp-Session-Id")
                 if session_id:
-                    self.session_id = session_id
+                    with self._session_lock:
+                        if not self.closed:
+                            self.session_id = session_id
                 if not expect_response or response.status in {202, 204}:
                     return None
                 raw = _read_bounded_response(response)
@@ -885,6 +1064,62 @@ class HttpUpstreamClient(BaseUpstreamClient):
                 "Upstream returned invalid JSON.",
                 category="protocol",
             ) from exc
+
+    def _close_transport(self) -> None:
+        """Best-effort bounded Streamable HTTP session termination.
+
+        DELETE is idempotent from the local client's perspective: the Session
+        ID is detached before network I/O, so repeated close() calls cannot
+        issue duplicate remote deletes. 404/410 are treated as already closed.
+        """
+
+        with self._session_lock:
+            session_id = self.session_id
+            self.session_id = None
+        if not session_id:
+            return
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Mcp-Session-Id": session_id,
+            "MCP-Protocol-Version": self.protocol_version,
+            **self.config.headers,
+        }
+        token = os.environ.get(self.config.authorization_env) if self.config.authorization_env else None
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(self.url, headers=headers, method="DELETE")
+        timeout_s = min(
+            max(self.config.timeout_ms, 1) / 1000,
+            UPSTREAM_CLOSE_TIMEOUT_SECONDS,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_s) as response:
+                if response.status in {200, 202, 204}:
+                    self.remote_delete_success_total += 1
+                else:
+                    self.remote_delete_failure_total += 1
+        except urllib.error.HTTPError as exc:
+            if exc.code in {404, 410}:
+                self.remote_delete_success_total += 1
+            else:
+                self.remote_delete_failure_total += 1
+        except (
+            TimeoutError,
+            socket.timeout,
+            urllib.error.URLError,
+            RemoteDisconnected,
+            ConnectionError,
+            BrokenPipeError,
+            ConnectionResetError,
+            OSError,
+        ):
+            self.remote_delete_failure_total += 1
+
+    def close(self) -> None:
+        super().close()
+        with self._state_condition:
+            self._transport_state = UpstreamClientState.CLOSED
+            self._state_condition.notify_all()
 
 
 class StdioUpstreamClient(BaseUpstreamClient):
@@ -1157,6 +1392,7 @@ class UpstreamManager:
         reserved_names: Collection[str] = (),
         custom_synonyms: Mapping[str, Sequence[str]] | None = None,
         result_store: ResultStore | None = None,
+        catalog_template: UpstreamCatalogTemplate | None = None,
     ) -> None:
         self.protocol_version = protocol_version
         self.secret_resolver = secret_resolver
@@ -1168,11 +1404,17 @@ class UpstreamManager:
         self.result_store = result_store or ResultStore()
         self.statuses: dict[str, UpstreamStatus] = {}
         self._state = _registry_state()
+        self._clients: dict[str, BaseUpstreamClient] = {}
+        self._client_locks = {config.alias: threading.Lock() for config in self.configs}
+        self._config_by_alias = {config.alias: config for config in self.configs}
         self._lifecycle_condition = threading.Condition(threading.Lock())
         self._active_call_leases = 0
         self._closed = False
         try:
-            self._initialize_configs(frozenset(reserved_names))
+            if catalog_template is None:
+                self._initialize_configs(frozenset(reserved_names))
+            else:
+                self._initialize_from_template(catalog_template, frozenset(reserved_names))
         except BaseException:
             self.close()
             raise
@@ -1209,6 +1451,25 @@ class UpstreamManager:
             reserved_names=reserved_names,
             custom_synonyms=snapshot.custom_synonyms,
             result_store=result_store,
+        )
+
+    @classmethod
+    def from_template(
+        cls,
+        template: UpstreamCatalogTemplate,
+        *,
+        protocol_version: str = DEFAULT_PROTOCOL_VERSION,
+        secret_resolver: Callable[[str], str] | None = None,
+        result_store: ResultStore | None = None,
+    ) -> "UpstreamManager":
+        return cls(
+            template.configs,
+            protocol_version=protocol_version,
+            secret_resolver=secret_resolver,
+            reserved_names=template.reserved_names,
+            custom_synonyms=template.custom_synonyms,
+            result_store=result_store,
+            catalog_template=template,
         )
 
     @property
@@ -1310,16 +1571,8 @@ class UpstreamManager:
                 category="validation",
             )
         alias, _separator, _remote = name.partition("__")
-        client = state.clients.get(alias)
-        if client is None:
-            return upstream_error_result(
-                "UPSTREAM_NOT_AVAILABLE",
-                f"Upstream {alias!r} is not available.",
-                retryable=True,
-                alias=alias,
-                tool_name=name,
-            )
         try:
+            client = self._get_or_create_client(alias)
             raw_result = client.call_tool_raw(tool.remote_name, arguments or {})
             normalized = normalize_tool_result(raw_result)
             serialized = result_json_bytes(normalized)
@@ -1384,7 +1637,27 @@ class UpstreamManager:
 
     def status_payload(self) -> dict[str, Any]:
         state = self._state
-        statuses = [self.statuses[alias].payload() for alias in sorted(self.statuses)]
+        statuses: list[dict[str, Any]] = []
+        for alias in sorted(self.statuses):
+            payload = self.statuses[alias].payload()
+            client = self._clients.get(alias)
+            if isinstance(client, HttpUpstreamClient):
+                payload.update(client.resilience_payload())
+            elif self.statuses[alias].enabled:
+                payload.update(
+                    {
+                        "state": UpstreamClientState.NEW.value,
+                        "active_client_sessions": 0,
+                        "initializing_count": 0,
+                        "consecutive_failures": 0,
+                        "next_retry_in_ms": 0,
+                        "last_error_code": None,
+                        "remote_delete_success_total": 0,
+                        "remote_delete_failure_total": 0,
+                        "circuit_open_total": 0,
+                    }
+                )
+            statuses.append(payload)
         return {
             "enabled": any(status.enabled for status in self.statuses.values()),
             "server_count": len(self.statuses),
@@ -1404,10 +1677,53 @@ class UpstreamManager:
             self._closed = True
             while self._active_call_leases:
                 self._lifecycle_condition.wait()
-            state = self._state
-        for client in state.clients.values():
+            clients = tuple(self._clients.values())
+        for client in clients:
             client.close()
         self.result_store.clear()
+
+    def live_client_count(self) -> int:
+        return len(self._clients)
+
+    def _get_or_create_client(self, alias: str) -> BaseUpstreamClient:
+        existing = self._clients.get(alias)
+        if existing is not None:
+            return existing
+        config = self._config_by_alias.get(alias)
+        lock = self._client_locks.get(alias)
+        if config is None or lock is None or not config.enabled:
+            raise UpstreamError("UPSTREAM_NOT_AVAILABLE", f"Upstream {alias!r} is not available.", retryable=True)
+        with lock:
+            existing = self._clients.get(alias)
+            if existing is not None:
+                return existing
+            with self._lifecycle_condition:
+                if self._closed:
+                    raise UpstreamError(
+                        "UPSTREAM_NOT_AVAILABLE",
+                        "Upstream Gateway is closed.",
+                        retryable=True,
+                    )
+            client = build_client(
+                config,
+                self.protocol_version,
+                secret_resolver=self.secret_resolver,
+            )
+            try:
+                client.initialize()
+            except BaseException:
+                client.close()
+                raise
+            with self._lifecycle_condition:
+                if self._closed:
+                    client.close()
+                    raise UpstreamError(
+                        "UPSTREAM_NOT_AVAILABLE",
+                        "Upstream Gateway closed during client initialization.",
+                        retryable=True,
+                    )
+                self._clients[alias] = client
+            return client
 
     def _acquire_call_lease(self) -> bool:
         with self._lifecycle_condition:
@@ -1421,6 +1737,40 @@ class UpstreamManager:
             self._active_call_leases = max(0, self._active_call_leases - 1)
             if self._active_call_leases == 0:
                 self._lifecycle_condition.notify_all()
+
+    def _initialize_from_template(
+        self,
+        template: UpstreamCatalogTemplate,
+        reserved_names: frozenset[str],
+    ) -> None:
+        if reserved_names != template.reserved_names:
+            raise UpstreamConfigError("Upstream catalog template reserved-name contract does not match this Runtime.")
+        if tuple(config.alias for config in self.configs) != tuple(
+            config.alias for config in template.configs
+        ):
+            raise UpstreamConfigError(
+                "Upstream catalog template configuration does not match this Runtime."
+            )
+        self.statuses = {
+            item.alias: UpstreamStatus(
+                alias=item.alias,
+                transport=item.transport,
+                enabled=item.enabled,
+                initialized=item.initialized,
+                tool_count=item.tool_count,
+                error=copy.deepcopy(dict(item.error)) if item.error else None,
+                target=item.target,
+            )
+            for item in template.statuses
+        }
+        state = template.registry_state
+        self._state = _registry_state(
+            all_tools=state.all_tools,
+            direct_tool_names=state.direct_tool_names,
+            catalog=state.catalog,
+            search_index=state.search_index,
+            clients={},
+        )
 
     def _initialize_configs(self, reserved_names: frozenset[str]) -> None:
         seen_public_names = set(reserved_names)
@@ -1525,6 +1875,89 @@ class UpstreamManager:
             search_index=search_index,
             clients=next_clients,
         )
+        self._clients = dict(next_clients)
+
+
+def build_upstream_catalog_template(
+    snapshot: UpstreamConfigSnapshot,
+    *,
+    protocol_version: str = DEFAULT_PROTOCOL_VERSION,
+    secret_resolver: Callable[[str], str] | None = None,
+    reserved_names: Collection[str] = (),
+) -> UpstreamCatalogTemplate:
+    """Discover one immutable catalog and close all temporary live sessions."""
+
+    frozen_reserved_names = frozenset(reserved_names)
+    discovery = UpstreamManager.from_snapshot(
+        snapshot,
+        protocol_version=protocol_version,
+        secret_resolver=secret_resolver,
+        reserved_names=frozen_reserved_names,
+    )
+    try:
+        state = discovery.state
+        template_state = _registry_state(
+            all_tools=state.all_tools,
+            direct_tool_names=state.direct_tool_names,
+            catalog=state.catalog,
+            search_index=state.search_index,
+            clients={},
+        )
+        status_templates: list[UpstreamStatusTemplate] = []
+        for alias in sorted(discovery.statuses):
+            status = discovery.statuses[alias]
+            frozen_error: Mapping[str, Any] | None = None
+            if status.error is not None:
+                candidate = _freeze_json(copy.deepcopy(status.error))
+                if not isinstance(candidate, Mapping):
+                    raise UpstreamConfigError("Upstream status error was not a JSON object.")
+                frozen_error = candidate
+            status_templates.append(
+                UpstreamStatusTemplate(
+                    alias=status.alias,
+                    transport=status.transport,
+                    enabled=status.enabled,
+                    initialized=status.initialized,
+                    tool_count=status.tool_count,
+                    error=frozen_error,
+                    target=status.target,
+                )
+            )
+        cloned_configs = tuple(
+            UpstreamServerConfig(
+                alias=config.alias,
+                transport=config.transport,
+                enabled=config.enabled,
+                url=config.url,
+                command=config.command,
+                args=tuple(config.args),
+                env=copy.deepcopy(config.env),
+                headers=dict(config.headers),
+                authorization_env=config.authorization_env,
+                include_tools=tuple(config.include_tools),
+                exclude_tools=tuple(config.exclude_tools),
+                expose_mode=config.expose_mode,
+                pinned_tools=tuple(config.pinned_tools),
+                tags=tuple(config.tags),
+                tool_policy=dict(config.tool_policy),
+                timeout_ms=config.timeout_ms,
+            )
+            for config in snapshot.configs
+        )
+        return UpstreamCatalogTemplate(
+            configs=cloned_configs,
+            custom_synonyms=MappingProxyType(
+                {
+                    str(key): tuple(str(item) for item in values)
+                    for key, values in snapshot.custom_synonyms.items()
+                }
+            ),
+            registry_state=template_state,
+            statuses=tuple(status_templates),
+            reserved_names=frozen_reserved_names,
+        )
+    finally:
+        discovery.close()
 
 
 def _registry_state(

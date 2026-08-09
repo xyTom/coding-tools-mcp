@@ -32,7 +32,7 @@ except ModuleNotFoundError:
     fake_psutil.wait_procs = lambda processes, **_kwargs: (processes, [])
     sys.modules["psutil"] = fake_psutil
 
-from mcp_desktop_client import runtime, storage  # noqa: E402
+from mcp_desktop_client import connectivity, runtime, storage  # noqa: E402
 from mcp_desktop_client.i18n import tr  # noqa: E402
 from mcp_desktop_client.models import WorkspaceProfile, build_profile  # noqa: E402
 
@@ -41,6 +41,24 @@ LOCALES_DIR = DESKTOP_ROOT / "mcp_desktop_client" / "locales"
 
 
 class DesktopModelTests(unittest.TestCase):
+    def test_external_connectivity_onboarding_does_not_embed_admin_secret(self) -> None:
+        profile = build_profile(str(REPO_ROOT), "review")
+        profile.tunnel.type = "external"
+        profile.tunnel.public_url = "https://mcp.example.com"
+        profile.auth.type = "bearer"
+        profile.auth.bearer_token = "secret"
+
+        onboarding = connectivity.build_mobile_onboarding(
+            profile,
+            public_url=profile.tunnel.public_url,
+            runtime_status="running",
+            runner_status="connected",
+        ).to_record()
+
+        self.assertEqual(onboarding["operator_app_url"], "https://mcp.example.com/app")
+        self.assertNotIn("secret", str(onboarding))
+        self.assertEqual(onboarding["runner_status"], "connected")
+
     def test_build_profile_preserves_filesystem_root(self) -> None:
         profile = build_profile(os.path.abspath(os.path.sep))
 
@@ -186,6 +204,60 @@ class DesktopI18nTests(unittest.TestCase):
 
 
 class DesktopRuntimeSafetyTests(unittest.TestCase):
+    def test_public_tunnel_rejects_noauth(self) -> None:
+        profile = build_profile(str(REPO_ROOT), "review")
+        profile.auth.type = "noauth"
+        profile.tunnel.type = "external"
+        profile.tunnel.public_url = "https://mcp.example.com"
+
+        with self.assertRaisesRegex(RuntimeError, "No-auth mode"):
+            runtime.RuntimeManager()._validate_tunnel_requirements(profile)
+
+    def test_external_public_url_rejects_credentials_or_paths(self) -> None:
+        profile = build_profile(str(REPO_ROOT), "review")
+        profile.tunnel.type = "external"
+        profile.auth.type = "bearer"
+        profile.auth.bearer_token = "secret"
+        manager = runtime.RuntimeManager()
+
+        for public_url in (
+            "https://user:password@mcp.example.com",
+            "https://mcp.example.com/operator",
+            "https://mcp.example.com?token=secret",
+        ):
+            with self.subTest(public_url=public_url):
+                profile.tunnel.public_url = public_url
+                with self.assertRaisesRegex(RuntimeError, "HTTPS URL"):
+                    manager._validate_tunnel_requirements(profile)
+
+    def test_tunnel_log_redaction_covers_profile_secrets(self) -> None:
+        profile = build_profile(str(REPO_ROOT), "review")
+        profile.tunnel.cloudflare_token = "cloudflare-secret"
+        profile.auth.bearer_token = "bearer-secret"
+        profile.auth.oauth_password = "oauth-password"
+        profile.auth.oauth_token_secret = "oauth-token-secret"
+        manager = runtime.RuntimeManager()
+
+        redacted = manager._redact_tunnel_secrets(
+            profile,
+            "cloudflare-secret bearer-secret oauth-password oauth-token-secret",
+        )
+
+        self.assertEqual(redacted, "[REDACTED] [REDACTED] [REDACTED] [REDACTED]")
+
+    def test_runner_status_resolver_is_bounded_and_fail_closed(self) -> None:
+        profile = build_profile(str(REPO_ROOT), "review")
+
+        connected = runtime.RuntimeManager(runner_status_resolver=lambda _profile: "CONNECTED")
+        invalid = runtime.RuntimeManager(runner_status_resolver=lambda _profile: "busy")
+        failing = runtime.RuntimeManager(
+            runner_status_resolver=lambda _profile: (_ for _ in ()).throw(RuntimeError("offline"))
+        )
+
+        self.assertEqual(connected.runner_status(profile), "connected")
+        self.assertEqual(invalid.runner_status(profile), "unknown")
+        self.assertEqual(failing.runner_status(profile), "unknown")
+
     def test_bearer_token_is_passed_via_environment_only(self) -> None:
         profile = build_profile(str(REPO_ROOT), "review")
         profile.auth.type = "bearer"

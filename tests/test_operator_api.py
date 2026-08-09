@@ -1,0 +1,475 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from collections import deque
+from pathlib import Path
+
+from coding_tools_mcp.agent_backends.base import (
+    AgentBackendEvent,
+    BackendHealth,
+    BackendThread,
+    BackendTurn,
+)
+from coding_tools_mcp.agent_session_store import AgentSessionStore
+from coding_tools_mcp.agent_sessions import AgentSessionService, AgentSessionServiceError
+from coding_tools_mcp.operator_api import OperatorAPIError, OperatorAPIService, OperatorPrincipal
+from coding_tools_mcp.server import MCPHandler, Runtime, RuntimeHTTPServer, configure_allowed_origins
+from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
+
+
+class FakeAgentBackend:
+    backend_kind = "codex-app-server"
+
+    def __init__(self) -> None:
+        self.thread_id = "thread-1"
+        self.closed = False
+        self.events: deque[AgentBackendEvent] = deque()
+        self.approvals: list[tuple[str, str]] = []
+        self.interrupts: list[tuple[str, str]] = []
+
+    def health(self) -> BackendHealth:
+        return BackendHealth(not self.closed, self.backend_kind)
+
+    def create_thread(self, *, instructions: str | None = None) -> BackendThread:
+        return BackendThread(self.thread_id, {"instructions": instructions})
+
+    def resume_thread(
+        self,
+        thread_id: str,
+        *,
+        instructions: str | None = None,
+    ) -> BackendThread:
+        self.thread_id = thread_id
+        return BackendThread(thread_id, {"instructions": instructions})
+
+    def send_turn(self, thread_id: str, message: str) -> BackendTurn:
+        self.events.append(
+            AgentBackendEvent(
+                sequence=len(self.events) + 1,
+                kind="assistant",
+                method="turn/assistant",
+                params={"text": message},
+            )
+        )
+        return BackendTurn("turn-1", {"thread_id": thread_id})
+
+    def interrupt_turn(self, thread_id: str, turn_id: str) -> None:
+        self.interrupts.append((thread_id, turn_id))
+
+    def approve(self, approval_id: str, decision: str) -> None:
+        self.approvals.append((approval_id, decision))
+
+    def list_threads(self, *, limit: int = 50) -> list[BackendThread]:
+        return [BackendThread(self.thread_id, {})][:limit]
+
+    def close_thread(self, thread_id: str) -> None:
+        del thread_id
+
+    def stream_events(self, *, timeout: float | None = None):
+        del timeout
+        while self.events:
+            yield self.events.popleft()
+
+    def drain_events(self, *, limit: int = 100) -> list[AgentBackendEvent]:
+        result: list[AgentBackendEvent] = []
+        while self.events and len(result) < limit:
+            result.append(self.events.popleft())
+        return result
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class OperatorAPIServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        first = root / "first"
+        second = root / "second"
+        first.mkdir()
+        second.mkdir()
+        self.catalog = WorkspaceCatalog(
+            [
+                WorkspaceEntry("ws-a", "Alpha", first, True, True),
+                WorkspaceEntry("ws-b", "Beta", second, True, False),
+            ],
+            "ws-a",
+        )
+        self.backends: list[FakeAgentBackend] = []
+
+        def backend_factory(_workspace: WorkspaceEntry, backend_kind: str) -> FakeAgentBackend:
+            self.assertEqual(backend_kind, "codex-app-server")
+            backend = FakeAgentBackend()
+            self.backends.append(backend)
+            return backend
+
+        store = AgentSessionStore(root / "agent-sessions.sqlite3")
+        sessions = AgentSessionService(store, self.catalog, backend_factory)
+        self.service = OperatorAPIService(sessions, self.catalog)
+        self.alice = OperatorPrincipal("oauth:alice:grant-1", ("ws-a",))
+        self.bob = OperatorPrincipal("oauth:bob:grant-2", ("ws-b",))
+
+    def tearDown(self) -> None:
+        self.service.close()
+        self.tmp.cleanup()
+
+    def test_workspace_projection_is_authorized_and_does_not_leak_roots(self) -> None:
+        payload = self.service.list_workspaces(self.alice)
+        self.assertEqual([item["id"] for item in payload["workspaces"]], ["ws-a"])
+        self.assertNotIn("root", payload["workspaces"][0])
+        self.assertTrue(payload["workspaces"][0]["authorized"])
+        with self.assertRaises(OperatorAPIError) as denied:
+            self.service.list_sessions(self.alice, "ws-b")
+        self.assertEqual(denied.exception.status, 404)
+
+    def test_create_list_get_and_cross_principal_access_are_partitioned(self) -> None:
+        created = self.service.create_session(
+            self.alice,
+            {
+                "workspace_id": "ws-a",
+                "backend_kind": "codex",
+                "instructions": "Keep changes focused.",
+            },
+        )["session"]
+        self.assertEqual(created["backend_kind"], "codex-app-server")
+        self.assertEqual(created["explicit_instructions"], "Keep changes focused.")
+        self.assertNotIn("backend_thread_id", created)
+        listed = self.service.list_sessions(self.alice, "ws-a")["sessions"]
+        self.assertEqual([item["session_id"] for item in listed], [created["session_id"]])
+        detail = self.service.get_session(self.alice, created["session_id"])["session"]
+        self.assertEqual(detail["session_id"], created["session_id"])
+        with self.assertRaises(AgentSessionServiceError) as denied:
+            self.service.get_session(self.bob, created["session_id"])
+        self.assertEqual(denied.exception.code, "AGENT_SESSION_NOT_FOUND")
+
+    def test_event_buffer_supports_multiple_windows_after_backend_drain(self) -> None:
+        created = self.service.create_session(
+            self.alice,
+            {"workspace_id": "ws-a", "backend_kind": "codex"},
+        )["session"]
+        session_id = created["session_id"]
+        self.service.send_turn(self.alice, session_id, {"message": "hello"})
+
+        first_window = self.service.events(self.alice, session_id, after=0)
+        self.assertEqual(len(first_window["events"]), 1)
+        self.assertEqual(first_window["events"][0]["sequence"], 1)
+        self.assertEqual(first_window["events"][0]["params"]["text"], "hello")
+
+        second_window = self.service.events(self.alice, session_id, after=0)
+        self.assertEqual(second_window["events"], first_window["events"])
+        caught_up = self.service.events(self.alice, session_id, after=1)
+        self.assertEqual(caught_up["events"], [])
+
+    def test_operator_decisions_map_to_codex_approval_values(self) -> None:
+        created = self.service.create_session(
+            self.alice,
+            {"workspace_id": "ws-a", "backend_kind": "codex"},
+        )["session"]
+        session_id = created["session_id"]
+        self.service.approve(self.alice, session_id, "approval-1", {"decision": "approve"})
+        self.service.approve(self.alice, session_id, "approval-2", {"decision": "deny"})
+        self.assertEqual(
+            self.backends[0].approvals,
+            [("approval-1", "accept"), ("approval-2", "decline")],
+        )
+
+    def test_resume_persists_repo_context_changes_across_windows(self) -> None:
+        first = {
+            "version": 1,
+            "git_available": True,
+            "head": "aaa",
+            "worktree_digest": "clean",
+            "instruction_digest": "instructions-a",
+            "changed_paths": [],
+            "context_changed": False,
+            "changes": [],
+        }
+        second = {
+            **first,
+            "head": "bbb",
+            "instruction_digest": "instructions-b",
+        }
+        self.service.agent_sessions.fingerprint_factory = lambda _workspace: dict(first)
+        created = self.service.create_session(
+            self.alice,
+            {"workspace_id": "ws-a", "backend_kind": "codex"},
+        )["session"]
+        self.assertFalse(created["repo_fingerprint"]["context_changed"])
+
+        self.service.agent_sessions.fingerprint_factory = lambda _workspace: dict(second)
+        changed = self.service.get_session(self.alice, created["session_id"])["session"]
+        self.assertTrue(changed["repo_fingerprint"]["context_changed"])
+        self.assertEqual(
+            changed["repo_fingerprint"]["changes"],
+            ["HEAD changed", "Project instructions changed"],
+        )
+
+        reopened = self.service.get_session(self.alice, created["session_id"])["session"]
+        self.assertTrue(reopened["repo_fingerprint"]["context_changed"])
+        self.assertEqual(reopened["repo_fingerprint"]["head"], "bbb")
+
+    def test_handoff_is_deterministic_bounded_and_contains_no_workspace_root_or_backend_thread(self) -> None:
+        created = self.service.create_session(
+            self.alice,
+            {"workspace_id": "ws-a", "backend_kind": "codex"},
+        )["session"]
+        session_id = created["session_id"]
+        record = self.service.agent_sessions.get_session(session_id, self.alice.principal_id)
+        self.service.agent_sessions.store.update_state(
+            record.session_id,
+            record.workspace_id,
+            record.owner_principal_id,
+            repo_fingerprint={
+                "version": 1,
+                "git_available": True,
+                "head": "abc123",
+                "worktree_digest": "digest",
+                "instruction_digest": "instructions",
+                "changed_paths": ["src/main.py"],
+                "context_changed": True,
+                "changes": ["HEAD changed"],
+            },
+        )
+        self.backends[0].events.append(
+            AgentBackendEvent(
+                sequence=1,
+                kind="approval",
+                method="approval/requested",
+                params={"reason": "write file"},
+                approval_id="approval-1",
+            )
+        )
+
+        first = self.service.handoff(self.alice, session_id)["handoff"]
+        second = self.service.handoff(self.alice, session_id)["handoff"]
+        self.assertEqual(first, second)
+        self.assertEqual(first["workspace"]["id"], "ws-a")
+        self.assertEqual(first["repository"]["head"], "abc123")
+        self.assertEqual(first["repository"]["changed_paths"], ["src/main.py"])
+        self.assertEqual(first["unresolved_approval"]["approval_id"], "approval-1")
+        self.assertIn("resolve_approval", first["next_actions"])
+        self.assertIn("review_context_changes", first["next_actions"])
+        serialized = json.dumps(first, sort_keys=True)
+        self.assertNotIn(str(self.catalog.get("ws-a").root), serialized)
+        self.assertNotIn("thread-1", serialized)
+
+
+class OperatorHTTPAuthenticationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.workspace = root / "workspace"
+        self.other_workspace = root / "other"
+        self.workspace.mkdir()
+        self.other_workspace.mkdir()
+        self.catalog = WorkspaceCatalog(
+            [
+                WorkspaceEntry("ws-default", "Default", self.workspace, True, True),
+                WorkspaceEntry("ws-other", "Other", self.other_workspace, True, False),
+            ],
+            "ws-default",
+        )
+        store = AgentSessionStore(root / "agent-sessions.sqlite3")
+        sessions = AgentSessionService(
+            store,
+            self.catalog,
+            lambda _workspace, _kind: FakeAgentBackend(),
+        )
+        self.service = OperatorAPIService(sessions, self.catalog)
+        configure_allowed_origins(())
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _server(
+        self,
+        *,
+        auth_token: str = "ordinary-mcp-token",
+        admin_token: str = "dedicated-admin-token",
+    ) -> tuple[RuntimeHTTPServer, threading.Thread]:
+        runtime = Runtime(self.workspace, auth_token=auth_token, transport="http")
+        server = RuntimeHTTPServer(
+            ("127.0.0.1", 0),
+            MCPHandler,
+            runtime,
+            lambda _context: Runtime(self.workspace, transport="http"),
+            admin_token=admin_token,
+            operator_service=self.service,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread
+
+    @staticmethod
+    def _request(
+        server: RuntimeHTTPServer,
+        path: str,
+        *,
+        token: str | None = None,
+        admin_header: str | None = None,
+        origin: str | None = None,
+        method: str = "GET",
+        body: dict[str, object] | None = None,
+    ) -> urllib.request.Request:
+        headers: dict[str, str] = {}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        if admin_header is not None:
+            headers["X-Admin-Token"] = admin_header
+        if origin is not None:
+            headers["Origin"] = origin
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        return urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}{path}",
+            data=data,
+            headers=headers,
+            method=method,
+        )
+
+    def test_operator_api_uses_ordinary_bearer_and_never_admin_header(self) -> None:
+        server, thread = self._server()
+        try:
+            for request in (
+                self._request(server, "/api/app/workspaces"),
+                self._request(
+                    server,
+                    "/api/app/workspaces",
+                    admin_header="dedicated-admin-token",
+                ),
+                self._request(
+                    server,
+                    "/api/app/workspaces",
+                    token="dedicated-admin-token",
+                ),
+            ):
+                with self.assertRaises(urllib.error.HTTPError) as denied:
+                    urllib.request.urlopen(request, timeout=5)
+                self.assertEqual(denied.exception.code, 401)
+
+            with urllib.request.urlopen(
+                self._request(
+                    server,
+                    "/api/app/workspaces",
+                    token="ordinary-mcp-token",
+                ),
+                timeout=5,
+            ) as response:
+                payload = json.loads(response.read())
+            self.assertEqual([item["id"] for item in payload["workspaces"]], ["ws-default"])
+            self.assertNotIn("root", payload["workspaces"][0])
+
+            with self.assertRaises(urllib.error.HTTPError) as bad_origin:
+                urllib.request.urlopen(
+                    self._request(
+                        server,
+                        "/api/app/workspaces",
+                        token="ordinary-mcp-token",
+                        origin="https://evil.example",
+                    ),
+                    timeout=5,
+                )
+            self.assertEqual(bad_origin.exception.code, 403)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_operator_http_session_flow_and_shared_admin_token_fail_closed(self) -> None:
+        server, thread = self._server()
+        try:
+            create = self._request(
+                server,
+                "/api/app/sessions",
+                token="ordinary-mcp-token",
+                method="POST",
+                body={
+                    "workspace_id": "ws-default",
+                    "backend_kind": "codex",
+                    "instructions": "Keep changes focused.",
+                },
+            )
+            with urllib.request.urlopen(create, timeout=5) as response:
+                self.assertEqual(response.status, 201)
+                created = json.loads(response.read())["session"]
+            self.assertNotIn("backend_thread_id", created)
+            session_id = created["session_id"]
+
+            with urllib.request.urlopen(
+                self._request(
+                    server,
+                    f"/api/app/sessions?workspace_id=ws-default",
+                    token="ordinary-mcp-token",
+                ),
+                timeout=5,
+            ) as response:
+                listed = json.loads(response.read())["sessions"]
+            self.assertEqual([item["session_id"] for item in listed], [session_id])
+
+            with urllib.request.urlopen(
+                self._request(
+                    server,
+                    f"/api/app/sessions/{session_id}/turns",
+                    token="ordinary-mcp-token",
+                    method="POST",
+                    body={"message": "hello"},
+                ),
+                timeout=5,
+            ) as response:
+                self.assertEqual(response.status, 200)
+
+            with urllib.request.urlopen(
+                self._request(
+                    server,
+                    f"/api/app/sessions/{session_id}/handoff",
+                    token="ordinary-mcp-token",
+                ),
+                timeout=5,
+            ) as response:
+                handoff = json.loads(response.read())["handoff"]
+            self.assertEqual(handoff["agent_session"]["session_id"], session_id)
+            self.assertNotIn("root", handoff["workspace"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        shared_service = OperatorAPIService(
+            AgentSessionService(
+                AgentSessionStore(Path(self.tmp.name) / "shared-agent-sessions.sqlite3"),
+                self.catalog,
+                lambda _workspace, _kind: FakeAgentBackend(),
+            ),
+            self.catalog,
+        )
+        self.service = shared_service
+        shared_server, shared_thread = self._server(
+            auth_token="shared-token",
+            admin_token="shared-token",
+        )
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as denied:
+                urllib.request.urlopen(
+                    self._request(
+                        shared_server,
+                        "/api/app/workspaces",
+                        token="shared-token",
+                    ),
+                    timeout=5,
+                )
+            self.assertEqual(denied.exception.code, 401)
+        finally:
+            shared_server.shutdown()
+            shared_server.server_close()
+            shared_thread.join(timeout=5)
+
+
+if __name__ == "__main__":
+    unittest.main()

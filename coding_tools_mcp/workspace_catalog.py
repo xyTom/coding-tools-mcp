@@ -21,18 +21,25 @@ class WorkspaceCatalogError(ValueError):
 class WorkspaceEntry:
     id: str
     name: str
-    root: Path
+    root: Path | str
     enabled: bool = True
     default: bool = False
+    target: str = "local"
+    runner_id: str | None = None
 
     def payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "root": str(self.root),
             "enabled": self.enabled,
             "default": self.default,
         }
+        if self.target != "local":
+            payload["target"] = self.target
+        if self.runner_id is not None:
+            payload["runner_id"] = self.runner_id
+        return payload
 
 
 class WorkspaceCatalog:
@@ -42,16 +49,21 @@ class WorkspaceCatalog:
         if not isinstance(default_id, str) or not default_id:
             raise WorkspaceCatalogError("Workspace catalog requires a default workspace id.")
 
-        normalized = [
-            WorkspaceEntry(
-                id=_validated_id(entry.id),
-                name=_validated_name(entry.name),
-                root=_validated_root(entry.root),
-                enabled=bool(entry.enabled),
-                default=bool(entry.default),
+        normalized: list[WorkspaceEntry] = []
+        for entry in entries:
+            target = _validated_target(entry.target)
+            runner_id = _validated_runner_id(entry.runner_id, target)
+            normalized.append(
+                WorkspaceEntry(
+                    id=_validated_id(entry.id),
+                    name=_validated_name(entry.name),
+                    root=_validated_root(entry.root, target=target),
+                    enabled=bool(entry.enabled),
+                    default=bool(entry.default),
+                    target=target,
+                    runner_id=runner_id,
+                )
             )
-            for entry in entries
-        ]
         default_flags = [entry.id for entry in normalized if entry.default]
         if len(default_flags) > 1:
             raise WorkspaceCatalogError("Workspace catalog must contain only one default workspace.")
@@ -96,9 +108,11 @@ class WorkspaceCatalog:
             entry = WorkspaceEntry(
                 id=_validated_id(item.get("id")),
                 name=_validated_name(item.get("name")),
-                root=_validated_root(item.get("root")),
+                root=item.get("root"),
                 enabled=_validated_bool(item.get("enabled", True), "enabled"),
                 default=_validated_bool(item.get("default", False), "default"),
+                target=_validated_target(item.get("target", "local")),
+                runner_id=item.get("runner_id"),
             )
             entries.append(entry)
             if entry.default:
@@ -149,7 +163,15 @@ class WorkspaceCatalog:
         roots: list[Path] = []
         identities: set[str] = set()
         for entry in entries:
+            if entry.target == "runner":
+                identity = f"runner:{entry.runner_id}:{entry.root}"
+                if identity in identities:
+                    raise WorkspaceCatalogError("Workspace roots must be unique.")
+                identities.add(identity)
+                continue
             root = entry.root
+            if not isinstance(root, Path):
+                raise WorkspaceCatalogError("Local workspace root must be a filesystem path.")
             identity = _root_identity(root)
             if identity in identities:
                 raise WorkspaceCatalogError("Workspace roots must be unique.")
@@ -180,9 +202,34 @@ def _validated_bool(raw: Any, field: str) -> bool:
     return raw
 
 
-def _validated_root(raw: Any) -> Path:
+def _validated_target(raw: Any) -> str:
+    if raw not in {"local", "runner"}:
+        raise WorkspaceCatalogError("Workspace target must be local or runner.")
+    return str(raw)
+
+
+def _validated_runner_id(raw: Any, target: str) -> str | None:
+    if target == "local":
+        if raw not in {None, ""}:
+            raise WorkspaceCatalogError("Local workspace cannot specify runner_id.")
+        return None
+    if not isinstance(raw, str) or WORKSPACE_ID_PATTERN.fullmatch(raw) is None:
+        raise WorkspaceCatalogError(
+            "Runner workspace requires runner_id containing 1-128 ASCII letters, digits, dots, underscores, or hyphens."
+        )
+    return raw
+
+
+def _validated_root(raw: Any, *, target: str = "local") -> Path | str:
     if not isinstance(raw, (str, Path)) or not str(raw).strip():
         raise WorkspaceCatalogError("Workspace root is required.")
+    if target == "runner":
+        value = str(raw)
+        if len(value) > 4096 or "\x00" in value:
+            raise WorkspaceCatalogError("Remote workspace root is invalid.")
+        # Deliberately opaque: the Control Plane must never Path()/resolve() a
+        # root that belongs to a Runner namespace.
+        return value
     try:
         root = Path(raw).expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:

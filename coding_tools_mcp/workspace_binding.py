@@ -53,6 +53,10 @@ class WorkspaceBindingResolver:
     def resolve_stdio(self) -> WorkspaceBinding:
         catalog = self.catalog()
         entry = catalog.default()
+        if entry.target != "local" or not isinstance(entry.root, Path):
+            raise WorkspaceBindingError(
+                "Remote Workspace requires WorkspaceHost routing and cannot be bound to a local stdio Runtime."
+            )
         return WorkspaceBinding(entry.id, entry.root, "stdio")
 
     def resolve_http(
@@ -60,6 +64,26 @@ class WorkspaceBindingResolver:
         authorization_method: str,
         identity: OAuthIdentity | None,
     ) -> WorkspaceBinding:
+        entry = self.resolve_http_entry(authorization_method, identity)
+        if entry.target != "local" or not isinstance(entry.root, Path):
+            raise WorkspaceBindingError(
+                "Remote Workspace requires WorkspaceHost routing and cannot be bound to a local HTTP Runtime."
+            )
+        return WorkspaceBinding(
+            entry.id,
+            entry.root,
+            authorization_method,
+            client_id=identity.client_id if identity is not None else None,
+            grant_id=identity.grant_id if identity is not None else None,
+        )
+
+    def resolve_http_entry(
+        self,
+        authorization_method: str,
+        identity: OAuthIdentity | None,
+    ):
+        """Resolve authorization to a catalog entry without touching a remote root."""
+
         catalog = self.catalog()
         if authorization_method == "oauth":
             if identity is None:
@@ -70,16 +94,9 @@ class WorkspaceBindingResolver:
                 raise WorkspaceBindingError(
                     "OAuth identity has no enabled Workspace mapping."
                 ) from exc
-            return WorkspaceBinding(
-                entry.id,
-                entry.root,
-                "oauth",
-                client_id=identity.client_id,
-                grant_id=identity.grant_id,
-            )
+            return entry
         if identity is not None:
             raise WorkspaceBindingError(
                 "OAuth identity cannot be combined with a non-OAuth authorization method."
             )
-        entry = catalog.default()
-        return WorkspaceBinding(entry.id, entry.root, authorization_method)
+        return catalog.default()
