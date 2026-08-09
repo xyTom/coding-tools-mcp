@@ -2,12 +2,12 @@
 
 ## Status
 
-- Result: complete in canonical integration working tree
+- Result: complete in canonical integration commit `d8c1cc855f71303a525da288a6c8e895a76a10b8`
 - Branch: `integration/webcodex-runtime-platform`
 - Canonical worktree: `G:\LLM\coding-tools-mcp\.worktrees\webcodex-runtime-platform`
 - Baseline HEAD before integrated working-tree changes: `252c2f0b5508e6b6c23a330e3417943960249eca`
 - Source Runner workstream included commits through `dac186e`
-- Final integration changes are currently in the canonical working tree and have not been represented by a fabricated commit id.
+- Canonical implementation commit: `d8c1cc855f71303a525da288a6c8e895a76a10b8`.
 
 ## Session / Upstream State Changes
 

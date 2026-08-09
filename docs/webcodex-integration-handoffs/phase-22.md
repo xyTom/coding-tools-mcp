@@ -2,10 +2,10 @@
 
 ## Status
 
-- Result: release validation complete for the canonical integration working tree, subject to the platform notes below.
+- Result: release validation complete for canonical implementation commit `d8c1cc855f71303a525da288a6c8e895a76a10b8`, subject to the platform notes below.
 - Branch: `integration/webcodex-runtime-platform`
 - Baseline HEAD: `252c2f0b5508e6b6c23a330e3417943960249eca`
-- Integration changes remain uncommitted in the canonical worktree at this checkpoint; no fake implementation commit is recorded.
+- Implementation commit: `d8c1cc855f71303a525da288a6c8e895a76a10b8`.
 
 ## Functional Validation Matrix
 
