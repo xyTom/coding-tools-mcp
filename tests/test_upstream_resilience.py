@@ -237,7 +237,91 @@ class UpstreamResilienceTests(unittest.TestCase):
                 self.assertIsNone(client.session_id)
                 self.assertEqual(client.remote_delete_success_total, success_count)
                 self.assertEqual(client.remote_delete_failure_total, failure_count)
+                aggregate = client._resilience.aggregate_snapshot(client._resilience_key)
+                self.assertEqual(aggregate.remote_delete_success_total, success_count)
+                self.assertEqual(aggregate.remote_delete_failure_total, failure_count)
                 self.assertEqual(client.transport_state, UpstreamClientState.CLOSED)
+
+    def test_shared_aggregate_tracks_clients_sessions_and_state_after_client_close(self) -> None:
+        clock = FakeClock()
+        shared = coordinator(clock)
+        first = ScriptedHttpClient(config(), shared)
+        second = ScriptedHttpClient(config(), shared)
+        first.initialize()
+        second.initialize()
+        first._set_session_id("session-a")
+        second._set_session_id("session-b")
+
+        aggregate = shared.aggregate_snapshot(first._resilience_key)
+        self.assertEqual(aggregate.live_client_count, 2)
+        self.assertEqual(aggregate.active_client_sessions, 2)
+        self.assertEqual(dict(aggregate.transport_state_counts)[UpstreamClientState.READY.value], 2)
+        self.assertEqual(aggregate.aggregate_state, UpstreamClientState.READY.value)
+
+        with patch(
+            "coding_tools_mcp.upstream.urllib.request.urlopen",
+            side_effect=urllib.error.HTTPError("http://127.0.0.1/mcp", 404, "gone", {}, None),
+        ):
+            first.close()
+        aggregate = shared.aggregate_snapshot(first._resilience_key)
+        self.assertEqual(aggregate.live_client_count, 1)
+        self.assertEqual(aggregate.active_client_sessions, 1)
+        self.assertEqual(dict(aggregate.transport_state_counts)[UpstreamClientState.READY.value], 1)
+        self.assertEqual(aggregate.remote_delete_success_total, 1)
+
+        with patch(
+            "coding_tools_mcp.upstream.urllib.request.urlopen",
+            side_effect=urllib.error.HTTPError("http://127.0.0.1/mcp", 502, "bad gateway", {}, None),
+        ):
+            second.close()
+        aggregate = shared.aggregate_snapshot(first._resilience_key)
+        self.assertEqual(aggregate.live_client_count, 0)
+        self.assertEqual(aggregate.active_client_sessions, 0)
+        self.assertEqual(aggregate.remote_delete_success_total, 1)
+        self.assertEqual(aggregate.remote_delete_failure_total, 1)
+        self.assertEqual(aggregate.aggregate_state, UpstreamClientState.CLOSED.value)
+
+    def test_shared_backoff_remains_visible_without_live_clients(self) -> None:
+        clock = FakeClock()
+        shared = coordinator(clock)
+        client = ScriptedHttpClient(config(), shared)
+        client.initialize()
+        client.call_errors.append(
+            UpstreamError(
+                "UPSTREAM_HTTP_ERROR",
+                "synthetic 502",
+                category="upstream",
+                retryable=True,
+                details={"status": 502},
+            )
+        )
+        with self.assertRaises(UpstreamError):
+            client.call_tool_raw("read", {})
+        client.close()
+
+        aggregate = shared.aggregate_snapshot(client._resilience_key)
+        self.assertEqual(aggregate.live_client_count, 0)
+        self.assertEqual(aggregate.aggregate_state, UpstreamClientState.BACKING_OFF.value)
+        self.assertEqual(aggregate.consecutive_failures, 1)
+
+    def test_shared_aggregate_state_priority_is_stable(self) -> None:
+        shared = coordinator(FakeClock())
+        key = "remote|http://127.0.0.1/mcp"
+        states = (
+            UpstreamClientState.CLOSED,
+            UpstreamClientState.NEW,
+            UpstreamClientState.READY,
+            UpstreamClientState.INITIALIZING,
+            UpstreamClientState.SUSPECT,
+            UpstreamClientState.BACKING_OFF,
+        )
+        for state in states:
+            shared.register_client(key)
+            shared.transition_client(key, UpstreamClientState.NEW, state)
+        aggregate = shared.aggregate_snapshot(key)
+        self.assertEqual(aggregate.aggregate_state, UpstreamClientState.BACKING_OFF.value)
+        for state in states:
+            shared.unregister_client(key, state)
 
     def test_auth_failure_does_not_enter_automatic_reconnect_loop(self) -> None:
         clock = FakeClock()

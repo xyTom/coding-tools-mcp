@@ -712,6 +712,10 @@ class BaseUpstreamClient:
             return request_id
 
 
+def _resilience_key_for_config(config: UpstreamServerConfig) -> str:
+    return f"{config.alias}|{safe_target(config) or 'streamable_http'}"
+
+
 def _rpc_result(response: Any, request_id: int, method: str) -> dict[str, Any]:
     if not isinstance(response, dict):
         raise UpstreamError(
@@ -813,31 +817,35 @@ class HttpUpstreamClient(BaseUpstreamClient):
         self.remote_delete_success_total = 0
         self.remote_delete_failure_total = 0
         self._resilience = resilience_coordinator or DEFAULT_UPSTREAM_RESILIENCE_COORDINATOR
-        self._resilience_key = f"{config.alias}|{safe_target(config) or 'streamable_http'}"
+        self._resilience_key = _resilience_key_for_config(config)
         self._state_condition = threading.Condition(threading.Lock())
         self._transport_state = UpstreamClientState.NEW
         self._last_state_error: UpstreamError | None = None
+        self._resilience_registered = True
+        self._resilience.register_client(self._resilience_key)
 
     @property
     def transport_state(self) -> UpstreamClientState:
         with self._state_condition:
             return self._transport_state
 
-    def resilience_payload(self) -> dict[str, Any]:
-        shared = self._resilience.snapshot(self._resilience_key)
+    def _set_transport_state_locked(self, state: UpstreamClientState) -> None:
+        previous = self._transport_state
+        self._transport_state = state
+        self._resilience.transition_client(self._resilience_key, previous, state)
+
+    def _set_session_id(self, session_id: str | None) -> None:
         with self._session_lock:
-            has_session = self.session_id is not None
-        return {
-            "state": self.transport_state.value,
-            "active_client_sessions": 1 if has_session else 0,
-            "initializing_count": shared.initializing_count,
-            "consecutive_failures": shared.consecutive_failures,
-            "next_retry_in_ms": shared.next_retry_in_ms,
-            "last_error_code": shared.last_error_code,
-            "remote_delete_success_total": self.remote_delete_success_total,
-            "remote_delete_failure_total": self.remote_delete_failure_total,
-            "circuit_open_total": shared.circuit_open_total,
-        }
+            if session_id is not None and self.closed:
+                return
+            had_session = self.session_id is not None
+            self.session_id = session_id
+            has_session = session_id is not None
+        if had_session != has_session:
+            self._resilience.update_client_session(self._resilience_key, active=has_session)
+
+    def resilience_payload(self) -> dict[str, Any]:
+        return self._resilience.aggregate_payload(self._resilience_key)
 
     def initialize(self) -> None:
         self._acquire_call_lease()
@@ -850,7 +858,7 @@ class HttpUpstreamClient(BaseUpstreamClient):
         while True:
             with self._state_condition:
                 if self.closed:
-                    self._transport_state = UpstreamClientState.CLOSED
+                    self._set_transport_state_locked(UpstreamClientState.CLOSED)
                     raise UpstreamError(
                         "UPSTREAM_NOT_AVAILABLE",
                         "Upstream MCP client is closed.",
@@ -864,7 +872,7 @@ class HttpUpstreamClient(BaseUpstreamClient):
                 if self._transport_state == UpstreamClientState.SUSPECT and self._last_state_error is not None:
                     raise self._last_state_error
                 probe = self._transport_state == UpstreamClientState.BACKING_OFF
-                self._transport_state = UpstreamClientState.INITIALIZING
+                self._set_transport_state_locked(UpstreamClientState.INITIALIZING)
                 break
         try:
             with self._resilience.initialization_slot(self._resilience_key, probe=probe):
@@ -877,7 +885,7 @@ class HttpUpstreamClient(BaseUpstreamClient):
                 details={"retry_after_ms": exc.retry_after_ms},
             )
             with self._state_condition:
-                self._transport_state = UpstreamClientState.BACKING_OFF
+                self._set_transport_state_locked(UpstreamClientState.BACKING_OFF)
                 self._last_state_error = error
                 self._state_condition.notify_all()
             raise error from exc
@@ -895,7 +903,7 @@ class HttpUpstreamClient(BaseUpstreamClient):
         else:
             if self.closed:
                 with self._state_condition:
-                    self._transport_state = UpstreamClientState.CLOSED
+                    self._set_transport_state_locked(UpstreamClientState.CLOSED)
                     self._state_condition.notify_all()
                 raise UpstreamError(
                     "UPSTREAM_NOT_AVAILABLE",
@@ -904,7 +912,7 @@ class HttpUpstreamClient(BaseUpstreamClient):
                 )
             self._resilience.record_success(self._resilience_key)
             with self._state_condition:
-                self._transport_state = UpstreamClientState.READY
+                self._set_transport_state_locked(UpstreamClientState.READY)
                 self._last_state_error = None
                 self._state_condition.notify_all()
 
@@ -929,12 +937,10 @@ class HttpUpstreamClient(BaseUpstreamClient):
             or (isinstance(status, int) and 500 <= status < 600)
         )
         if stale_session:
-            with self._session_lock:
-                self.session_id = None
+            self._set_session_id(None)
             next_state = UpstreamClientState.NEW
         elif ambiguous_transport:
-            with self._session_lock:
-                self.session_id = None
+            self._set_session_id(None)
             self._resilience.record_failure(self._resilience_key, exc.code)
             next_state = UpstreamClientState.BACKING_OFF
         elif auth_failure or exc.category == "protocol":
@@ -946,9 +952,9 @@ class HttpUpstreamClient(BaseUpstreamClient):
             next_state = UpstreamClientState.SUSPECT
         with self._state_condition:
             if self.closed:
-                self._transport_state = UpstreamClientState.CLOSED
+                self._set_transport_state_locked(UpstreamClientState.CLOSED)
             else:
-                self._transport_state = next_state
+                self._set_transport_state_locked(next_state)
             self._last_state_error = exc
             self._state_condition.notify_all()
 
@@ -1002,9 +1008,7 @@ class HttpUpstreamClient(BaseUpstreamClient):
             with urllib.request.urlopen(request, timeout=timeout_s) as response:
                 session_id = response.headers.get("Mcp-Session-Id")
                 if session_id:
-                    with self._session_lock:
-                        if not self.closed:
-                            self.session_id = session_id
+                    self._set_session_id(session_id)
                 if not expect_response or response.status in {202, 204}:
                     return None
                 raw = _read_bounded_response(response)
@@ -1071,6 +1075,8 @@ class HttpUpstreamClient(BaseUpstreamClient):
         with self._session_lock:
             session_id = self.session_id
             self.session_id = None
+        if session_id:
+            self._resilience.update_client_session(self._resilience_key, active=False)
         if not session_id:
             return
         headers = {
@@ -1091,13 +1097,17 @@ class HttpUpstreamClient(BaseUpstreamClient):
             with urllib.request.urlopen(request, timeout=timeout_s) as response:
                 if response.status in {200, 202, 204}:
                     self.remote_delete_success_total += 1
+                    self._resilience.record_remote_delete(self._resilience_key, success=True)
                 else:
                     self.remote_delete_failure_total += 1
+                    self._resilience.record_remote_delete(self._resilience_key, success=False)
         except urllib.error.HTTPError as exc:
             if exc.code in {404, 410}:
                 self.remote_delete_success_total += 1
+                self._resilience.record_remote_delete(self._resilience_key, success=True)
             else:
                 self.remote_delete_failure_total += 1
+                self._resilience.record_remote_delete(self._resilience_key, success=False)
         except (
             TimeoutError,
             socket.timeout,
@@ -1109,12 +1119,18 @@ class HttpUpstreamClient(BaseUpstreamClient):
             OSError,
         ):
             self.remote_delete_failure_total += 1
+            self._resilience.record_remote_delete(self._resilience_key, success=False)
 
     def close(self) -> None:
         super().close()
         with self._state_condition:
-            self._transport_state = UpstreamClientState.CLOSED
+            should_unregister = self._resilience_registered
+            if should_unregister:
+                self._set_transport_state_locked(UpstreamClientState.CLOSED)
+                self._resilience_registered = False
             self._state_condition.notify_all()
+        if should_unregister:
+            self._resilience.unregister_client(self._resilience_key, UpstreamClientState.CLOSED)
 
 
 class StdioUpstreamClient(BaseUpstreamClient):
@@ -1405,6 +1421,7 @@ class UpstreamManager:
         self._lifecycle_condition = threading.Condition(threading.Lock())
         self._active_call_leases = 0
         self._closed = False
+        self._resilience = DEFAULT_UPSTREAM_RESILIENCE_COORDINATOR
         try:
             if catalog_template is None:
                 self._initialize_configs(frozenset(reserved_names))
@@ -1638,6 +1655,12 @@ class UpstreamManager:
             client = self._clients.get(alias)
             if isinstance(client, HttpUpstreamClient):
                 payload.update(client.resilience_payload())
+            elif self._config_by_alias[alias].transport == "streamable_http":
+                payload.update(
+                    self._resilience.aggregate_payload(
+                        _resilience_key_for_config(self._config_by_alias[alias])
+                    )
+                )
             elif self.statuses[alias].enabled:
                 payload.update(
                     {

@@ -55,6 +55,21 @@ class ResilienceSnapshot:
     circuit_open_total: int
 
 
+@dataclass(frozen=True)
+class ResilienceAggregateSnapshot:
+    initializing_count: int
+    consecutive_failures: int
+    next_retry_in_ms: int
+    last_error_code: str | None
+    circuit_open_total: int
+    live_client_count: int
+    active_client_sessions: int
+    transport_state_counts: tuple[tuple[str, int], ...]
+    aggregate_state: str
+    remote_delete_success_total: int
+    remote_delete_failure_total: int
+
+
 class _TargetState:
     def __init__(self, max_initializations: int) -> None:
         self.lock = threading.Lock()
@@ -65,10 +80,16 @@ class _TargetState:
         self.last_error_code: str | None = None
         self.circuit_open_total = 0
         self.probe_in_flight = False
+        self.live_client_count = 0
+        self.active_client_sessions = 0
+        self.transport_state_counts = {state.value: 0 for state in UpstreamClientState}
+        self.last_transport_state = UpstreamClientState.NEW.value
+        self.remote_delete_success_total = 0
+        self.remote_delete_failure_total = 0
 
 
 class UpstreamResilienceCoordinator:
-    """Share only initialization throttling/backoff, never live client state."""
+    """Share redacted resilience facts, never live clients or identity state."""
 
     def __init__(
         self,
@@ -175,6 +196,107 @@ class UpstreamResilienceCoordinator:
                 last_error_code=state.last_error_code,
                 circuit_open_total=state.circuit_open_total,
             )
+
+    def register_client(self, key: str) -> None:
+        state = self._target(key)
+        with state.lock:
+            state.live_client_count += 1
+            state.transport_state_counts[UpstreamClientState.NEW.value] += 1
+            state.last_transport_state = UpstreamClientState.NEW.value
+
+    def unregister_client(self, key: str, transport_state: UpstreamClientState) -> None:
+        state = self._target(key)
+        with state.lock:
+            state.live_client_count = max(0, state.live_client_count - 1)
+            state.transport_state_counts[transport_state.value] = max(
+                0,
+                state.transport_state_counts[transport_state.value] - 1,
+            )
+
+    def transition_client(
+        self,
+        key: str,
+        previous: UpstreamClientState,
+        current: UpstreamClientState,
+    ) -> None:
+        if previous == current:
+            return
+        state = self._target(key)
+        with state.lock:
+            state.transport_state_counts[previous.value] = max(
+                0,
+                state.transport_state_counts[previous.value] - 1,
+            )
+            state.transport_state_counts[current.value] += 1
+            state.last_transport_state = current.value
+
+    def update_client_session(self, key: str, *, active: bool) -> None:
+        state = self._target(key)
+        with state.lock:
+            if active:
+                state.active_client_sessions += 1
+            else:
+                state.active_client_sessions = max(0, state.active_client_sessions - 1)
+
+    def record_remote_delete(self, key: str, *, success: bool) -> None:
+        state = self._target(key)
+        with state.lock:
+            if success:
+                state.remote_delete_success_total += 1
+            else:
+                state.remote_delete_failure_total += 1
+
+    def aggregate_snapshot(self, key: str) -> ResilienceAggregateSnapshot:
+        state = self._target(key)
+        now = self._clock()
+        with state.lock:
+            if state.consecutive_failures > 0:
+                aggregate_state = UpstreamClientState.BACKING_OFF.value
+            else:
+                aggregate_state = state.last_transport_state
+                for candidate in (
+                    UpstreamClientState.BACKING_OFF,
+                    UpstreamClientState.SUSPECT,
+                    UpstreamClientState.INITIALIZING,
+                    UpstreamClientState.READY,
+                    UpstreamClientState.NEW,
+                    UpstreamClientState.CLOSED,
+                ):
+                    if state.transport_state_counts[candidate.value] > 0:
+                        aggregate_state = candidate.value
+                        break
+            return ResilienceAggregateSnapshot(
+                initializing_count=state.initializing_count,
+                consecutive_failures=state.consecutive_failures,
+                next_retry_in_ms=max(0, int((state.next_retry_at - now) * 1000)),
+                last_error_code=state.last_error_code,
+                circuit_open_total=state.circuit_open_total,
+                live_client_count=state.live_client_count,
+                active_client_sessions=state.active_client_sessions,
+                transport_state_counts=tuple(
+                    (candidate.value, state.transport_state_counts[candidate.value])
+                    for candidate in UpstreamClientState
+                ),
+                aggregate_state=aggregate_state,
+                remote_delete_success_total=state.remote_delete_success_total,
+                remote_delete_failure_total=state.remote_delete_failure_total,
+            )
+
+    def aggregate_payload(self, key: str) -> dict[str, object]:
+        snapshot = self.aggregate_snapshot(key)
+        return {
+            "state": snapshot.aggregate_state,
+            "live_client_count": snapshot.live_client_count,
+            "active_client_sessions": snapshot.active_client_sessions,
+            "transport_state_counts": dict(snapshot.transport_state_counts),
+            "initializing_count": snapshot.initializing_count,
+            "consecutive_failures": snapshot.consecutive_failures,
+            "next_retry_in_ms": snapshot.next_retry_in_ms,
+            "last_error_code": snapshot.last_error_code,
+            "remote_delete_success_total": snapshot.remote_delete_success_total,
+            "remote_delete_failure_total": snapshot.remote_delete_failure_total,
+            "circuit_open_total": snapshot.circuit_open_total,
+        }
 
     def sleep_until_retry(self, key: str) -> None:
         """Optional blocking helper; normal request paths use retryable errors instead."""
