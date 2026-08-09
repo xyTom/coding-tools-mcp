@@ -73,6 +73,8 @@ class ChatPersistenceTests(unittest.TestCase):
             wal_connection = sqlite3.connect(database)
             wal_connection.execute("PRAGMA journal_mode=WAL")
             wal_connection.commit()
+            wal_connection.execute("BEGIN")
+            wal_connection.execute("SELECT COUNT(*) FROM chat_conversations").fetchone()
             transcript.record_messages("a", "wal-conversation", [])
             self.assertTrue((Path(f"{database}-wal")).exists())
             self.assertTrue((Path(f"{database}-shm")).exists())
