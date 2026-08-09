@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 from pathlib import Path
+from unittest.mock import patch
 
 from coding_tools_mcp.agent_backends.base import (
     AgentBackendEvent,
@@ -17,6 +18,7 @@ from coding_tools_mcp.agent_backends.base import (
 )
 from coding_tools_mcp.agent_session_store import AgentSessionStore
 from coding_tools_mcp.agent_sessions import AgentSessionService, AgentSessionServiceError
+from coding_tools_mcp.oauth import OAuthConfig, OAuthIdentity
 from coding_tools_mcp.operator_api import OperatorAPIError, OperatorAPIService, OperatorPrincipal
 from coding_tools_mcp.server import MCPHandler, Runtime, RuntimeHTTPServer, configure_allowed_origins
 from coding_tools_mcp.validation import ValidationResult
@@ -393,15 +395,25 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
     def _server(
         self,
         *,
-        auth_token: str = "ordinary-mcp-token",
+        auth_token: str | None = "ordinary-mcp-token",
         admin_token: str = "dedicated-admin-token",
+        oauth_config: OAuthConfig | None = None,
     ) -> tuple[RuntimeHTTPServer, threading.Thread]:
-        runtime = Runtime(self.workspace, auth_token=auth_token, transport="http")
+        runtime = Runtime(
+            self.workspace,
+            auth_token=auth_token,
+            oauth_config=oauth_config,
+            transport="http",
+        )
         server = RuntimeHTTPServer(
             ("127.0.0.1", 0),
             MCPHandler,
             runtime,
-            lambda _context: Runtime(self.workspace, transport="http"),
+            lambda _context: Runtime(
+                self.workspace,
+                oauth_config=oauth_config,
+                transport="http",
+            ),
             admin_token=admin_token,
             operator_service=self.service,
         )
@@ -604,6 +616,54 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
             shared_server.shutdown()
             shared_server.server_close()
             shared_thread.join(timeout=5)
+
+    def test_oauth_identity_cannot_use_shared_admin_bearer_and_is_workspace_scoped(self) -> None:
+        oauth_config = OAuthConfig(
+            password="synthetic-oauth-password",
+            server_url=None,
+            token_secret=b"synthetic-oauth-secret",
+        )
+        server, thread = self._server(
+            auth_token=None,
+            admin_token="oauth-admin-token",
+            oauth_config=oauth_config,
+        )
+        identity = OAuthIdentity(
+            client_id="oauth-client",
+            grant_id="grant-1",
+            workspace_id="ws-other",
+            jti="jti-1",
+        )
+        try:
+            with patch(
+                "coding_tools_mcp.server.authenticate_access_token",
+                return_value=identity,
+            ):
+                with self.assertRaises(urllib.error.HTTPError) as collision:
+                    urllib.request.urlopen(
+                        self._request(
+                            server,
+                            "/api/app/workspaces",
+                            token="oauth-admin-token",
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(collision.exception.code, 401)
+
+                with urllib.request.urlopen(
+                    self._request(
+                        server,
+                        "/api/app/workspaces",
+                        token="ordinary-oauth-token",
+                    ),
+                    timeout=5,
+                ) as response:
+                    payload = json.loads(response.read())
+            self.assertEqual([item["id"] for item in payload["workspaces"]], ["ws-other"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == "__main__":

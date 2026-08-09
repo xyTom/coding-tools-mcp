@@ -5413,6 +5413,16 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         service = self._operator_service()
         if not isinstance(context, AuthorizationContext) or service is None:
             return None
+        authorization = self.headers.get("Authorization", "").strip()
+        bearer = authorization[len("Bearer ") :].strip() if authorization.startswith("Bearer ") else ""
+        admin_token = getattr(self.server, "admin_token", None)  # type: ignore[attr-defined]
+        if (
+            isinstance(admin_token, str)
+            and admin_token
+            and bearer
+            and secrets.compare_digest(bearer, admin_token)
+        ):
+            return None
         if context.method == "oauth" and context.oauth_identity is not None:
             identity = context.oauth_identity
             return OperatorPrincipal(
@@ -5420,15 +5430,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 (identity.workspace_id,),
             )
         if context.method == "bearer":
-            bearer = self.headers.get("Authorization", "").strip().removeprefix("Bearer ").strip()
-            admin_token = getattr(self.server, "admin_token", None)  # type: ignore[attr-defined]
-            if (
-                isinstance(admin_token, str)
-                and admin_token
-                and bearer
-                and secrets.compare_digest(bearer, admin_token)
-            ):
-                return None
             return OperatorPrincipal(context.principal_id() or "", (service.workspace_catalog.default_id,))
         if context.method == "noauth":
             return OperatorPrincipal(context.principal_id() or "", (service.workspace_catalog.default_id,))
