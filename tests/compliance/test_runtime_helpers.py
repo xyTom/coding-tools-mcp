@@ -901,6 +901,25 @@ class RuntimeHelperTests(unittest.TestCase):
         self.assertIn(str(explicit_root.resolve()), roots)
         self.assertNotIn(str(private_path_dir.resolve()), roots)
 
+    def test_guard_allow_roots_skips_path_entries_that_cannot_be_statted(self) -> None:
+        with TemporaryDirectory() as tmp:
+            inaccessible = (Path(tmp) / "inaccessible").resolve()
+            inaccessible.mkdir()
+            original_is_dir = Path.is_dir
+
+            def is_dir(path: Path) -> bool:
+                if path == inaccessible:
+                    raise PermissionError("synthetic inaccessible PATH entry")
+                return original_is_dir(path)
+
+            with (
+                patch.dict(server_module.os.environ, {"PATH": str(inaccessible)}, clear=True),
+                patch.object(Path, "is_dir", is_dir),
+            ):
+                roots = set(guard_allow_roots())
+
+        self.assertNotIn(str(inaccessible), roots)
+
     def test_safe_exec_git_init_and_local_config_reads_system_git_config_roots(self) -> None:
         if shutil.which("git") is None:
             self.skipTest("git is not available")

@@ -1944,4 +1944,3 @@ G:\LLM\coding-tools-mcp\.tmp\webcodex-runtime-platform\
 - **必须保护的稳定资产**：现有 MCP tool contract、Broker、安全边界、OAuth、Workspace isolation、atomic patch、测试体系。
 
 如果后续某 Agent 的实现方向开始要求“为一个新功能大面积改变已有 MCP 工具语义”，应优先暂停并重新检查是否违反了本计划的 Control Plane / Data Plane / Adapter 边界。
-

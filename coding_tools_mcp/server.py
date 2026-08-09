@@ -4566,9 +4566,10 @@ def _guard_allow_roots_cached(java_home: str, path_env: str, extra_roots: str) -
             continue
         try:
             resolved = Path(item).resolve()
+            is_directory = resolved.is_dir()
         except OSError:
             continue
-        if resolved.is_dir() and is_default_system_path_root(resolved):
+        if is_directory and is_default_system_path_root(resolved):
             roots.add(str(resolved))
     for item in extra_roots.split(os.pathsep):
         if not item:
