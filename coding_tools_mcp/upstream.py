@@ -2518,9 +2518,13 @@ def _decode_http_rpc_text(
 def safe_target(config: UpstreamServerConfig) -> str | None:
     if config.transport == "stdio":
         command = config.command or ""
-        args = " ".join(config.args[:3])
-        suffix = " ..." if len(config.args) > 3 else ""
-        return f"{command} {args}{suffix}".strip()
+        if not command.strip():
+            return None
+        return (
+            f"{command.strip()} ({len(config.args)} args)"
+            if config.args
+            else command.strip()
+        )
     if not config.url:
         return None
     parsed = urllib.parse.urlsplit(config.url)

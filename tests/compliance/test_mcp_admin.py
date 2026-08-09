@@ -34,7 +34,11 @@ from coding_tools_mcp.server import (
 )
 from coding_tools_mcp.settings_store import ServerSettingsStore
 from coding_tools_mcp.transcript import TranscriptStore
-from coding_tools_mcp.upstream import UpstreamConfigSnapshot, UpstreamServerConfig
+from coding_tools_mcp.upstream import (
+    UpstreamConfigSnapshot,
+    UpstreamManager,
+    UpstreamServerConfig,
+)
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 
 
@@ -157,6 +161,27 @@ class AdminServiceTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, serialized)
+
+    def test_admin_gateway_status_redacts_stdio_argv_values_and_flags(self) -> None:
+        config = UpstreamServerConfig(
+            alias="remote",
+            transport="stdio",
+            enabled=False,
+            command="uvx",
+            args=("--token", "SUPER-SECRET", "--verbose"),
+        )
+        manager = UpstreamManager((config,))
+        try:
+            self.service.active_gateway_status = manager.status_payload
+            payload = self.service.gateway_payload()
+            serialized = json.dumps(payload, sort_keys=True)
+            target = payload["active_status"]["servers"][0]["target"]
+            self.assertEqual(target, "uvx (3 args)")
+            self.assertNotIn("--token", serialized)
+            self.assertNotIn("SUPER-SECRET", serialized)
+            self.assertNotIn("--verbose", serialized)
+        finally:
+            manager.close()
 
     def test_settings_separate_active_persisted_pending_and_reject_stale_revision(self) -> None:
         payload = self.service.settings_payload()

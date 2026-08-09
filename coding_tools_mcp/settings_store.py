@@ -47,6 +47,14 @@ def default_settings_dir(app_name: str = "coding-tools-mcp") -> Path:
     return base / app_name
 
 
+def ensure_private_directory(path: str | Path) -> Path:
+    directory = Path(path).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt" and directory != Path("."):
+        directory.chmod(0o700)
+    return directory
+
+
 def sanitize_settings(settings: dict[str, Any]) -> dict[str, Any]:
     result = dict(settings)
     for key in SECRET_SETTING_KEYS:
@@ -104,7 +112,7 @@ class ServerSettingsStore:
                 + ", ".join(plaintext_keys)
             )
         payload["schema_version"] = SETTINGS_SCHEMA_VERSION
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(self.path.parent)
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{self.path.name}.",
             suffix=".tmp",

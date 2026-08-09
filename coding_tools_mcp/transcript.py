@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -11,6 +12,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
+
+from .settings_store import ensure_private_directory
 
 
 class TranscriptStoreError(RuntimeError):
@@ -117,9 +120,26 @@ class TranscriptStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path).expanduser()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._memory_database = str(self.path) == ":memory:"
+        if not self._memory_database:
+            ensure_private_directory(self.path.parent)
         self._write_lock = threading.RLock()
         self._migrate()
+        self._tighten_sqlite_files()
+
+    def _tighten_sqlite_files(self) -> None:
+        if self._memory_database or os.name == "nt":
+            return
+        for path in (
+            self.path,
+            Path(f"{self.path}-journal"),
+            Path(f"{self.path}-wal"),
+            Path(f"{self.path}-shm"),
+        ):
+            try:
+                path.chmod(0o600)
+            except FileNotFoundError:
+                continue
 
     @contextmanager
     def _connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
@@ -138,6 +158,7 @@ class TranscriptStore:
                 conn.rollback()
             raise
         finally:
+            self._tighten_sqlite_files()
             conn.close()
 
     def _migrate(self) -> None:

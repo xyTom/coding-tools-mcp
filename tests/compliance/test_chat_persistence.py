@@ -5,18 +5,21 @@ import inspect
 import io
 import json
 import os
+import stat
 import sqlite3
 import sys
 import unittest
 from contextlib import closing, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from coding_tools_mcp import chat_cli
 from coding_tools_mcp.admin import AdminNotFoundError, AdminService, AdminServiceError, gateway_file_revision
 from coding_tools_mcp.codex_sessions import CodexSessionError, CodexSessionScanner, ScanPolicy
 from coding_tools_mcp.secret_vault import SecretVault
+from coding_tools_mcp.server import load_workspace_startup
 from coding_tools_mcp.settings_store import ServerSettingsStore
 from coding_tools_mcp.transcript import TranscriptStore, WorkspaceScope
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
@@ -37,6 +40,64 @@ class ChatPersistenceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    @unittest.skipUnless(os.name != "nt", "POSIX permission modes are not portable to Windows")
+    def test_startup_settings_transcript_and_sqlite_sidecars_are_private(self) -> None:
+        previous_umask = os.umask(0o022)
+        wal_connection: sqlite3.Connection | None = None
+        journal_connection: sqlite3.Connection | None = None
+        try:
+            config_dir = self.root / "config"
+            config_dir.mkdir(mode=0o755)
+            settings_path = config_dir / "server-settings.json"
+            ServerSettingsStore(settings_path).write({"workspace": str(self.a)})
+            self.assertEqual(stat.S_IMODE(config_dir.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(settings_path.stat().st_mode), 0o600)
+
+            startup_dir = self.root / "startup-config"
+            with patch.dict(
+                os.environ,
+                {"CODING_TOOLS_MCP_CONFIG_DIR": str(startup_dir)},
+                clear=False,
+            ):
+                load_workspace_startup(SimpleNamespace(workspace=str(self.a)))
+            self.assertEqual(stat.S_IMODE(startup_dir.stat().st_mode), 0o700)
+
+            database = self.root / "transcripts.sqlite3"
+            database.parent.chmod(0o755)
+            transcript = TranscriptStore(database)
+            self.assertEqual(stat.S_IMODE(database.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(database.stat().st_mode), 0o600)
+            transcript.record_messages("a", "wal-conversation", [])
+
+            wal_connection = sqlite3.connect(database)
+            wal_connection.execute("PRAGMA journal_mode=WAL")
+            wal_connection.commit()
+            transcript.record_messages("a", "wal-conversation", [])
+            self.assertTrue((Path(f"{database}-wal")).exists())
+            self.assertTrue((Path(f"{database}-shm")).exists())
+            self.assertEqual(stat.S_IMODE(Path(f"{database}-wal").stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(Path(f"{database}-shm").stat().st_mode), 0o600)
+            wal_connection.close()
+            wal_connection = None
+
+            journal_connection = sqlite3.connect(database)
+            journal_connection.execute("PRAGMA journal_mode=DELETE")
+            journal_connection.execute("BEGIN IMMEDIATE")
+            journal_connection.execute(
+                "UPDATE chat_conversations SET updated_at=updated_at + 1 "
+                "WHERE workspace_id='a' AND conversation_id='wal-conversation'"
+            )
+            journal_path = Path(f"{database}-journal")
+            self.assertTrue(journal_path.exists())
+            self.assertEqual(stat.S_IMODE(journal_path.stat().st_mode), 0o600)
+        finally:
+            if journal_connection is not None:
+                journal_connection.rollback()
+                journal_connection.close()
+            if wal_connection is not None:
+                wal_connection.close()
+            os.umask(previous_umask)
 
     def test_workspace_identity_partitions_queries_cache_and_stable_deletes(self) -> None:
         service_a = self.store.scoped("a", self.a)

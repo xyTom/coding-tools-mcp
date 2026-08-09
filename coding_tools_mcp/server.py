@@ -101,6 +101,7 @@ from .settings_store import (
     ServerSettingsStore,
     SettingsStoreError,
     default_settings_dir,
+    ensure_private_directory,
 )
 from .patching import (
     AtomicPatchCommitter,
@@ -7071,7 +7072,7 @@ AGENT_SESSION_DB_FILENAME = "agent-sessions.sqlite3"
 def load_workspace_startup(
     args: argparse.Namespace,
 ) -> tuple[Path, dict[str, Any], WorkspaceCatalog]:
-    config_dir = default_settings_dir()
+    config_dir = ensure_private_directory(default_settings_dir())
     settings = ServerSettingsStore(config_dir / SERVER_SETTINGS_FILENAME).read()
     fallback_root = Path(
         args.workspace
