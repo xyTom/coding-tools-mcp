@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from coding_tools_mcp.runner.credentials import RunnerCredentialError, RunnerCredentialStore
+from coding_tools_mcp.runner.client import RunnerClientError, validate_runner_url
 from coding_tools_mcp.runner.jobs import (
     JobAccessError,
     JobInventoryItem,
@@ -83,6 +84,39 @@ async def wait_until(predicate: Any, *, attempts: int = 100) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("condition was not reached")
+
+
+class RunnerUrlValidationTests(unittest.TestCase):
+    def test_wss_runner_url_is_accepted_without_insecure_flag(self) -> None:
+        self.assertEqual(
+            validate_runner_url("wss://runner.example.test/runner/ws", allow_insecure_ws=False),
+            "wss://runner.example.test/runner/ws",
+        )
+
+    def test_ws_runner_url_requires_explicit_allow_insecure_flag(self) -> None:
+        with self.assertRaises(RunnerClientError):
+            validate_runner_url("ws://127.0.0.1:8080/runner/ws", allow_insecure_ws=False)
+
+    def test_loopback_ws_runner_urls_are_accepted_with_flag(self) -> None:
+        for url in (
+            "ws://127.0.0.1:8080/runner/ws",
+            "ws://localhost:8080/runner/ws",
+            "ws://[::1]:8080/runner/ws",
+        ):
+            self.assertEqual(validate_runner_url(url, allow_insecure_ws=True), url)
+
+    def test_non_loopback_ws_runner_url_fails_closed(self) -> None:
+        for url in (
+            "ws://runner.example.test/runner/ws",
+            "ws://10.0.0.5:8080/runner/ws",
+            "ws://192.168.1.10:8080/runner/ws",
+        ):
+            with self.assertRaisesRegex(RunnerClientError, "loopback"):
+                validate_runner_url(url, allow_insecure_ws=True)
+
+    def test_non_websocket_scheme_fails_closed(self) -> None:
+        with self.assertRaises(RunnerClientError):
+            validate_runner_url("http://127.0.0.1:8080/runner/ws", allow_insecure_ws=True)
 
 
 class RunnerProtocolTests(unittest.TestCase):

@@ -63,7 +63,14 @@ Admin-only endpoints:
 - `GET /admin/api/runners/{runner_id}/credential`: return only configured state and fingerprint.
 - `DELETE /admin/api/runners/{runner_id}/credential`: revoke.
 
-The Runner process should receive the credential through `CODING_TOOLS_MCP_RUNNER_CREDENTIAL` or a protected `--credential-file`; there is intentionally no plaintext credential command-line option. Production connections should use `wss://`. Insecure `ws://` is opt-in and restricted to loopback by the Runner CLI.
+The Runner process should receive the credential through `CODING_TOOLS_MCP_RUNNER_CREDENTIAL` or a protected `--credential-file`; there is intentionally no plaintext credential command-line option.
+
+Production Runner connections must use authenticated `wss://`.
+
+- Insecure `ws://` is allowed only for local development, tests, and the loopback hop in front of a tunnel.
+- Loopback `ws://` requires the explicit `--allow-insecure-ws` flag.
+- Allowed hosts are `127.0.0.1`, `::1`, and `localhost`; non-loopback `ws://` fails closed even with the flag.
+- The exception is not a public deployment recommendation and does not weaken Runner credential requirements.
 
 If a credential is revoked, new Runner enrollment fails closed. Rotate the credential through Admin, update the Runner secret source, then reconnect.
 

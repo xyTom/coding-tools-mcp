@@ -35,6 +35,12 @@ paths.
    implementation of `AgentSessionBackend`, not the domain model itself.
 9. **Runner v1 transport is authenticated WebSocket over HTTPS.** QUIC is deferred.
    Runner credentials are distinct from MCP OAuth/bearer and Admin credentials.
+   Plain `ws://` is an explicit development exception, not a production
+   transport: it is accepted only with `--allow-insecure-ws` and only for
+   loopback hosts `127.0.0.1`, `::1`, and `localhost` (local development,
+   tests, and the loopback hop in front of a tunnel). Any non-loopback `ws://`
+   fails closed even with the flag. The exception is not a public deployment
+   recommendation and does not weaken Runner credential requirements.
 10. **Integration worktrees and controlled temp state remain inside the project.**
     Production runtime scratch may use the existing external OS temp policy; Agent
     development worktrees/reference clones do not.
