@@ -114,6 +114,7 @@ class HTTPSessionManager:
         self._creating_by_identity: dict[Hashable, int] = {}
         self._sessions_by_identity: dict[Hashable, int] = {}
         self._closed = False
+        self._shutdown_complete = False
         self._pending_closes = 0
         self._created_total = 0
         self._deleted_total = 0
@@ -340,11 +341,7 @@ class HTTPSessionManager:
         records: list[HTTPSessionRecord]
         with self._condition:
             if self._closed:
-                while (
-                    self._creating
-                    or any(record.active_request_leases for record in self._sessions.values())
-                    or self._pending_closes
-                ):
+                while not self._shutdown_complete:
                     self._condition.wait()
                 return
             self._closed = True
@@ -364,9 +361,14 @@ class HTTPSessionManager:
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc
-        with self._condition:
-            while self._pending_closes:
-                self._condition.wait()
+        try:
+            with self._condition:
+                while self._pending_closes:
+                    self._condition.wait()
+        finally:
+            with self._condition:
+                self._shutdown_complete = True
+                self._condition.notify_all()
         if first_error is not None:
             raise first_error
 

@@ -767,6 +767,84 @@ class RunnerMcpSessionHostConcurrencyTests(unittest.TestCase):
         self.assertEqual(third.runtime.http_session_id, "remote-ok")
         self.assertEqual(first.runtime.close_count, 0)
 
+    def test_pending_remote_id_cannot_be_reused(self) -> None:
+        close_entered = threading.Event()
+        close_release = threading.Event()
+        self.addCleanup(close_release.set)
+        created: list[FakeRuntime] = []
+
+        def factory(_workspace: str, _auth: str) -> FakeRuntime:
+            runtime = _GatedRuntime(
+                "remote-pending-reuse",
+                close_entered=close_entered if not created else None,
+                close_release=close_release if not created else None,
+            )
+            created.append(runtime)
+            return runtime
+
+        host = RunnerMcpSessionHost(factory, max_sessions=2)
+        self.addCleanup(host.shutdown)
+        digest = self._digest()
+        record = host.create(
+            control_session_id="control-pending-old",
+            workspace_id="ws-a",
+            authorization_digest=digest,
+        )
+        close_thread = threading.Thread(
+            target=lambda: host.close_session(
+                control_session_id=record.control_session_id,
+                remote_session_id=record.remote_session_id,
+                workspace_id=record.workspace_id,
+                authorization_digest=digest,
+            )
+        )
+        close_thread.start()
+        self.assertTrue(close_entered.wait(timeout=2))
+        with self.assertRaises(RemoteMcpRouteError) as caught:
+            host.create(
+                control_session_id="control-pending-new",
+                workspace_id="ws-a",
+                authorization_digest=digest,
+            )
+        self.assertEqual(caught.exception.code, "RUNNER_ROUTE_CONFLICT")
+        close_release.set()
+        close_thread.join(timeout=2)
+        self.assertFalse(close_thread.is_alive())
+        self.assertEqual(len(created), 2)
+        self.assertEqual(created[1].close_count, 1)
+
+    def test_tombstone_remote_id_cannot_be_reused(self) -> None:
+        created: list[FakeRuntime] = []
+
+        def factory(_workspace: str, _auth: str) -> FakeRuntime:
+            runtime = FakeRuntime("remote-tombstone-reuse")
+            created.append(runtime)
+            return runtime
+
+        host = RunnerMcpSessionHost(factory, max_sessions=2)
+        self.addCleanup(host.shutdown)
+        digest = self._digest()
+        record = host.create(
+            control_session_id="control-tombstone-old",
+            workspace_id="ws-a",
+            authorization_digest=digest,
+        )
+        host.close_session(
+            control_session_id=record.control_session_id,
+            remote_session_id=record.remote_session_id,
+            workspace_id=record.workspace_id,
+            authorization_digest=digest,
+        )
+        with self.assertRaises(RemoteMcpRouteError) as caught:
+            host.create(
+                control_session_id="control-tombstone-new",
+                workspace_id="ws-a",
+                authorization_digest=digest,
+            )
+        self.assertEqual(caught.exception.code, "RUNNER_ROUTE_CONFLICT")
+        self.assertEqual(len(created), 2)
+        self.assertEqual(created[1].close_count, 1)
+
     def test_close_waits_for_active_call_and_never_closes_early(self) -> None:
         call_entered = threading.Event()
         call_release = threading.Event()

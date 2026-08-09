@@ -35,6 +35,45 @@ class _BlockingCloseRuntime(_Runtime):
         super().close()
 
 
+class _OwnerPauseCondition(threading.Condition):
+    def __init__(
+        self,
+        *,
+        pause_enabled: threading.Event,
+        owner_waiting: threading.Event,
+        owner_paused: threading.Event,
+        owner_release: threading.Event,
+        secondary_waiting: threading.Event,
+        secondary_resumed: threading.Event,
+        secondary_release: threading.Event,
+    ) -> None:
+        super().__init__()
+        self._pause_enabled = pause_enabled
+        self._owner_waiting = owner_waiting
+        self._owner_paused = owner_paused
+        self._owner_release = owner_release
+        self._secondary_waiting = secondary_waiting
+        self._secondary_resumed = secondary_resumed
+        self._secondary_release = secondary_release
+
+    def wait(self, timeout: float | None = None) -> bool:
+        name = threading.current_thread().name
+        if name == "http-shutdown-owner":
+            self._owner_waiting.set()
+        if name == "http-shutdown-secondary":
+            self._secondary_waiting.set()
+        result = super().wait(timeout)
+        if name == "http-shutdown-secondary" and self._pause_enabled.is_set():
+            self._secondary_resumed.set()
+            while not self._secondary_release.is_set():
+                super().wait()
+        if name == "http-shutdown-owner" and self._pause_enabled.is_set():
+            self._owner_paused.set()
+            while not self._owner_release.is_set():
+                super().wait()
+        return result
+
+
 class _Clock:
     def __init__(self) -> None:
         self.value = 100.0
@@ -421,6 +460,81 @@ class HTTPSessionLeaseTests(unittest.TestCase):
         snapshot = manager.snapshot()
         self.assertEqual(snapshot["creating_sessions"], 0)
         self.assertEqual(snapshot["idle_sessions"], 0)
+
+    def test_concurrent_close_waits_for_the_shutdown_owner(self) -> None:
+        lease_entered = threading.Event()
+        lease_release = threading.Event()
+        pause_enabled = threading.Event()
+        owner_paused = threading.Event()
+        owner_waiting = threading.Event()
+        owner_release = threading.Event()
+        secondary_waiting = threading.Event()
+        secondary_resumed = threading.Event()
+        secondary_release = threading.Event()
+        secondary_done = threading.Event()
+        close_entered = threading.Event()
+        close_release = threading.Event()
+        self.addCleanup(lease_release.set)
+        self.addCleanup(owner_release.set)
+        self.addCleanup(secondary_release.set)
+        self.addCleanup(close_release.set)
+        runtime = _BlockingCloseRuntime("concurrent-close", close_entered, close_release)
+        manager = HTTPSessionManager(
+            lambda _context: runtime,
+            limits=_limits(total=1, per_identity=1, initializations=1),
+        )
+        manager._condition = _OwnerPauseCondition(
+            pause_enabled=pause_enabled,
+            owner_waiting=owner_waiting,
+            owner_paused=owner_paused,
+            owner_release=owner_release,
+            secondary_waiting=secondary_waiting,
+            secondary_resumed=secondary_resumed,
+            secondary_release=secondary_release,
+        )
+        manager.create(object())
+
+        def hold_lease() -> None:
+            with manager.lease(runtime.http_session_id) as leased:
+                self.assertIs(leased, runtime)
+                lease_entered.set()
+                lease_release.wait(timeout=2)
+
+        lease_thread = threading.Thread(target=hold_lease, name="http-lease-holder")
+        lease_thread.start()
+        self.assertTrue(lease_entered.wait(timeout=2))
+        owner_thread = threading.Thread(target=manager.close, name="http-shutdown-owner")
+        owner_thread.start()
+        self.assertTrue(owner_waiting.wait(timeout=2))
+
+        def secondary_close() -> None:
+            manager.close()
+            secondary_done.set()
+
+        secondary_thread = threading.Thread(target=secondary_close, name="http-shutdown-secondary")
+        secondary_thread.start()
+        self.assertTrue(secondary_waiting.wait(timeout=2))
+        pause_enabled.set()
+        lease_release.set()
+        self.assertTrue(owner_paused.wait(timeout=2))
+        self.assertTrue(secondary_resumed.wait(timeout=2))
+        secondary_release.set()
+        with manager._condition:
+            manager._condition.notify_all()
+        secondary_thread.join(timeout=0.1)
+        self.assertFalse(secondary_done.is_set())
+        self.assertFalse(close_entered.is_set())
+        owner_release.set()
+        with manager._condition:
+            manager._condition.notify_all()
+        close_release.set()
+        lease_thread.join(timeout=2)
+        owner_thread.join(timeout=2)
+        secondary_thread.join(timeout=2)
+        self.assertFalse(lease_thread.is_alive())
+        self.assertFalse(owner_thread.is_alive())
+        self.assertFalse(secondary_thread.is_alive())
+        self.assertEqual(runtime.closed, 1)
 
 
 if __name__ == "__main__":

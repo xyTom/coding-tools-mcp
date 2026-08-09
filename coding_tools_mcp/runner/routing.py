@@ -944,7 +944,12 @@ class RunnerMcpSessionHost:
                     raise RemoteMcpRouteError(
                         "RUNNER_SHUTTING_DOWN", "Runner MCP host is shutting down", retryable=True
                     )
-                if control_session_id in self._by_control or remote_session_id in self._by_remote:
+                if (
+                    control_session_id in self._by_control
+                    or remote_session_id in self._by_remote
+                    or remote_session_id in self._pending_closes
+                    or remote_session_id in self._closed
+                ):
                     raise RemoteMcpRouteError("RUNNER_ROUTE_CONFLICT", "Runner generated a duplicate MCP session id")
                 state = _SessionState(record=record)
                 self._by_control[control_session_id] = state
@@ -1028,7 +1033,8 @@ class RunnerMcpSessionHost:
         finally:
             with self._condition:
                 state.close_completed = True
-                self._pending_closes.pop(record.remote_session_id, None)
+                if self._pending_closes.get(record.remote_session_id) is state:
+                    self._pending_closes.pop(record.remote_session_id, None)
                 self._condition.notify_all()
         return True
 
@@ -1207,7 +1213,8 @@ class RunnerMcpSessionHost:
                 finally:
                     with self._condition:
                         state.close_completed = True
-                        self._pending_closes.pop(state.record.remote_session_id, None)
+                        if self._pending_closes.get(state.record.remote_session_id) is state:
+                            self._pending_closes.pop(state.record.remote_session_id, None)
                         self._condition.notify_all()
         finally:
             with self._condition:
