@@ -2,7 +2,7 @@
 
 ## Status
 
-- Result: complete in canonical integration commit `d8c1cc855f71303a525da288a6c8e895a76a10b8`
+- Result: in remediation (release gate held open pending RM12 aggregate verification and RM13 final handoff)
 - Branch: `integration/webcodex-runtime-platform`
 - Canonical worktree: `G:\LLM\coding-tools-mcp\.worktrees\webcodex-runtime-platform`
 - Baseline HEAD before integrated working-tree changes: `252c2f0b5508e6b6c23a330e3417943960249eca`
@@ -98,7 +98,7 @@ The benchmark report records:
 
 - 1,280 create+DELETE cycles at a 128 configured capacity with `created_total=deleted_total=1280`, active=0, and +4 KiB observed working-set delta;
 - flat Session lease p95 around 0.009 ms through 500 installed lightweight Session records;
-- full Runtime working-set points through the configured target capacity 128;
+- full Runtime working-set points at 0/100/128/500 active Runtimes, measured twice by RM10 (capacity evidence only);
 - Runner loopback RPC p50/p95 and reconnect time;
 - Agent persistence and fixture LSP timing boundaries.
 
@@ -113,7 +113,7 @@ Release recommendation remains:
 - concurrent initialization: 16;
 - idle TTL: 3600 seconds.
 
-The 500 Session-manager metadata point is not evidence to raise the full Runtime cap. A 500-full-Runtime measurement was attempted but did not complete inside the validation command window and is explicitly not claimed.
+The 500 Session-manager metadata point remains lightweight and is not evidence to raise the full Runtime cap. RM10 measured 500 full Runtime objects twice on the Windows validation host via `scripts/benchmark_webcodex_release.py`; that point is capacity evidence only and does not change the production default of 128.
 
 ## Secrets / Logging Review
 
@@ -126,7 +126,7 @@ The 500 Session-manager metadata point is not evidence to raise the full Runtime
 
 ## Known Recovery Paths
 
-No known normal Session exhaustion path requires restarting the project process. Capacity/identity/init pressure returns explicit backpressure; stale Sessions can be closed; upstream failures back off; unavailable Runner routes recover by authenticated reconnect/reconciliation.
+Capacity/identity/initialization pressure returns explicit JSON-RPC backpressure with retry guidance; active request leases block delete/prune/shutdown from closing in-use Runtimes; stale idle Sessions can be closed to reclaim capacity; upstream failures back off without automatic reconnect loops; unavailable Runner routes recover through authenticated reconnect plus inventory reconciliation. The final aggregate gate and audit for these recovery paths are held in RM12; this document does not independently assert a blanket "restart never required" claim.
 
 ## Evidence / Documentation
 
@@ -135,6 +135,7 @@ No known normal Session exhaustion path requires restarting the project process.
 - `docs/webcodex-session-resilience-benchmark-report.md`
 - `docs/webcodex-runner-troubleshooting.md`
 - `docs/webcodex-migration-rollback.md`
+- `docs/webcodex-integration-handoffs/phase-18-session-resilience-retrospective.md` (real RS00–RS07 provenance)
 - tests: HTTP session resilience, upstream resilience/lazy catalog, Runner remote/MCP/capabilities/WebSocket, WorkspaceHost/binding.
 
 ## Remaining Deployment Limit

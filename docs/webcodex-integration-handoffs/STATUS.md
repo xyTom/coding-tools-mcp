@@ -25,7 +25,7 @@ The integrated implementation is recorded by commit `d8c1cc855f71303a525da288a6c
 | 15 | complete | `d8c1cc8` | Runtime helper suite | Windows truthful capability test green; Linux Landlock behavior remains platform-conditional |
 | 16 | complete | `d8c1cc8` | WorkspaceHost/catalog/binding tests | local/runner targets; remote root opaque; no local fallback |
 | 17 | complete | `d8c1cc8` (source Runner workstream) | Runner transport/WebSocket tests | credential/registry + production outbound Runner peer and `/runner/ws` |
-| 18 | in remediation | `de5fa8a` | `integration-remediation/RM00-canonical-checkpoint.md`, `phase-18-session-resilience-final.md` | Existing strict-completion diff checkpointed; RM01–RM13 remain |
+| 18 | in remediation | `de5fa8a` | `integration-remediation/RM00-canonical-checkpoint.md`, `phase-18-session-resilience-final.md`, `phase-18-session-resilience-retrospective.md` | Existing strict-completion diff checkpointed; RM01–RM13 remain; retrospective records real RS provenance |
 | 19 | complete | `d8c1cc8` (source `2e705d7`) | Runner job reconciliation tests | recovering/running/completed/failed/cancelled/lost reconciliation |
 | 20 | complete | `d8c1cc8` | Desktop tests | tunnel providers, external URL, mobile onboarding, Runner status |
 | 21 | not enabled (optional) | none by design | `phase-22.md` | no second MCP/OpenAPI facade; stable Core 25-tool surface preserved |
@@ -37,11 +37,12 @@ The integrated implementation is recorded by commit `d8c1cc855f71303a525da288a6c
 - `docs/webcodex-runner-troubleshooting.md`
 - `docs/webcodex-migration-rollback.md`
 - `docs/webcodex-integration-handoffs/phase-18-session-resilience-final.md`
+- `docs/webcodex-integration-handoffs/phase-18-session-resilience-retrospective.md`
 - `docs/webcodex-integration-handoffs/phase-22.md`
 
 ## Non-claims
 
-- No successful 500-full-Runtime benchmark is claimed; the full Runtime resource sample stops at the configured target capacity 128. RM10 remains open.
+- Two 500-full-Runtime measurements were completed on the Windows integration host (RM10); the 500 point is capacity evidence only and the production default of 128 is unchanged.
 - Real Codex/model latency is not represented by the synthetic Agent persistence benchmark.
 - Linux Landlock enforcement was not executed on the Windows integration host.
 - Phase 21 optional facade is intentionally absent.

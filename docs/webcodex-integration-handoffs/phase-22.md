@@ -2,7 +2,7 @@
 
 ## Status
 
-- Result: release validation complete for canonical implementation commit `d8c1cc855f71303a525da288a6c8e895a76a10b8`, subject to the platform notes below.
+- Result: `d8c1cc8` is the canonical implementation baseline; Phase 22 release status remains **in remediation** until all RM12 aggregate/audit gates pass and RM13 issues the final handoff. No release-complete claim is made yet.
 - Branch: `integration/webcodex-runtime-platform`
 - Baseline HEAD: `252c2f0b5508e6b6c23a330e3417943960249eca`
 - Implementation commit: `d8c1cc855f71303a525da288a6c8e895a76a10b8`.
@@ -40,7 +40,7 @@ The final canonical working-tree rerun on 2026-08-09 completed with these explic
 | final schema drift + v0.2.2 integration contract + MCP contract quick gate | exit 0 (`skipped=37`, POSIX fixture conditional) |
 | required-docs compliance after final handoff update | exit 0 |
 | common secret-prefix/private-key literal scan over the canonical worktree | 0 matches |
-| `git diff --check` | exit 0 |
+| `git diff --check` (working tree) | exit 0 | Working-tree check only; `main...HEAD` range check is re-run in RM12. |
 
 One attempted monolithic compliance run and two aggregate top-level/OAuth commands exceeded the coding-tools command/session window. They are not counted as passing evidence; every tracked compliance module and affected top-level area was rerun in shorter groups above with explicit exit 0 results.
 
@@ -102,14 +102,14 @@ See `docs/webcodex-session-resilience-benchmark-report.md` and `scripts/benchmar
 Key release values on the Windows validation host:
 
 - Runtime initialize p50: 0.0904 ms; `tools/list` p50: 0.0960 ms; tool-list payload 25,056 bytes.
-- Full Runtime working-set sampled through 128; estimated incremental process working set about 14.5 KiB/Runtime with allocator-noise range documented.
+- Full Runtime working-set sampled at 0/100/128/500 in two RM10 runs; incremental slopes approximately 15.98 KiB/Runtime (run 1) and 17.87 KiB/Runtime (run 2), allocated/process noise included.
 - HTTP Session-manager 1280 create/delete soak: active 0; created=deleted=1280; +4 KiB observed working-set delta.
 - Lease p95 remains about 0.009 ms at 1/100/128/500 lightweight installed Session records.
 - AgentSessionService+SQLite benchmark: create p50 25.47 ms, resume p50 1.16 ms; explicitly not real Codex process/model latency.
 - fake-LSP cold 176.98 ms; warm p50 2.79 ms.
 - real loopback Runner WebSocket RPC p50 3.13 ms, p95 6.39 ms; reconnect 34.26 ms.
 
-500 full Runtime objects were not successfully measured inside the validation command window, so the report keeps the total default at 128 and does not claim a 500-Runtime capacity result.
+RM10 measured 500 full Runtime objects twice on the Windows validation host; both runs completed with explicit exit 0 and are capacity evidence only. The production default of 128 is unchanged.
 
 ## Migration / Rollback
 
@@ -154,4 +154,4 @@ Phase 21 is optional by product contract. It is **not enabled** in this integrat
 2. PySide6-specific desktop UI execution is skipped when PySide6 is absent, while non-UI connectivity behavior is tested.
 3. Real Codex App Server/model latency and third-party LSP memory/startup are deployment-specific and not represented by synthetic service benchmarks.
 4. Runner CLI currently has no Runner-side upstream gateway configuration option; this does not affect remote Core local tools, Agent, Semantic, Validation, or MCP lifecycle routing.
-5. A 500-full-Runtime benchmark is not claimed.
+5. 500 full Runtime objects were measured twice on the Windows validation host by RM10; this remains capacity evidence only, does not raise the production default of 128, and is not a claim about other platforms or workloads.
