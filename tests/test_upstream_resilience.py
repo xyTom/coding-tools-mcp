@@ -446,7 +446,15 @@ class UpstreamResilienceTests(unittest.TestCase):
             release.wait(timeout=2)
 
         client = ScriptedHttpClient(config(), shared, initialize_hook=hook)
-        init_thread = threading.Thread(target=client.initialize)
+        init_errors: list[BaseException] = []
+
+        def initialize() -> None:
+            try:
+                client.initialize()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                init_errors.append(exc)
+
+        init_thread = threading.Thread(target=initialize)
         init_thread.start()
         self.assertTrue(entered.wait(timeout=2))
         close_thread = threading.Thread(target=client.close)
@@ -458,6 +466,8 @@ class UpstreamResilienceTests(unittest.TestCase):
         close_thread.join(timeout=2)
         self.assertFalse(init_thread.is_alive())
         self.assertFalse(close_thread.is_alive())
+        self.assertEqual(len(init_errors), 1)
+        self.assertEqual(init_errors[0].code, "UPSTREAM_NOT_AVAILABLE")
         self.assertEqual(client.transport_state, UpstreamClientState.CLOSED)
 
 
