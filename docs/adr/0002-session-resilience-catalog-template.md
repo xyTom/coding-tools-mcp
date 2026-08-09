@@ -21,7 +21,10 @@ or ResultStore.
 Each Runtime owns its immutable view, its ResultStore, and lazily created live
 clients/session identifiers. Live session state is not shared across principals,
 workspaces, Runtimes or Runners. A server-level resilience coordinator may share
-only bounded redacted failure throttling and initialization concurrency state.
+bounded redacted failure throttling, initialization concurrency state, and
+read-only aggregate transport telemetry (counts and state labels only). It must
+not retain live client/session/transport objects, session identifiers, tokens,
+or ResultStores.
 
 Inbound HTTP MCP sessions have explicit global, per-identity and initialization
 limits. Active leases prevent delete/prune/shutdown from closing a Runtime that is

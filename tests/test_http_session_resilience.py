@@ -343,6 +343,36 @@ class HTTPSessionLeaseTests(unittest.TestCase):
             manager.create(object())
         self.assertEqual(caught.exception.code, "http_session_server_closing")
 
+    def test_shutdown_waits_for_detached_delete_runtime_close(self) -> None:
+        close_entered = threading.Event()
+        close_release = threading.Event()
+        shutdown_done = threading.Event()
+        self.addCleanup(close_release.set)
+        runtime = _BlockingCloseRuntime("s-detached", close_entered, close_release)
+        manager = HTTPSessionManager(
+            lambda _context: runtime,
+            limits=_limits(total=1, per_identity=1, initializations=1),
+        )
+        manager.create(object())
+
+        delete_thread = threading.Thread(target=lambda: manager.delete(runtime.http_session_id))
+        delete_thread.start()
+        self.assertTrue(close_entered.wait(timeout=2))
+
+        def shutdown() -> None:
+            manager.close()
+            shutdown_done.set()
+
+        shutdown_thread = threading.Thread(target=shutdown)
+        shutdown_thread.start()
+        self.assertFalse(shutdown_done.wait(timeout=0.1))
+        close_release.set()
+        delete_thread.join(timeout=2)
+        shutdown_thread.join(timeout=2)
+        self.assertFalse(delete_thread.is_alive())
+        self.assertFalse(shutdown_thread.is_alive())
+        self.assertEqual(runtime.closed, 1)
+
     def test_shutdown_racing_initialize_closes_uninstalled_runtime_and_returns_reservation(self) -> None:
         entered = threading.Event()
         release = threading.Event()

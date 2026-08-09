@@ -871,6 +871,7 @@ class RunnerMcpSessionHost:
         self._creating = 0
         self._creating_by_control: dict[str, tuple[str, str]] = {}
         self._closed: OrderedDict[str, _ClosedSession] = OrderedDict()
+        self._pending_closes: dict[str, _SessionState] = {}
         self._shutting_down = False
         self._shutdown_complete = False
 
@@ -974,6 +975,20 @@ class RunnerMcpSessionHost:
             while True:
                 state = self._by_remote.get(remote_session_id)
                 if state is None:
+                    pending = self._pending_closes.get(remote_session_id)
+                    if pending is not None:
+                        record = pending.record
+                        if (
+                            record.control_session_id != control_session_id
+                            or record.workspace_id != workspace_id
+                            or not hmac.compare_digest(record.authorization_digest, authorization_digest)
+                        ):
+                            raise RemoteMcpRouteError(
+                                "RUNNER_ROUTE_FORBIDDEN", "remote MCP close does not match Runner route"
+                            )
+                        while not pending.close_completed:
+                            self._condition.wait()
+                        return True
                     tombstone = self._closed.get(remote_session_id)
                     if tombstone is None:
                         return True
@@ -997,7 +1012,12 @@ class RunnerMcpSessionHost:
                 state.closing = True
                 while state.active_call_leases:
                     self._condition.wait()
+                if state.close_started:
+                    while not state.close_completed:
+                        self._condition.wait()
+                    return True
                 state.close_started = True
+                self._pending_closes[remote_session_id] = state
                 self._by_remote.pop(remote_session_id, None)
                 self._by_control.pop(control_session_id, None)
                 self._remember_closed_locked(record)
@@ -1008,6 +1028,7 @@ class RunnerMcpSessionHost:
         finally:
             with self._condition:
                 state.close_completed = True
+                self._pending_closes.pop(record.remote_session_id, None)
                 self._condition.notify_all()
         return True
 
@@ -1166,6 +1187,7 @@ class RunnerMcpSessionHost:
                         self._condition.wait()
                     continue
                 state.close_started = True
+                self._pending_closes[state.record.remote_session_id] = state
                 owned_states.append(state)
                 record = state.record
                 self._by_control.pop(record.control_session_id, None)
@@ -1185,9 +1207,12 @@ class RunnerMcpSessionHost:
                 finally:
                     with self._condition:
                         state.close_completed = True
+                        self._pending_closes.pop(state.record.remote_session_id, None)
                         self._condition.notify_all()
         finally:
             with self._condition:
+                while self._pending_closes:
+                    self._condition.wait()
                 self._shutdown_complete = True
                 self._condition.notify_all()
         if first_error is not None:

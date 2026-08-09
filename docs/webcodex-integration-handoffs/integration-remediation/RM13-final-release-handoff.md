@@ -79,8 +79,9 @@ uncommitted file changes remain after the handoff commit.
 - PySide6-specific UI coverage remains skipped when PySide6 is unavailable.
 - Real Codex/model latency and third-party LSP deployment costs remain outside
   the synthetic benchmark scope.
-- The standalone Runner CLI still has no Runner-side upstream gateway
-  configuration option, as recorded in Phase 18/22.
+- The standalone Runner CLI supports explicit Runner-local upstream gateway
+  configuration through `--upstream-config`; it is not implicitly copied from
+  the Control Plane.
 - The 500 full-Runtime measurements are Windows capacity evidence only; no
   production default was raised.
 

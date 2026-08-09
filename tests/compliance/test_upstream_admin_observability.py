@@ -159,6 +159,28 @@ class UpstreamAdminObservabilityTests(unittest.TestCase):
             ):
                 live.close()
 
+    def test_http_target_redacts_url_userinfo_from_status_and_resilience_key(self) -> None:
+        config = UpstreamServerConfig(
+            alias="remote",
+            transport="streamable_http",
+            url="https://user:SUPER-SECRET@example.test:8443/mcp?token=ignored",
+        )
+        client = FakeUpstreamClient(config, "2025-11-25")
+        manager = build_manager([config], [client], reserved_names=set(TOOL_REGISTRY))
+        try:
+            payload = manager.status_payload()
+            target = payload["servers"][0]["target"]
+            resilience_key = upstream_module._resilience_key_for_config(config)
+            self.assertEqual(target, "https://example.test:8443/mcp")
+            self.assertEqual(resilience_key, "remote|https://example.test:8443/mcp")
+            serialized = json.dumps(payload, sort_keys=True)
+            self.assertNotIn("user", serialized)
+            self.assertNotIn("SUPER-SECRET", serialized)
+            self.assertNotIn("user", resilience_key)
+            self.assertNotIn("SUPER-SECRET", resilience_key)
+        finally:
+            manager.close()
+
 
 if __name__ == "__main__":
     unittest.main()

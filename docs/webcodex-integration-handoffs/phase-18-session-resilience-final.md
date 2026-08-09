@@ -142,4 +142,4 @@ Capacity/identity/initialization pressure returns explicit JSON-RPC backpressure
 
 ## Remaining Deployment Limit
 
-The standalone Runner CLI currently composes its local Core Runtime without a separate Runner-side upstream-config CLI option. Remote Core MCP, Agent, Semantic, Validation, fingerprint, and close/reconnect paths are implemented; deployments that need a Runner-specific upstream gateway configuration should treat that as a later explicit configuration feature rather than assuming Control Plane upstream configuration is copied remotely.
+The standalone Runner CLI supports explicit Runner-local upstream configuration through `--upstream-config`; that configuration is loaded into an immutable Runner-local catalog and is not copied implicitly from the Control Plane. Remote Core MCP, Agent, Semantic, Validation, fingerprint, and close/reconnect paths are implemented.

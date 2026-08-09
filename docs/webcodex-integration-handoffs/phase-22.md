@@ -151,5 +151,5 @@ Phase 21 is optional by product contract. It is **not enabled** in this integrat
 1. Linux Inspect enforcement should still be exercised in Linux CI/release infrastructure; current host is Windows.
 2. PySide6-specific desktop UI execution is skipped when PySide6 is absent, while non-UI connectivity behavior is tested.
 3. Real Codex App Server/model latency and third-party LSP memory/startup are deployment-specific and not represented by synthetic service benchmarks.
-4. Runner CLI currently has no Runner-side upstream gateway configuration option; this does not affect remote Core local tools, Agent, Semantic, Validation, or MCP lifecycle routing.
+4. Runner CLI supports Runner-local upstream gateway configuration through `--upstream-config`; configuration is explicit and is not implicitly copied from the Control Plane.
 5. 500 full Runtime objects were measured twice on the Windows validation host by RM10; this remains capacity evidence only, does not raise the production default of 128, and is not a claim about other platforms or workloads.

@@ -2528,7 +2528,17 @@ def safe_target(config: UpstreamServerConfig) -> str | None:
     if not config.url:
         return None
     parsed = urllib.parse.urlsplit(config.url)
-    redacted = parsed._replace(query="", fragment="")
+    hostname = parsed.hostname
+    if hostname is None:
+        return None
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = hostname if port is None else f"{hostname}:{port}"
+    redacted = parsed._replace(netloc=netloc, query="", fragment="")
     return urllib.parse.urlunsplit(redacted)
 
 

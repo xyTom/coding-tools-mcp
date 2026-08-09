@@ -114,6 +114,7 @@ class HTTPSessionManager:
         self._creating_by_identity: dict[Hashable, int] = {}
         self._sessions_by_identity: dict[Hashable, int] = {}
         self._closed = False
+        self._pending_closes = 0
         self._created_total = 0
         self._deleted_total = 0
         self._expired_total = 0
@@ -241,7 +242,7 @@ class HTTPSessionManager:
         record = self._detach_for_close(session_id)
         if record is None:
             return False
-        _close_runtime(record.runtime)
+        self._close_detached_record(record)
         with self._condition:
             self._deleted_total += 1
         return True
@@ -260,6 +261,7 @@ class HTTPSessionManager:
                 return None
             self._sessions.pop(session_id, None)
             self._decrement_identity_locked(record.quota_key)
+            self._pending_closes += 1
             return record
 
     def prune(self) -> None:
@@ -288,9 +290,17 @@ class HTTPSessionManager:
                 self._sessions.pop(session_id, None)
                 self._decrement_identity_locked(record.quota_key)
                 records.append(record)
+            self._pending_closes += len(records)
             self._expired_total += len(records)
+        first_error: BaseException | None = None
         for record in records:
-            _close_runtime(record.runtime)
+            try:
+                self._close_detached_record(record)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
         return len(records)
 
     def snapshot(self) -> dict[str, Any]:
@@ -330,6 +340,12 @@ class HTTPSessionManager:
         records: list[HTTPSessionRecord]
         with self._condition:
             if self._closed:
+                while (
+                    self._creating
+                    or any(record.active_request_leases for record in self._sessions.values())
+                    or self._pending_closes
+                ):
+                    self._condition.wait()
                 return
             self._closed = True
             for record in self._sessions.values():
@@ -340,8 +356,27 @@ class HTTPSessionManager:
             records = list(self._sessions.values())
             self._sessions.clear()
             self._sessions_by_identity.clear()
+            self._pending_closes += len(records)
+        first_error: BaseException | None = None
         for record in records:
+            try:
+                self._close_detached_record(record)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        with self._condition:
+            while self._pending_closes:
+                self._condition.wait()
+        if first_error is not None:
+            raise first_error
+
+    def _close_detached_record(self, record: HTTPSessionRecord) -> None:
+        try:
             _close_runtime(record.runtime)
+        finally:
+            with self._condition:
+                self._pending_closes -= 1
+                self._condition.notify_all()
 
     def _decrement_identity_locked(self, quota_key: Hashable) -> None:
         remaining = self._sessions_by_identity.get(quota_key, 0) - 1

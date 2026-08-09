@@ -982,6 +982,50 @@ class RunnerMcpSessionHostConcurrencyTests(unittest.TestCase):
         self.assertEqual(runtime.close_count, 1)
         self.assertEqual(order, ["call", "call-done", "close", "shutdown-done"])
 
+    def test_shutdown_waits_for_detached_route_runtime_close(self) -> None:
+        close_entered = threading.Event()
+        close_release = threading.Event()
+        shutdown_done = threading.Event()
+        self.addCleanup(close_release.set)
+        runtime = _GatedRuntime(
+            "remote-detached",
+            close_entered=close_entered,
+            close_release=close_release,
+        )
+        host = RunnerMcpSessionHost(lambda _ws, _auth: runtime)
+        self.addCleanup(host.shutdown)
+        digest = self._digest()
+        record = host.create(
+            control_session_id="control-detached",
+            workspace_id="ws-a",
+            authorization_digest=digest,
+        )
+
+        close_thread = threading.Thread(
+            target=lambda: host.close_session(
+                control_session_id="control-detached",
+                remote_session_id=record.remote_session_id,
+                workspace_id="ws-a",
+                authorization_digest=digest,
+            )
+        )
+        close_thread.start()
+        self.assertTrue(close_entered.wait(timeout=3))
+
+        def shutdown() -> None:
+            host.shutdown()
+            shutdown_done.set()
+
+        shutdown_thread = threading.Thread(target=shutdown)
+        shutdown_thread.start()
+        self.assertFalse(shutdown_done.wait(timeout=0.1))
+        close_release.set()
+        close_thread.join(timeout=3)
+        shutdown_thread.join(timeout=3)
+        self.assertFalse(close_thread.is_alive())
+        self.assertFalse(shutdown_thread.is_alive())
+        self.assertEqual(runtime.close_count, 1)
+
     def test_runtime_io_does_not_hold_global_lock(self) -> None:
         close_entered = threading.Event()
         close_release = threading.Event()
