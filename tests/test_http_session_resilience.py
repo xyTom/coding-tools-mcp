@@ -4,6 +4,7 @@ import itertools
 import threading
 import time
 import unittest
+from contextlib import ExitStack
 from dataclasses import dataclass
 
 from coding_tools_mcp.transport_http import (
@@ -132,11 +133,16 @@ class HTTPSessionCapacityBaselineTests(unittest.TestCase):
         )
         self.addCleanup(manager.close)
 
-        for _ in range(MAX_HTTP_SESSIONS):
-            manager.create(object())
+        sessions = [manager.create(object()) for _ in range(MAX_HTTP_SESSIONS)]
 
-        with self.assertRaisesRegex(RuntimeError, "maximum HTTP session count reached"):
-            manager.create(object())
+        with ExitStack() as leases:
+            for runtime in sessions:
+                self.assertIs(
+                    leases.enter_context(manager.lease(runtime.http_session_id)),
+                    runtime,
+                )
+            with self.assertRaisesRegex(RuntimeError, "maximum HTTP session count reached"):
+                manager.create(object())
 
         self.assertEqual(len(runtimes), MAX_HTTP_SESSIONS)
 
@@ -208,13 +214,95 @@ class HTTPSessionLimitTests(unittest.TestCase):
         self.addCleanup(manager.close)
         first = _Context(oauth_identity=_Identity("a", "grant-a"))
         second = _Context(oauth_identity=_Identity("b", "grant-b"))
-        manager.create(first)
-        manager.create(first)
-        with self.assertRaises(HTTPSessionAdmissionError) as caught:
-            manager.create(first)
-        self.assertEqual(caught.exception.code, "http_session_identity_quota")
+        first_runtime = manager.create(first)
+        second_runtime = manager.create(first)
+        with ExitStack() as leases:
+            leases.enter_context(manager.lease(first_runtime.http_session_id))
+            leases.enter_context(manager.lease(second_runtime.http_session_id))
+            with self.assertRaises(HTTPSessionAdmissionError) as caught:
+                manager.create(first)
+            self.assertEqual(caught.exception.code, "http_session_identity_quota")
         manager.create(second)
         self.assertEqual(manager.snapshot()["idle_sessions"], 3)
+
+    def test_identity_quota_reclaims_oldest_idle_session_for_same_identity(self) -> None:
+        sequence = itertools.count(1)
+        runtimes: list[_Runtime] = []
+
+        def factory(_context: object) -> _Runtime:
+            runtime = _Runtime(f"s-{next(sequence)}")
+            runtimes.append(runtime)
+            return runtime
+
+        manager = HTTPSessionManager(
+            factory,
+            limits=_limits(total=4, per_identity=2, initializations=2),
+        )
+        self.addCleanup(manager.close)
+        context = _Context(oauth_identity=_Identity("a", "grant-a"))
+
+        first = manager.create(context)
+        second = manager.create(context)
+        third = manager.create(context)
+
+        self.assertEqual(first.closed, 1)
+        self.assertIsNone(manager.get(first.http_session_id))
+        self.assertIs(manager.get(second.http_session_id), second)
+        self.assertIs(manager.get(third.http_session_id), third)
+        snapshot = manager.snapshot()
+        self.assertEqual(snapshot["idle_sessions"], 2)
+        self.assertEqual(snapshot["reclaimed_total"], 1)
+        self.assertEqual(snapshot["identity_quota_rejected_total"], 0)
+
+    def test_initialization_burst_waits_for_slot_instead_of_rejecting(self) -> None:
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        sequence = itertools.count(1)
+
+        def factory(_context: object) -> _Runtime:
+            index = next(sequence)
+            if index == 1:
+                first_entered.set()
+                release_first.wait(timeout=2)
+            return _Runtime(f"s-{index}")
+
+        manager = HTTPSessionManager(
+            factory,
+            limits=_limits(total=2, per_identity=2, initializations=1),
+            initialization_wait_seconds=1.0,
+        )
+        self.addCleanup(manager.close)
+        context = _Context(oauth_identity=_Identity("a", "grant-a"))
+        results: list[_Runtime] = []
+        errors: list[BaseException] = []
+
+        def create() -> None:
+            try:
+                results.append(manager.create(context))
+            except BaseException as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+        first_thread = threading.Thread(target=create)
+        second_thread = threading.Thread(target=create)
+        first_thread.start()
+        self.assertTrue(first_entered.wait(timeout=1))
+        second_thread.start()
+        deadline = time.monotonic() + 1
+        while manager.snapshot().get("waiting_initializations") != 1:
+            if time.monotonic() >= deadline:
+                self.fail("second initialization did not enter the admission queue")
+            time.sleep(0.005)
+        release_first.set()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
+
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        snapshot = manager.snapshot()
+        self.assertEqual(snapshot["initialization_waited_total"], 1)
+        self.assertEqual(snapshot["initialization_rejected_total"], 0)
 
     def test_concurrent_create_reservations_prevent_oversell(self) -> None:
         entered = threading.Barrier(3)
@@ -229,6 +317,7 @@ class HTTPSessionLimitTests(unittest.TestCase):
         manager = HTTPSessionManager(
             factory,
             limits=_limits(total=2, per_identity=2, initializations=2),
+            initialization_wait_seconds=0,
         )
         self.addCleanup(manager.close)
         context = _Context(oauth_identity=_Identity("a", "grant-a"))

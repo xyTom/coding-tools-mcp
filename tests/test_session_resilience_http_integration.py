@@ -6,8 +6,10 @@ import json
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -405,6 +407,77 @@ class SessionResilienceHttpIntegrationTests(unittest.TestCase):
             self.assertEqual(server.handler_errors, [])
             self.assertFalse(thread.is_alive())
             self.assertEqual(control.close_count, 1)
+
+    def test_runtime_http_server_queues_initialize_burst_without_503(self) -> None:
+        token = "synthetic-burst-token"
+        request_count = 8
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            control = _SpyRuntime(
+                root,
+                auth_token=token,
+                workspace_binding=WorkspaceBinding("control", root, "bearer"),
+                authorization_context=AuthorizationContext("bearer"),
+                transport="http",
+            )
+
+            def factory(context: AuthorizationContext) -> _SpyRuntime:
+                time.sleep(0.05)
+                return _SpyRuntime(
+                    root,
+                    auth_token=token,
+                    workspace_binding=WorkspaceBinding("session", root, context.method),
+                    authorization_context=context,
+                    transport="http",
+                )
+
+            server = RuntimeHTTPServer(
+                ("127.0.0.1", 0),
+                _CollectingMCPHandler,
+                control,
+                factory,
+                session_limits=HTTPSessionLimits(
+                    max_total=request_count,
+                    max_per_identity=request_count,
+                    max_initializations=2,
+                ),
+            )
+            server.handler_errors = []
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            port = int(server.server_address[1])
+            barrier = threading.Barrier(request_count)
+
+            def initialize(index: int) -> tuple[int, dict[str, str], dict[str, Any]]:
+                barrier.wait(timeout=2)
+                return _rpc(
+                    port,
+                    token,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": index,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "clientInfo": {"name": "burst", "version": "1"},
+                        },
+                    },
+                )
+
+            try:
+                with ThreadPoolExecutor(max_workers=request_count) as executor:
+                    results = list(executor.map(initialize, range(request_count)))
+                self.assertEqual([status for status, _headers, _payload in results], [200] * request_count)
+                snapshot = server.sessions.snapshot()
+                self.assertGreater(snapshot["initialization_waited_total"], 0)
+                self.assertEqual(snapshot["initialization_rejected_total"], 0)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+            self.assertEqual(server.handler_errors, [])
+            self.assertFalse(thread.is_alive())
 
     def test_http_upstream_post_matrix_preserves_status_and_does_not_replay(self) -> None:
         cases = (

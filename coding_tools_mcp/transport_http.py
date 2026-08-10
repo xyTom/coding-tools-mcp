@@ -13,6 +13,7 @@ MAX_HTTP_SESSIONS = 128
 HTTP_SESSION_TTL_SECONDS = 60 * 60
 MAX_HTTP_SESSIONS_PER_IDENTITY = 64
 MAX_HTTP_SESSION_INITIALIZATIONS = 16
+HTTP_SESSION_INITIALIZATION_WAIT_SECONDS = 5.0
 
 
 class HTTPSessionAdmissionError(RuntimeError):
@@ -102,11 +103,19 @@ class HTTPSessionManager:
         limits: HTTPSessionLimits | None = None,
         clock: Callable[[], float] = time.monotonic,
         quota_key_resolver: Callable[[Any], Hashable] = _default_quota_key,
+        initialization_wait_seconds: float = HTTP_SESSION_INITIALIZATION_WAIT_SECONDS,
     ) -> None:
+        if (
+            not isinstance(initialization_wait_seconds, (int, float))
+            or isinstance(initialization_wait_seconds, bool)
+            or initialization_wait_seconds < 0
+        ):
+            raise ValueError("HTTP session initialization wait must be non-negative")
         self._factory = factory
         self.limits = limits or HTTPSessionLimits()
         self._clock = clock
         self._quota_key_resolver = quota_key_resolver
+        self._initialization_wait_seconds = float(initialization_wait_seconds)
         self._sessions: dict[str, HTTPSessionRecord] = {}
         self._idle_order: OrderedDict[str, None] = OrderedDict()
         self._condition = threading.Condition(threading.Lock())
@@ -122,38 +131,90 @@ class HTTPSessionManager:
         self._capacity_rejected_total = 0
         self._identity_quota_rejected_total = 0
         self._initialization_rejected_total = 0
+        self._waiting_initializations = 0
+        self._initialization_waited_total = 0
+        self._reclaimed_total = 0
 
     def create(self, context: Any) -> Any:
         self.prune_expired()
         quota_key = self._quota_key_resolver(context)
-        with self._condition:
-            if self._closed:
-                raise HTTPSessionAdmissionError(
-                    "http_session_server_closing",
-                    "HTTP session manager is closing",
-                )
-            if self._creating >= self.limits.max_initializations:
-                self._initialization_rejected_total += 1
-                raise HTTPSessionAdmissionError(
-                    "http_session_initialization_limit",
-                    "maximum concurrent HTTP session initialization count reached",
-                )
-            if len(self._sessions) + self._creating >= self.limits.max_total:
-                self._capacity_rejected_total += 1
-                raise HTTPSessionAdmissionError(
-                    "http_session_capacity",
-                    "maximum HTTP session count reached",
-                )
-            identity_count = self._sessions_by_identity.get(quota_key, 0)
-            identity_creating = self._creating_by_identity.get(quota_key, 0)
-            if identity_count + identity_creating >= self.limits.max_per_identity:
-                self._identity_quota_rejected_total += 1
-                raise HTTPSessionAdmissionError(
-                    "http_session_identity_quota",
-                    "maximum HTTP session count reached for this identity",
-                )
-            self._creating += 1
-            self._creating_by_identity[quota_key] = identity_creating + 1
+        wait_deadline = time.monotonic() + self._initialization_wait_seconds
+        waiting = False
+        try:
+            while True:
+                reclaimed: HTTPSessionRecord | None = None
+                with self._condition:
+                    if self._closed:
+                        raise HTTPSessionAdmissionError(
+                            "http_session_server_closing",
+                            "HTTP session manager is closing",
+                        )
+                    identity_count = self._sessions_by_identity.get(quota_key, 0)
+                    identity_creating = self._creating_by_identity.get(quota_key, 0)
+                    total_full = len(self._sessions) >= self.limits.max_total
+                    identity_full = identity_count >= self.limits.max_per_identity
+                    if total_full or identity_full:
+                        reclaimed = self._detach_oldest_idle_locked(quota_key)
+                        if reclaimed is None:
+                            if identity_full:
+                                self._identity_quota_rejected_total += 1
+                                raise HTTPSessionAdmissionError(
+                                    "http_session_identity_quota",
+                                    "maximum HTTP session count reached for this identity",
+                                )
+                            self._capacity_rejected_total += 1
+                            raise HTTPSessionAdmissionError(
+                                "http_session_capacity",
+                                "maximum HTTP session count reached",
+                            )
+                    else:
+                        initialization_full = self._creating >= self.limits.max_initializations
+                        projected_total_full = (
+                            len(self._sessions) + self._creating >= self.limits.max_total
+                        )
+                        projected_identity_full = (
+                            identity_count + identity_creating >= self.limits.max_per_identity
+                        )
+                        if not (
+                            initialization_full
+                            or projected_total_full
+                            or projected_identity_full
+                        ):
+                            self._creating += 1
+                            self._creating_by_identity[quota_key] = identity_creating + 1
+                            break
+                        remaining = wait_deadline - time.monotonic()
+                        if remaining <= 0:
+                            if initialization_full:
+                                self._initialization_rejected_total += 1
+                                raise HTTPSessionAdmissionError(
+                                    "http_session_initialization_limit",
+                                    "maximum concurrent HTTP session initialization count reached",
+                                )
+                            if projected_identity_full:
+                                self._identity_quota_rejected_total += 1
+                                raise HTTPSessionAdmissionError(
+                                    "http_session_identity_quota",
+                                    "maximum HTTP session count reached for this identity",
+                                )
+                            self._capacity_rejected_total += 1
+                            raise HTTPSessionAdmissionError(
+                                "http_session_capacity",
+                                "maximum HTTP session count reached",
+                            )
+                        if not waiting:
+                            waiting = True
+                            self._waiting_initializations += 1
+                            self._initialization_waited_total += 1
+                        self._condition.wait(timeout=remaining)
+                        continue
+                if reclaimed is not None:
+                    self._close_detached_record(reclaimed)
+        finally:
+            if waiting:
+                with self._condition:
+                    self._waiting_initializations = max(0, self._waiting_initializations - 1)
+                    self._condition.notify_all()
 
         runtime: Any | None = None
         installed = False
@@ -196,6 +257,28 @@ class HTTPSessionManager:
                     else:
                         self._creating_by_identity.pop(quota_key, None)
                     self._condition.notify_all()
+
+    def _detach_oldest_idle_locked(
+        self,
+        quota_key: Hashable,
+    ) -> HTTPSessionRecord | None:
+        for session_id in tuple(self._idle_order):
+            record = self._sessions.get(session_id)
+            if (
+                record is None
+                or record.closing
+                or record.active_request_leases
+                or record.quota_key != quota_key
+            ):
+                continue
+            record.closing = True
+            self._idle_order.pop(session_id, None)
+            self._sessions.pop(session_id, None)
+            self._decrement_identity_locked(record.quota_key)
+            self._pending_closes += 1
+            self._reclaimed_total += 1
+            return record
+        return None
 
     @contextmanager
     def lease(self, session_id: str) -> Iterator[Any | None]:
@@ -322,6 +405,7 @@ class HTTPSessionManager:
                 "active_sessions": active_sessions,
                 "idle_sessions": idle_sessions,
                 "creating_sessions": self._creating,
+                "waiting_initializations": self._waiting_initializations,
                 "closing_sessions": closing_sessions,
                 "capacity_total": self.limits.max_total,
                 "capacity_per_identity": self.limits.max_per_identity,
@@ -334,6 +418,8 @@ class HTTPSessionManager:
                 "capacity_rejected_total": self._capacity_rejected_total,
                 "identity_quota_rejected_total": self._identity_quota_rejected_total,
                 "initialization_rejected_total": self._initialization_rejected_total,
+                "initialization_waited_total": self._initialization_waited_total,
+                "reclaimed_total": self._reclaimed_total,
                 "closed": self._closed,
             }
 
