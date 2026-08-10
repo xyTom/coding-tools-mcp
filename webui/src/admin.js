@@ -58,6 +58,13 @@ function containsCredentialControl(value) {
   });
 }
 
+function restartImpactCount(settings, gateway) {
+  const settingsPending = Array.isArray(settings?.pendingRestart)
+    ? settings.pendingRestart.length
+    : 0;
+  return settingsPending + (gateway?.restart_required ? 1 : 0);
+}
+
 function gatewayServerTemplate(alias = 'new-upstream') {
   return {
     servers: {
@@ -257,15 +264,57 @@ function adminComponentForPath(path) {
   return 'status';
 }
 
-function createApiClient(getToken, fetchImpl = globalThis.fetch, onActivity = null) {
+async function parseAdminResponse(response) {
+  let payload = {};
+  try { payload = await response.json(); } catch { payload = {}; }
+  if (!response.ok) throw new ApiError(response.status, payload);
+  return payload;
+}
+
+async function createAdminSession(adminToken, fetchImpl = globalThis.fetch) {
+  const response = await fetchImpl('/admin/api/session', {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ admin_token: String(adminToken || '') }),
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  return parseAdminResponse(response);
+}
+
+async function restoreAdminSession(fetchImpl = globalThis.fetch) {
+  const response = await fetchImpl('/admin/api/session', {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  return parseAdminResponse(response);
+}
+
+async function revokeAdminSession(csrfToken, fetchImpl = globalThis.fetch) {
+  const headers = new Headers({ Accept: 'application/json' });
+  if (csrfToken) headers.set('X-Admin-CSRF', String(csrfToken));
+  const response = await fetchImpl('/admin/api/session', {
+    method: 'DELETE',
+    headers,
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  return parseAdminResponse(response);
+}
+
+function createApiClient(getCsrfToken, fetchImpl = globalThis.fetch, onActivity = null) {
   async function request(path, options = {}) {
-    const token = String(getToken?.() || '');
     const method = options.method || 'GET';
     const startedAt = Date.now();
     const headers = new Headers(options.headers || {});
     headers.set('Accept', 'application/json');
     if (options.body !== undefined) headers.set('Content-Type', 'application/json');
-    if (token) headers.set('Authorization', `Bearer ${token}`);
+    if (!['GET', 'HEAD'].includes(method)) {
+      const csrfToken = String(getCsrfToken?.() || '');
+      if (csrfToken) headers.set('X-Admin-CSRF', csrfToken);
+    }
     try {
       const response = await fetchImpl(`/admin/api${path}`, {
         method,
@@ -618,7 +667,7 @@ function initAdminApp(documentRef = document) {
   const workspaceEditor = globalThis.McpWorkspaceEditor;
   const settingsPage = globalThis.McpSettingsPage;
   const state = {
-    token: '', settings: null, workspaces: [], workspaceRevision: '', gateway: null,
+    authenticated: false, csrfToken: '', settings: null, workspaces: [], workspaceRevision: '', gateway: null,
     gatewayRevision: '', editingGatewayAlias: '', conversationPage: 1, conversationTotal: 0,
     selectedConversation: null, messagePage: 1, contextPage: 1,
     clientPasswordClientId: '', clientPasswordReturnFocus: null, section: 'overview',
@@ -634,7 +683,7 @@ function initAdminApp(documentRef = document) {
     if (byId('activityLogDialog')?.open) renderActivityLogs();
   }
 
-  const api = createApiClient(() => state.token, globalThis.fetch, recordActivity);
+  const api = createApiClient(() => state.csrfToken, globalThis.fetch, recordActivity);
 
   function status(message, kind = '') {
     const box = byId('globalStatus');
@@ -802,7 +851,8 @@ function initAdminApp(documentRef = document) {
     const exposure = state.gateway?.active_status?.exposure_report;
     const catalogCount = Number(exposure?.catalog?.count || exposure?.direct?.count || 0);
     const missingClientAccess = state.oauthClients.filter((client) => client?.enabled !== false && clientWorkspaceIds(client).length === 0);
-    const restartCount = Number(Boolean(state.gateway?.restart_required)) + Number(Boolean(state.settings?.restartRequired)) + Number(state.settings?.pendingRestart?.length || 0);
+    const restartCount = restartImpactCount(state.settings, state.gateway);
+    const overriddenSettings = Object.entries(state.settings?.fieldStatus || {}).filter(([, item]) => item?.state === 'overridden');
 
     const navConnections = byId('navConnectionCount');
     const navWorkspaces = byId('navWorkspaceCount');
@@ -817,6 +867,7 @@ function initAdminApp(documentRef = document) {
       taskRoot.replaceChildren();
       const tasks = [];
       if (restartCount) tasks.push({ kind: 'warning', icon: 'alert', title: '需要重启服务', detail: '工具网关或服务器设置已保存，但当前运行时仍可能使用旧快照。', action: '查看影响', section: 'system' });
+      if (overriddenSettings.length) tasks.push({ kind: 'warning', icon: 'settings', title: '启动参数覆盖 Persisted', detail: `${overriddenSettings.length} 个设置由 Desktop、CLI 或环境变量控制；单纯重启不会采用已保存值。`, action: '查看来源', section: 'system' });
       if (!defaultWorkspace) tasks.push({ kind: 'danger', icon: 'folder', title: '检查默认工作区', detail: '当前没有启用且可作为默认项的工作区。', action: '查看工作区', section: 'workspaces' });
       if (missingClientAccess.length) tasks.push({ kind: 'danger', icon: 'users', title: 'OAuth Client 配置', detail: `${missingClientAccess.length} 个启用 Client 缺少 Workspace allowlist。`, action: '查看详情', section: 'oauth' });
       if (!aliases.length) tasks.push({ kind: 'warning', icon: 'plug', title: '尚未配置工具连接', detail: '添加上游 MCP 后才能通过工具网关提供能力。', action: '添加连接', section: 'gateway' });
@@ -908,9 +959,28 @@ function initAdminApp(documentRef = document) {
       });
     }
 
+    const hostStatus = state.settings?.fieldStatus?.host;
+    const executionStatus = state.settings?.fieldStatus?.execution_fs_mode;
+    const restartNotes = [];
+    if (hostStatus?.state === 'overridden' && hostStatus?.source === 'desktop_cli') {
+      restartNotes.push('Host 被 Desktop 启动参数覆盖，重启不会采用 Persisted 值。请在 Desktop profile 修改。');
+    }
+    if (executionStatus?.state === 'in_sync_default') {
+      restartNotes.push('execution_fs_mode 未显式配置，默认值与当前运行时一致，无需重启。');
+    }
     if (byId('systemRestartCount')) byId('systemRestartCount').textContent = String(restartCount);
-    if (byId('systemRestartTitle')) byId('systemRestartTitle').textContent = restartCount ? `${restartCount} 项等待生效` : '没有等待生效的项目';
-    if (byId('systemRestartDetail')) byId('systemRestartDetail').textContent = restartCount ? '工具网关或服务器设置需要新建运行时或服务重启。' : 'Active 与 Persisted 配置已同步。';
+    if (byId('systemRestartTitle')) {
+      byId('systemRestartTitle').textContent = restartCount
+        ? `${restartCount} 项等待生效`
+        : overriddenSettings.length
+          ? '没有可通过重启生效的项目'
+          : '没有等待生效的项目';
+    }
+    if (byId('systemRestartDetail')) {
+      const actionable = restartCount ? '仅上方计数中的项目可通过新建运行时或服务重启生效。' : '';
+      const fallback = overriddenSettings.length ? '存在启动器、CLI 或环境变量覆盖，请按来源修改。' : 'Active 与 Effective Persisted 配置已同步。';
+      byId('systemRestartDetail').textContent = [...restartNotes, actionable || fallback].filter(Boolean).join(' ');
+    }
   }
 
   function activityTime(timestamp) {
@@ -1011,7 +1081,13 @@ function initAdminApp(documentRef = document) {
   }
 
   function safeSettingsPayload(payload) {
-    return { ...payload, active: sanitizeAdminValue(payload.active), persisted: sanitizeAdminValue(payload.persisted) };
+    return {
+      ...payload,
+      active: sanitizeAdminValue(payload.active),
+      persisted: sanitizeAdminValue(payload.persisted),
+      effective_persisted: sanitizeAdminValue(payload.effective_persisted),
+      field_status: sanitizeAdminValue(payload.field_status),
+    };
   }
 
   async function loadSettings({ preserveDraft = false } = {}) {
@@ -1320,6 +1396,23 @@ function initAdminApp(documentRef = document) {
     status('Admin 数据已刷新。');
   }
 
+  async function bootstrapAdminSession() {
+    try {
+      const session = await restoreAdminSession(globalThis.fetch);
+      state.csrfToken = String(session.csrf_token || '');
+      state.authenticated = true;
+      setAuthenticationUi(documentRef, true);
+      await refreshAll();
+    } catch (error) {
+      state.csrfToken = '';
+      state.authenticated = false;
+      setAuthenticationUi(documentRef, false);
+      if (!(error instanceof ApiError) || error.status !== 401) {
+        status(error.message, 'danger');
+      }
+    }
+  }
+
   byId('fakeReadonlyLabel').textContent = copy.FAKE_READONLY_COPY.label;
   byId('fakeReadonlyWarning').textContent = copy.FAKE_READONLY_COPY.warning;
   byId('fakeReadonlyEnable').textContent = copy.FAKE_READONLY_COPY.enable;
@@ -1369,7 +1462,7 @@ function initAdminApp(documentRef = document) {
     renderActivityLogs();
   });
   byId('refreshCurrent')?.addEventListener('click', () => {
-    if (!state.token) {
+    if (!state.authenticated) {
       byId('authDialog')?.showModal();
       byId('adminToken')?.focus();
       return;
@@ -1389,22 +1482,45 @@ function initAdminApp(documentRef = document) {
   });
   byId('authForm').addEventListener('submit', async (event) => {
     event.preventDefault();
-    state.token = byId('adminToken').value;
+    const adminToken = byId('adminToken').value;
+    byId('adminToken').value = '';
     try {
-      await refreshAll();
+      const session = await createAdminSession(adminToken, globalThis.fetch);
+      state.csrfToken = String(session.csrf_token || '');
+      state.authenticated = true;
       setAuthenticationUi(documentRef, true);
+      await refreshAll();
       byId('authDialog')?.close();
     } catch (error) {
+      state.csrfToken = '';
+      state.authenticated = false;
       setAuthenticationUi(documentRef, false);
       status(error.message, 'danger');
     }
   });
-  byId('forgetToken').addEventListener('click', () => {
-    state.token = '';
-    setAuthenticationUi(documentRef, false);
-    status('Admin token 已从页面内存清除。');
-    byId('authDialog')?.showModal();
-    byId('adminToken').focus();
+  byId('forgetToken').addEventListener('click', async () => {
+    try {
+      if (state.authenticated) {
+        await revokeAdminSession(state.csrfToken, globalThis.fetch);
+      }
+      state.csrfToken = '';
+      state.authenticated = false;
+      setAuthenticationUi(documentRef, false);
+      status('Admin Session 已注销并在服务器端立即吊销。');
+      byId('authDialog')?.showModal();
+      byId('adminToken').focus();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        state.csrfToken = '';
+        state.authenticated = false;
+        setAuthenticationUi(documentRef, false);
+        status('Admin Session 已失效，请重新连接。', 'warning');
+        byId('authDialog')?.showModal();
+        byId('adminToken').focus();
+        return;
+      }
+      status(error.message, 'danger');
+    }
   });
   byId('refreshAll').addEventListener('click', () => refreshAll().catch((error) => status(error.message, 'danger')));
   byId('reloadSettings').addEventListener('click', () => loadSettings().then(() => status('Settings 已重新读取。')).catch((error) => status(error.message, 'danger')));
@@ -1537,6 +1653,7 @@ function initAdminApp(documentRef = document) {
   resetGatewayServerForm();
   wirePasswordVisibilityToggles(documentRef);
   setAuthenticationUi(documentRef, false);
+  void bootstrapAdminSession();
 
   return { state, api, refreshAll, loadSettings, loadWorkspaces, loadGateway, loadOAuth, loadSecrets, loadConversations, loadConversationDetail, showSection };
 }
@@ -1545,6 +1662,10 @@ globalThis.McpAdminApp = {
   ApiError,
   sanitizeAdminValue,
   containsCredentialControl,
+  restartImpactCount,
+  createAdminSession,
+  restoreAdminSession,
+  revokeAdminSession,
   gatewayServerFromForm,
   gatewayServerTemplate,
   gatewayExposurePreview,
@@ -1563,4 +1684,4 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => initAdminApp(document));
 }
 
-export { ApiError, sanitizeAdminValue, containsCredentialControl, gatewayServerFromForm, gatewayServerTemplate, gatewayExposurePreview, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, setPasswordVisibility, setAuthenticationUi, initAdminApp };
+export { ApiError, sanitizeAdminValue, containsCredentialControl, restartImpactCount, createAdminSession, restoreAdminSession, revokeAdminSession, gatewayServerFromForm, gatewayServerTemplate, gatewayExposurePreview, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, setPasswordVisibility, setAuthenticationUi, initAdminApp };

@@ -15,6 +15,16 @@ PERMISSION_MODE_CHOICES = ("safe", "trusted", "dangerous")
 EXECUTION_FS_MODE_CHOICES = ("normal", "inspect")
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
 LEGACY_TOOL_PROFILE_WARNING = "legacy_tool_profile_ignored"
+EFFECTIVE_DEFAULTS: dict[str, Any] = {
+    "host": "127.0.0.1",
+    "port": 8000,
+    "permission_mode": "safe",
+    "execution_fs_mode": "normal",
+    "shell_env_inherit": "core",
+    "allowed_origins": [],
+    "oauth_compatibility_mode": False,
+    "oauth_client_workspace_bindings": {},
+}
 SECRET_REFERENCE_FIELDS = frozenset(
     {
         "auth_token_secret_ref",
@@ -315,14 +325,73 @@ def normalize_startup_settings(
     return settings
 
 
+def effective_startup_settings(
+    settings: dict[str, Any],
+    fallback_workspace: str | Path | None = None,
+) -> dict[str, Any]:
+    """Return the effective startup view used for restart comparisons.
+
+    Persisted JSON intentionally omits values that use process defaults.  Raw
+    JSON comparison therefore produces false restart warnings.  This helper
+    fills those defaults and canonicalizes values before comparing them with
+    the active runtime snapshot.
+    """
+
+    effective, _warnings = migrate_persisted_settings(settings)
+    for field, default in EFFECTIVE_DEFAULTS.items():
+        if field not in effective or effective[field] is None or effective[field] == "":
+            if isinstance(default, list):
+                effective[field] = list(default)
+            elif isinstance(default, dict):
+                effective[field] = dict(default)
+            else:
+                effective[field] = default
+
+    effective["host"] = _normalize_host(effective["host"])
+    try:
+        effective["port"] = int(effective["port"])
+    except (TypeError, ValueError) as exc:
+        raise SettingsValidationError({"port": "Port must be an integer from 1 to 65535."}) from exc
+    if not 1 <= effective["port"] <= 65535:
+        raise SettingsValidationError({"port": "Port must be an integer from 1 to 65535."})
+    effective["permission_mode"] = _normalize_choice(
+        effective["permission_mode"], "permission_mode", PERMISSION_MODE_CHOICES
+    )
+    effective["execution_fs_mode"] = _normalize_choice(
+        effective["execution_fs_mode"], "execution_fs_mode", EXECUTION_FS_MODE_CHOICES
+    )
+    effective["shell_env_inherit"] = _normalize_choice(
+        effective["shell_env_inherit"], "shell_env_inherit", SHELL_ENV_INHERIT_CHOICES
+    )
+    effective["allowed_origins"] = normalize_allowed_origins(effective["allowed_origins"])
+    if "oauth_server_url" in effective:
+        effective["oauth_server_url"] = _normalize_url(effective["oauth_server_url"])
+
+    if fallback_workspace is not None:
+        try:
+            catalog = WorkspaceCatalog.from_settings(effective, fallback_workspace)
+        except WorkspaceCatalogError as exc:
+            raise SettingsValidationError({"workspace_catalog": str(exc)}) from exc
+        effective.update(catalog.settings_payload())
+        effective["workspace"] = str(catalog.default().root)
+        effective["oauth_client_workspace_bindings"] = normalize_oauth_client_workspace_bindings(
+            effective.get("oauth_client_workspace_bindings"),
+            catalog,
+        )
+    return effective
+
+
 def pending_restart_fields(
     active: dict[str, Any],
     persisted: dict[str, Any],
+    fallback_workspace: str | Path | None = None,
 ) -> list[str]:
+    effective_active = effective_startup_settings(active, fallback_workspace)
+    effective_persisted = effective_startup_settings(persisted, fallback_workspace)
     return sorted(
         field
         for field in RESTART_FIELDS
-        if active.get(field) != persisted.get(field)
+        if effective_active.get(field) != effective_persisted.get(field)
     )
 
 

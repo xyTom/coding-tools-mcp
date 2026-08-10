@@ -74,10 +74,15 @@
             <span class="agent-welcome-icon"><svg class="icon"><use href="#i-message"></use></svg></span>
             <span class="agent-onboarding-badge">可选功能</span>
             <h2>Coding Tools MCP Codex Agent 工作台</h2>
-            <p class="agent-onboarding-lead">这是可选的 Codex Agent 工作台，不是 GPT/ChatGPT 网页。它在执行主机上调用已经登录的 Codex CLI。</p>
+            <p class="agent-onboarding-lead">这是可选的浏览器版 Codex Agent 工作台，不是 GPT/ChatGPT 网页，也不是 Admin 页面。它在执行主机上调用已经登录的 Codex CLI；如果只通过 Claude、Cursor、Codex 等外部客户端使用 MCP，可以忽略 /app。</p>
+            <div class="agent-onboarding-grid">
+              <article><h3><code>/mcp</code></h3><p>外部 AI 客户端通过这里使用 Coding Tools MCP 工具。</p></article>
+              <article><h3><code>/admin</code></h3><p>管理员通过这里管理服务器，使用独立的 <code>CODING_TOOLS_MCP_ADMIN_TOKEN</code>。</p></article>
+              <article><h3><code>/app</code></h3><p>人类通过浏览器操作持久化 Codex Agent Session，使用普通 bearer 或 OAuth access token。</p></article>
+            </div>
             <div class="agent-onboarding-grid">
               <article><h3>运行前提</h3><p>执行主机必须安装 Codex CLI，并已完成 Codex 登录（例如先运行 codex login）。本地 Workspace 使用本机；Runner Workspace 使用对应 Runner 主机。</p></article>
-              <article><h3>三套凭据互不相同</h3><p>App bearer、Admin token、Codex 登录凭据是三套不同凭据。App bearer 登录 /app，Admin token 登录 /admin，Codex 登录凭据由 Codex CLI 自己管理。</p></article>
+              <article><h3>三套凭据互不相同</h3><p><code>/app</code> 使用 <code>CODING_TOOLS_MCP_AUTH_TOKEN</code> 或 OAuth access token；<code>/admin</code> 使用 <code>CODING_TOOLS_MCP_ADMIN_TOKEN</code>；Codex 模型使用执行主机上的 Codex CLI 登录凭据。三者不能互相替代。</p></article>
               <article><h3>持久化由两部分共同完成</h3><p>持久化由 Coding Tools MCP SQLite 与 Codex thread store 共同完成。前者保存 Agent Session 元数据，后者保存模型 thread 与对话连续性。</p></article>
             </div>
             <p>准备完成后，选择左侧历史 Session，或在当前 Workspace 创建新的 Codex Session。页面刷新不会自动重复最后一次 Turn。</p>
@@ -121,9 +126,9 @@
 
   <dialog id="operatorAuthDialog" aria-labelledby="operatorAuthTitle">
     <form id="operatorAuthForm" class="dialog-card" autocomplete="off">
-      <header><div><h2 id="operatorAuthTitle">连接 Operator 身份</h2><p>这里没有单独的 App 密码。请输入启动服务时设置的普通 bearer token。</p></div></header>
+      <header><div><h2 id="operatorAuthTitle">连接 Operator 身份</h2><p>这里没有单独的 App 密码。请输入普通 bearer token 或 OAuth access token。</p></div></header>
       <div class="dialog-body">
-        <label for="operatorAccessToken">Operator bearer token（通常是 CODING_TOOLS_MCP_AUTH_TOKEN）
+        <label for="operatorAccessToken">Operator token（CODING_TOOLS_MCP_AUTH_TOKEN 或 OAuth access token）
           <input id="operatorAccessToken" type="password" autocomplete="off" required>
         </label>
         <p class="help">Admin token 不能用于这里；此 token 不在 WebUI 中创建，只保存在当前页面内存中。</p>

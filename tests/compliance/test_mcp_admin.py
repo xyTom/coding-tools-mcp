@@ -204,6 +204,38 @@ class AdminServiceTests(unittest.TestCase):
                 {"expected_revision": revision, "updates": {"port": 9001}}
             )
 
+    def test_settings_report_effective_defaults_and_desktop_override_without_false_restart(self) -> None:
+        persisted = self.store.read()
+        persisted["port"] = 7000
+        persisted["host"] = "0.0.0.0"
+        persisted.pop("execution_fs_mode", None)
+        self.store.write(persisted)
+        self.service.active_settings["host"] = "127.0.0.1"
+        self.service.active_settings["execution_fs_mode"] = "normal"
+        self.service.active_sources.update(
+            {
+                "host": "desktop_cli",
+                "execution_fs_mode": "default",
+            }
+        )
+        self.service.launcher = "desktop"
+
+        payload = self.service.settings_payload()
+
+        host = payload["field_status"]["host"]
+        execution = payload["field_status"]["execution_fs_mode"]
+        self.assertEqual(host["source"], "desktop_cli")
+        self.assertEqual(host["state"], "overridden")
+        self.assertFalse(host["restart_actionable"])
+        self.assertNotIn("host", payload["pending_restart"])
+        self.assertIn("host", payload["managed_fields"])
+        self.assertEqual(payload["launcher"], "desktop")
+        self.assertEqual(execution["active"], "normal")
+        self.assertIsNone(execution["persisted"])
+        self.assertEqual(execution["effective_persisted"], "normal")
+        self.assertEqual(execution["state"], "in_sync_default")
+        self.assertNotIn("execution_fs_mode", payload["pending_restart"])
+
     def test_settings_and_http_cors_use_the_same_origin_validator(self) -> None:
         validated = self.service.validate_settings(
             {"updates": {"allowed_origins": ["HTTPS://Example.COM:443/"]}}
@@ -668,6 +700,144 @@ class AdminServiceTests(unittest.TestCase):
 
 
 class AdminHTTPAuthenticationTests(unittest.TestCase):
+    def test_admin_browser_session_exchange_requires_csrf_and_logout_revokes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = ServerSettingsStore(root / "settings.json")
+            workspace = root / "workspace"
+            workspace.mkdir()
+            settings.write({"workspace": str(workspace), "port": 8000})
+            vault = SecretVault(root / "vault.json", "key")
+            service = AdminService(
+                settings_store=settings,
+                active_settings={"workspace": str(workspace), "port": 8000},
+                fallback_workspace=workspace,
+                gateway_path=root / "gateway.json",
+                active_gateway_revision=document_revision({"servers": {}}),
+                secret_vault=vault,
+            )
+            runtime = Runtime(workspace, transport="http")
+            server = RuntimeHTTPServer(
+                ("127.0.0.1", 0),
+                MCPHandler,
+                runtime,
+                lambda _context: Runtime(workspace, transport="http"),
+                admin_service=service,
+                admin_token="dedicated-admin-token",
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}/admin/api"
+            try:
+                login = urllib.request.Request(
+                    f"{base}/session",
+                    data=json.dumps({"admin_token": "dedicated-admin-token"}).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Forwarded-Proto": "https",
+                    },
+                    method="POST",
+                )
+                with patch.dict(
+                    "os.environ",
+                    {"CODING_TOOLS_MCP_TRUST_PROXY_HEADERS": "1"},
+                    clear=False,
+                ):
+                    with urllib.request.urlopen(login, timeout=5) as response:
+                        payload = json.loads(response.read())
+                        set_cookie = response.headers.get("Set-Cookie", "")
+                self.assertEqual(response.status, 201)
+                self.assertIn("csrf_token", payload)
+                self.assertNotIn("dedicated-admin-token", json.dumps(payload))
+                self.assertIn("coding_tools_mcp_admin_session=", set_cookie)
+                self.assertIn("Path=/admin/api", set_cookie)
+                self.assertIn("HttpOnly", set_cookie)
+                self.assertIn("SameSite=Strict", set_cookie)
+                self.assertIn("Secure", set_cookie)
+                self.assertNotIn("dedicated-admin-token", set_cookie)
+                cookie = set_cookie.split(";", 1)[0]
+
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"{base}/status",
+                        headers={"Cookie": cookie},
+                    ),
+                    timeout=5,
+                ) as response:
+                    status_payload = json.loads(response.read())
+                self.assertTrue(status_payload["ok"])
+
+                current_revision = service.settings_payload()["persisted_revision"]
+                without_csrf = urllib.request.Request(
+                    f"{base}/settings",
+                    data=json.dumps(
+                        {
+                            "expected_revision": current_revision,
+                            "updates": {"port": 8100},
+                        }
+                    ).encode("utf-8"),
+                    headers={"Cookie": cookie, "Content-Type": "application/json"},
+                    method="PUT",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as denied:
+                    urllib.request.urlopen(without_csrf, timeout=5)
+                self.assertEqual(denied.exception.code, 403)
+                self.assertEqual(
+                    json.loads(denied.exception.read())["error"]["code"],
+                    "admin_csrf_required",
+                )
+
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"{base}/settings",
+                        data=json.dumps(
+                            {
+                                "expected_revision": current_revision,
+                                "updates": {"port": 8100},
+                            }
+                        ).encode("utf-8"),
+                        headers={
+                            "Cookie": cookie,
+                            "Content-Type": "application/json",
+                            "X-Admin-CSRF": payload["csrf_token"],
+                        },
+                        method="PUT",
+                    ),
+                    timeout=5,
+                ) as response:
+                    saved = json.loads(response.read())
+                self.assertEqual(saved["persisted"]["port"], 8100)
+
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"{base}/session",
+                        headers={
+                            "Cookie": cookie,
+                            "X-Admin-CSRF": payload["csrf_token"],
+                        },
+                        method="DELETE",
+                    ),
+                    timeout=5,
+                ) as response:
+                    logout = json.loads(response.read())
+                    cleared_cookie = response.headers.get("Set-Cookie", "")
+                self.assertTrue(logout["revoked"])
+                self.assertIn("Max-Age=0", cleared_cookie)
+
+                with self.assertRaises(urllib.error.HTTPError) as revoked:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            f"{base}/status",
+                            headers={"Cookie": cookie},
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(revoked.exception.code, 401)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_admin_shell_is_public_but_api_requires_dedicated_token(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

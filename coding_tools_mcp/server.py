@@ -10,6 +10,7 @@ import html
 import difflib
 import fnmatch
 import functools
+import http.cookies
 import http.server
 import json
 import math
@@ -21,6 +22,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import ssl
 import stat
 import subprocess
 import sys
@@ -47,6 +49,11 @@ from .admin import (
     AdminServiceError,
     AdminUnavailableError,
     gateway_file_revision,
+)
+from .admin_sessions import (
+    ADMIN_SESSION_ABSOLUTE_LIFETIME_SECONDS,
+    ADMIN_SESSION_COOKIE,
+    AdminSessionStore,
 )
 from .envutils import ENV_PREFIX, truthy_env
 from .execution import ExecutionBackend, LocalExecutionBackend
@@ -154,6 +161,7 @@ from .upstream import (
 )
 from .upstream_search import ToolSearchFilters
 from .upstream_result_store import RESULT_FETCH_MAX_CODEPOINTS, ResultNotFound
+from .validation import ValidationBackend
 from .workspace_binding import (
     WorkspaceBinding,
     WorkspaceBindingError,
@@ -5728,7 +5736,47 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
             return
 
-    def _is_admin_authorized(self) -> bool:
+    def _admin_session_store(self) -> AdminSessionStore | None:
+        store = getattr(self.server, "admin_sessions", None)  # type: ignore[attr-defined]
+        return store if isinstance(store, AdminSessionStore) else None
+
+    def _admin_session_id(self) -> str:
+        raw_cookie = self.headers.get("Cookie", "")
+        if not raw_cookie:
+            return ""
+        cookie = http.cookies.SimpleCookie()
+        try:
+            cookie.load(raw_cookie)
+        except http.cookies.CookieError:
+            return ""
+        morsel = cookie.get(ADMIN_SESSION_COOKIE)
+        return morsel.value.strip() if morsel is not None else ""
+
+    def _request_is_secure(self) -> bool:
+        if isinstance(self.connection, ssl.SSLSocket):
+            return True
+        if not truthy_env(os.environ.get(f"{ENV_PREFIX}_TRUST_PROXY_HEADERS")):
+            return False
+        proto = _first_header_value(self.headers.get("X-Forwarded-Proto"))
+        if not proto:
+            proto = _forwarded_header_param(self.headers.get("Forwarded"), "proto")
+        return proto.strip().lower() == "https"
+
+    def _admin_session_cookie_header(self, session_id: str, *, clear: bool = False) -> str:
+        value = "" if clear else session_id
+        max_age = 0 if clear else ADMIN_SESSION_ABSOLUTE_LIFETIME_SECONDS
+        parts = [
+            f"{ADMIN_SESSION_COOKIE}={value}",
+            "Path=/admin/api",
+            "HttpOnly",
+            "SameSite=Strict",
+            f"Max-Age={max_age}",
+        ]
+        if self._request_is_secure():
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def _is_admin_token_authorized(self) -> bool:
         configured = getattr(self.server, "admin_token", None)  # type: ignore[attr-defined]
         if not isinstance(configured, str) or not configured:
             return False
@@ -5738,6 +5786,128 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if bearer.startswith("Bearer "):
             candidates.append(bearer.removeprefix("Bearer ").strip())
         return any(value and secrets.compare_digest(value, configured) for value in candidates)
+
+    def _is_admin_authorized(self) -> bool:
+        if self._is_admin_token_authorized():
+            return True
+        store = self._admin_session_store()
+        return bool(store and store.authorize(self._admin_session_id()))
+
+    def _handle_admin_session_request(
+        self,
+        method: str,
+        *,
+        head_only: bool = False,
+    ) -> None:
+        store = self._admin_session_store()
+        configured = getattr(self.server, "admin_token", None)  # type: ignore[attr-defined]
+        if store is None or not isinstance(configured, str) or not configured:
+            self.send_json({"error": "Unknown endpoint"}, status=404, head_only=head_only)
+            return
+
+        if method == "POST":
+            body = self._read_admin_json()
+            if body is None:
+                return
+            supplied = body.get("admin_token")
+            if not isinstance(supplied, str) or not supplied or not secrets.compare_digest(
+                supplied,
+                configured,
+            ):
+                self.send_json(
+                    {
+                        "error": {
+                            "code": "admin_auth_required",
+                            "message": "Admin authentication is required",
+                        }
+                    },
+                    status=401,
+                    extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-admin"'},
+                )
+                return
+            session_id, csrf_token = store.create()
+            self.send_json(
+                {
+                    "ok": True,
+                    "csrf_token": csrf_token,
+                    "idle_timeout_seconds": store.idle_timeout_seconds,
+                    "absolute_lifetime_seconds": store.absolute_lifetime_seconds,
+                },
+                status=201,
+                extra_headers={"Set-Cookie": self._admin_session_cookie_header(session_id)},
+                head_only=head_only,
+            )
+            return
+
+        session_id = self._admin_session_id()
+        if method == "GET":
+            csrf_token = store.issue_csrf(session_id)
+            if csrf_token is None:
+                self.send_json(
+                    {
+                        "error": {
+                            "code": "admin_auth_required",
+                            "message": "Admin authentication is required",
+                        }
+                    },
+                    status=401,
+                    head_only=head_only,
+                )
+                return
+            self.send_json(
+                {
+                    "ok": True,
+                    "csrf_token": csrf_token,
+                    "idle_timeout_seconds": store.idle_timeout_seconds,
+                    "absolute_lifetime_seconds": store.absolute_lifetime_seconds,
+                },
+                head_only=head_only,
+            )
+            return
+
+        if method == "DELETE":
+            if not store.is_active(session_id):
+                self.send_json(
+                    {
+                        "error": {
+                            "code": "admin_auth_required",
+                            "message": "Admin authentication is required",
+                        }
+                    },
+                    status=401,
+                    head_only=head_only,
+                )
+                return
+            csrf_token = self.headers.get("X-Admin-CSRF", "").strip()
+            if not store.authorize(
+                session_id,
+                csrf_token=csrf_token,
+                require_csrf=True,
+            ):
+                self.send_json(
+                    {
+                        "error": {
+                            "code": "admin_csrf_required",
+                            "message": "A valid Admin CSRF token is required",
+                        }
+                    },
+                    status=403,
+                    head_only=head_only,
+                )
+                return
+            store.revoke(session_id)
+            self.send_json(
+                {"ok": True, "revoked": True},
+                extra_headers={"Set-Cookie": self._admin_session_cookie_header("", clear=True)},
+                head_only=head_only,
+            )
+            return
+
+        self.send_json(
+            {"error": {"code": "method_not_allowed", "message": "Method not allowed"}},
+            status=405,
+            head_only=head_only,
+        )
 
     def _read_admin_json(self) -> dict[str, Any] | None:
         if self.command in {"GET", "HEAD", "DELETE"}:
@@ -5776,21 +5946,54 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if origin and not is_allowed_origin(origin):
             self.send_json({"error": {"code": "origin_denied", "message": "Origin denied"}}, status=403, head_only=head_only)
             return
-        if not self._is_admin_authorized():
-            self.send_json(
-                {"error": {"code": "admin_auth_required", "message": "Admin authentication is required"}},
-                status=401,
-                extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-admin"'},
-                head_only=head_only,
-            )
+        parsed = urllib.parse.urlsplit(self.path)
+        normalized_path = posixpath.normpath(parsed.path)
+        if normalized_path == f"{ADMIN_API_PREFIX}/session":
+            self._handle_admin_session_request(method, head_only=head_only)
             return
+
+        if not self._is_admin_token_authorized():
+            store = self._admin_session_store()
+            session_id = self._admin_session_id()
+            if store is None or not store.is_active(session_id):
+                self.send_json(
+                    {"error": {"code": "admin_auth_required", "message": "Admin authentication is required"}},
+                    status=401,
+                    extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-admin"'},
+                    head_only=head_only,
+                )
+                return
+            if method in {"POST", "PUT", "DELETE"}:
+                if not store.authorize(
+                    session_id,
+                    csrf_token=self.headers.get("X-Admin-CSRF", "").strip(),
+                    require_csrf=True,
+                ):
+                    self.send_json(
+                        {
+                            "error": {
+                                "code": "admin_csrf_required",
+                                "message": "A valid Admin CSRF token is required",
+                            }
+                        },
+                        status=403,
+                        head_only=head_only,
+                    )
+                    return
+            elif not store.authorize(session_id):
+                self.send_json(
+                    {"error": {"code": "admin_auth_required", "message": "Admin authentication is required"}},
+                    status=401,
+                    extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-admin"'},
+                    head_only=head_only,
+                )
+                return
         body = self._read_admin_json()
         if body is None:
             return
-        parsed = urllib.parse.urlsplit(self.path)
         query = {key: values[-1] for key, values in urllib.parse.parse_qs(parsed.query).items() if values}
         try:
-            payload = service.dispatch(method, posixpath.normpath(parsed.path), body, query)
+            payload = service.dispatch(method, normalized_path, body, query)
         except AdminUnavailableError as exc:
             self.send_json(
                 {
@@ -6820,7 +7023,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, DELETE, OPTIONS")
             self.send_header(
                 "Access-Control-Allow-Headers",
-                "Accept, Authorization, X-Admin-Token, Content-Type, MCP-Protocol-Version, Mcp-Session-Id",
+                "Accept, Authorization, X-Admin-Token, X-Admin-CSRF, Content-Type, MCP-Protocol-Version, Mcp-Session-Id",
             )
 
     def send_json(
@@ -6870,6 +7073,7 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         self.sessions = HTTPSessionManager(runtime_factory, limits=session_limits)
         self.admin_service = admin_service
         self.admin_token = admin_token or None
+        self.admin_sessions = AdminSessionStore() if self.admin_token else None
         self.operator_service = operator_service
         self.runner_route_service = runner_route_service
         self.runner_credentials = runner_credentials
@@ -6877,6 +7081,8 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         self.runner_job_reconciler = runner_job_reconciler
 
     def server_close(self) -> None:
+        if self.admin_sessions is not None:
+            self.admin_sessions.revoke_all()
         if self.runner_route_service is not None:
             self.runner_route_service.close_transports_sync()
         self.sessions.close()
@@ -7105,25 +7311,54 @@ def load_workspace_startup(
 def apply_persisted_runtime_settings(
     args: argparse.Namespace,
     settings: dict[str, Any],
-) -> None:
+) -> dict[str, str]:
     """Apply WebUI-persisted startup settings before building runtime policy.
 
     Command line arguments and explicit environment variables remain the
     highest-precedence startup controls. The admin settings store is the
     fallback source for values edited in WebUI, so a service restart actually
     activates those saved values.
+
+    The returned source map is intentionally non-sensitive and is exposed by
+    the Admin status API so operators can distinguish persisted/default values
+    from CLI, Desktop, or environment overrides.
     """
 
-    if getattr(args, "host", None) is None:
-        args.host = settings.get("host") or os.environ.get(f"{ENV_PREFIX}_HOST") or "127.0.0.1"
-    if getattr(args, "port", None) is None:
-        args.port = settings.get("port") or env_int(f"{ENV_PREFIX}_PORT", 8000)
-    if getattr(args, "permission_mode", None) is None:
-        args.permission_mode = settings.get("permission_mode")
-    if getattr(args, "execution_fs_mode", None) is None:
-        args.execution_fs_mode = settings.get("execution_fs_mode")
-    if getattr(args, "shell_env_inherit", None) is None:
-        args.shell_env_inherit = settings.get("shell_env_inherit")
+    sources: dict[str, str] = {}
+    launcher = (os.environ.get(f"{ENV_PREFIX}_LAUNCHER") or "").strip().lower()
+    cli_source = f"{launcher}_cli" if launcher else "cli"
+
+    def apply_value(field: str, env_suffix: str, default: Any) -> None:
+        current = getattr(args, field, None)
+        env_name = f"{ENV_PREFIX}_{env_suffix}"
+        env_raw = os.environ.get(env_name)
+        if current is not None:
+            sources[field] = cli_source
+            return
+        if env_raw is not None and env_raw.strip():
+            value: Any = env_int(env_name, int(default)) if field == "port" else env_raw
+            setattr(args, field, value)
+            sources[field] = "environment"
+            return
+        persisted = settings.get(field)
+        if persisted is not None and persisted != "":
+            setattr(args, field, persisted)
+            sources[field] = "persisted"
+            return
+        setattr(args, field, default)
+        sources[field] = "default"
+
+    apply_value("host", "HOST", "127.0.0.1")
+    apply_value("port", "PORT", 8000)
+    apply_value("permission_mode", "PERMISSION_MODE", "safe")
+    apply_value("execution_fs_mode", "EXECUTION_FS_MODE", "normal")
+    apply_value("shell_env_inherit", "SHELL_ENV_INHERIT", "core")
+
+    if bool(getattr(args, "dangerously_skip_all_permissions", False)):
+        sources["permission_mode"] = cli_source
+    elif truthy_env(os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_SKIP_ALL_PERMISSIONS")):
+        sources["permission_mode"] = "environment"
+    return sources
 
 
 def upstream_config_path(args: argparse.Namespace, config_dir: Path) -> Path:
@@ -7449,7 +7684,7 @@ def run_http(args: argparse.Namespace) -> int:
     auth_token = args.auth_token or os.environ.get(f"{ENV_PREFIX}_AUTH_TOKEN") or None
     try:
         config_dir, startup_settings, workspace_catalog = load_workspace_startup(args)
-        apply_persisted_runtime_settings(args, startup_settings)
+        active_setting_sources = apply_persisted_runtime_settings(args, startup_settings)
         runtime_policy = runtime_policy_from_args(args)
         session_limits = http_session_limits_from_args(args)
         workspace_bindings = normalize_oauth_client_workspace_bindings(
@@ -7460,9 +7695,16 @@ def run_http(args: argparse.Namespace) -> int:
             args,
             config_dir,
         )
-        allowed_origin_source = startup_settings.get("allowed_origins")
-        if allowed_origin_source is None:
-            allowed_origin_source = os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS", "")
+        allowed_origin_env = os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS")
+        if allowed_origin_env is not None:
+            allowed_origin_source = allowed_origin_env
+            active_setting_sources["allowed_origins"] = "environment"
+        elif "allowed_origins" in startup_settings:
+            allowed_origin_source = startup_settings.get("allowed_origins")
+            active_setting_sources["allowed_origins"] = "persisted"
+        else:
+            allowed_origin_source = ""
+            active_setting_sources["allowed_origins"] = "default"
         allowed_origins = configure_allowed_origins(allowed_origin_source)
     except (
         SettingsStoreError,
@@ -7725,6 +7967,8 @@ def run_http(args: argparse.Namespace) -> int:
                 runner_status=runner_admin_status,
                 transcript_store=TranscriptStore(config_dir / TRANSCRIPT_DB_FILENAME),
                 session_scanner=CodexSessionScanner(),
+                active_sources=active_setting_sources,
+                launcher=(os.environ.get(f"{ENV_PREFIX}_LAUNCHER") or None),
             )
         except (AdminServiceError, OSError, SecretVaultError, SettingsStoreError) as exc:
             runtime.close()

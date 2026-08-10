@@ -92,7 +92,7 @@ dialog{width:min(620px,calc(100% - 2rem));max-height:min(90dvh,860px);padding:0;
       <button class="nav-item" type="button" data-section="gateway"><svg class="icon"><use href="#i-plug"></use></svg><span>工具连接</span><span class="nav-count" id="navConnectionCount">—</span></button>
       <button class="nav-item" type="button" data-section="workspaces"><svg class="icon"><use href="#i-folder"></use></svg><span>工作区</span><span class="nav-count" id="navWorkspaceCount">—</span></button>
       <button class="nav-item" type="button" data-section="chat"><svg class="icon"><use href="#i-message"></use></svg><span>聊天会话</span></button>
-      <a class="nav-item" href="/app"><svg class="icon"><use href="#i-message"></use></svg><span>Agent 工作台</span></a>
+      <a class="nav-item" href="/app" target="_blank" rel="noopener"><svg class="icon"><use href="#i-message"></use></svg><span>Agent 工作台</span></a>
       <button class="nav-item" type="button" data-section="settings"><svg class="icon"><use href="#i-settings"></use></svg><span>服务器设置</span></button>
       <button class="nav-item" type="button" data-section="oauth"><svg class="icon"><use href="#i-users"></use></svg><span>授权管理</span></button>
       <button class="nav-item" type="button" data-section="secrets"><svg class="icon"><use href="#i-key"></use></svg><span>凭据保险箱</span></button>
@@ -160,8 +160,10 @@ dialog{width:min(620px,calc(100% - 2rem));max-height:min(90dvh,860px);padding:0;
       <section id="section-settings" class="page-section" aria-labelledby="settingsTitle" hidden>
         <div class="page-heading"><div><h1 id="settingsTitle">服务器设置</h1><p>保存必须携带最新 persisted revision；发生冲突时保留草稿并提示重新比较。</p></div><div class="button-row"><button id="reloadSettings" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>重新读取</button><button id="saveSettings" type="button" class="button primary"><svg class="icon icon-sm"><use href="#i-check"></use></svg>保存草稿</button></div></div>
         <div class="info-strip"><span><svg class="icon"><use href="#i-key"></use></svg></span><div><strong>/app 登录凭据不在此页面设置</strong><p>普通 bearer token 由服务启动时的 <code>CODING_TOOLS_MCP_AUTH_TOKEN</code> 提供；Admin token 不能登录 /app。<a href="/wiki#app-token">查看启动与密码说明</a>。</p></div></div>
+        <div id="settingsManagedNotice" class="alert warning" hidden></div>
         <div id="settingsConflict" class="alert warning" role="alert" tabindex="-1" hidden></div><div id="settingsError" class="alert danger" role="alert" tabindex="-1" hidden></div>
         <div class="settings-layout"><form id="settingsForm" class="panel form-grid" novalidate><div class="full panel-heading"><div><h2>网络与运行</h2><p>Host、Port 和 OAuth 公开地址修改后需要重启。</p></div></div><div><label for="settingsHost">Host</label><input id="settingsHost" aria-describedby="settingsHostHelp"><p id="settingsHostHelp" class="help">修改后需重启。</p></div><div><label for="settingsPort">Port</label><input id="settingsPort" type="number" min="1" max="65535" aria-describedby="settingsPortHelp"><p id="settingsPortHelp" class="help">1–65535，修改后需重启。</p></div><div><label for="settingsPermission">Permission mode</label><select id="settingsPermission" aria-describedby="permissionHelp"><option value="safe">safe</option><option value="trusted">trusted</option><option value="dangerous">dangerous</option></select><p id="permissionHelp" class="help"></p></div><div><label for="settingsShellEnv">Shell 环境继承</label><select id="settingsShellEnv"><option value="core">core</option><option value="all">all</option><option value="none">none</option></select></div><div class="full"><label for="settingsOauthServerUrl">OAuth server URL</label><input id="settingsOauthServerUrl" type="url" placeholder="https://mcp.example"></div><div class="full"><label for="settingsAllowedOrigins">Allowed origins（每行一个）</label><textarea id="settingsAllowedOrigins" rows="4"></textarea></div><label class="checkline full" for="settingsOauthCompatibility"><input id="settingsOauthCompatibility" type="checkbox"> OAuth compatibility mode（旧客户端使用受追踪的长效 access token）</label></form><aside class="settings-side"><article class="panel"><div class="panel-heading"><div><h2>配置版本</h2><p>Active、Persisted 与 Pending restart 分离。</p></div></div><p>Revision：<code id="settingsRevision">—</code></p><div class="pending-box"><strong>等待重启</strong><ul id="settingsPending"></ul></div></article><details class="panel danger-zone"><summary>高级危险兼容设置</summary><h3 id="fakeReadonlyLabel"></h3><p id="fakeReadonlyWarning" class="alert danger"></p><p id="fakeReadonlyEnable" class="help"></p><p>当前状态：<strong id="fakeReadonlyStatus">未报告</strong></p></details></aside></div>
+        <article class="panel"><div class="panel-heading"><div><h2>Active / Persisted 来源</h2><p>按有效值比较，并区分默认值、Persisted、环境变量、CLI 与 Desktop 启动覆盖。</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>字段</th><th>Active</th><th>Persisted</th><th>来源</th><th>结论</th></tr></thead><tbody id="settingsStatusRows"><tr><td colspan="5">连接后显示运行值来源。</td></tr></tbody></table></div></article>
         <details class="panel advanced-panel"><summary>原始设置预览</summary><div class="detail-grid raw-settings-grid"><article class="inset-panel"><h3>Active</h3><pre id="settingsActiveJson" class="code-block"></pre></article><article class="inset-panel"><h3>Persisted</h3><pre id="settingsPersistedJson" class="code-block"></pre></article></div></details>
       </section>
 
@@ -179,14 +181,15 @@ dialog{width:min(620px,calc(100% - 2rem));max-height:min(90dvh,860px);padding:0;
         <div class="page-heading"><div><h1 id="systemTitle">系统状态</h1><p>集中查看运行时、工具网关、凭据保险箱、Telemetry、执行环境和重启影响。</p></div><div class="button-row"><button id="openActivityLogs" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-file-text"></use></svg>查看运行日志</button><button id="refreshAll" type="button" class="button secondary"><svg class="icon icon-sm"><use href="#i-refresh"></use></svg>刷新状态</button></div></div>
         <div class="system-grid"><article class="system-card"><span class="system-card-icon"><svg class="icon"><use href="#i-activity"></use></svg></span><span>Admin API</span><strong id="adminApiStatus">未连接</strong><p>普通 MCP bearer 不具备管理员权限。</p></article><article class="system-card"><span class="system-card-icon"><svg class="icon"><use href="#i-plug"></use></svg></span><span>工具网关</span><strong id="gatewayRuntimeStatus">未连接</strong><p>工具快照在运行时初始化时冻结。</p></article><article class="system-card"><span class="system-card-icon"><svg class="icon"><use href="#i-key"></use></svg></span><span>凭据保险箱</span><strong id="vaultStatus">未连接</strong><p>页面从不读取或显示 Secret 值。</p></article><article class="system-card"><span class="system-card-icon"><svg class="icon"><use href="#i-activity"></use></svg></span><span>Telemetry</span><strong id="telemetryStatus">未报告</strong><p id="telemetryDetail"></p><p id="telemetryDisableHelp" class="help"></p></article></div>
         <article class="panel log-entry-panel"><div class="panel-heading"><div><h2>运行日志</h2><p>默认不展开日志明细；需要排障时再打开查看器并筛选范围。</p></div><button class="button primary compact" type="button" data-open-activity-logs><svg class="icon icon-sm"><use href="#i-file-text"></use></svg>打开日志查看器</button></div><div class="log-summary-grid"><div><span>当前页面活动</span><strong id="activityLogCount">0</strong><small>Admin API 请求记录</small></div><div><span>错误</span><strong class="danger-text" id="activityLogErrorCount">0</strong><small>本次页面会话</small></div><div><span>最后更新</span><strong id="activityLogLastUpdated">—</strong><small>仅保存在内存中</small></div></div><p class="log-backend-note"><svg class="icon icon-sm"><use href="#i-alert"></use></svg><span>当前后端尚未暴露服务器运行日志端点；查看器记录本管理页面发出的 Admin API 请求结果，不记录 token、请求体或 Secret 值。</span></p></article>
-        <div class="detail-grid"><article class="panel"><div class="panel-heading"><div><h2>重启影响</h2><p>工具网关和部分服务器设置只在新建运行时或服务重启后生效。</p></div></div><div class="restart-impact"><span class="restart-count" id="systemRestartCount">0</span><div><strong id="systemRestartTitle">没有等待生效的项目</strong><p id="systemRestartDetail">Active 与 Persisted 配置已同步。</p></div></div><button class="button secondary" type="button" data-open-section="settings">查看配置差异</button></article><article class="panel"><div class="panel-heading"><div><h2>安全说明</h2><p>管理接口与普通 MCP/OAuth 权限面相互独立。</p></div></div><p>Admin token 只保存在当前页面内存中，退出后立即清除。</p><p>Secret 值、token 原文和内部摘要不会通过管理页面回显。</p></article></div>
+        <div class="detail-grid"><article class="panel"><div class="panel-heading"><div><h2>重启影响</h2><p>工具网关和部分服务器设置只在新建运行时或服务重启后生效。</p></div></div><div class="restart-impact"><span class="restart-count" id="systemRestartCount">0</span><div><strong id="systemRestartTitle">没有等待生效的项目</strong><p id="systemRestartDetail">Active 与 Persisted 配置已同步。</p></div></div><button class="button secondary" type="button" data-open-section="settings">查看配置差异</button></article><article class="panel"><div class="panel-heading"><div><h2>安全说明</h2><p>管理接口与普通 MCP/OAuth 权限面相互独立。</p></div></div><p>Admin token 只用于一次性 POST /admin/api/session 交换；之后浏览器使用 HttpOnly + SameSite=Strict 的服务器端 Admin Session。</p><p>原始 Admin token 不写入 Web Storage、URL 或可读 Cookie；退出会立即吊销服务器端 Session。</p></article></div>
+        <article class="panel"><div class="panel-heading"><div><h2>配置运行值与来源</h2><p>这里显示 Effective Persisted 与 Active 的真实差异，并指出是否存在 Desktop/CLI/环境覆盖。</p></div></div><div class="table-scroll"><table class="data-table"><thead><tr><th>字段</th><th>Active</th><th>Persisted</th><th>来源</th><th>结论</th></tr></thead><tbody id="systemSettingsStatusRows"><tr><td colspan="5">连接后显示运行值来源。</td></tr></tbody></table></div></article>
       </section>
     </main>
   </div>
 
   <nav class="mobile-nav" aria-label="移动端主要导航"><button type="button" class="nav-item active" data-section="overview" aria-current="page"><svg class="icon"><use href="#i-home"></use></svg><span>概览</span></button><button type="button" class="nav-item" data-section="gateway"><svg class="icon"><use href="#i-plug"></use></svg><span>连接</span></button><button type="button" class="nav-item" data-section="workspaces"><svg class="icon"><use href="#i-folder"></use></svg><span>工作区</span></button><button type="button" class="nav-item" data-section="chat"><svg class="icon"><use href="#i-message"></use></svg><span>会话</span></button><button type="button" id="mobileMoreButton"><svg class="icon"><use href="#i-menu"></use></svg><span>更多</span></button></nav>
 
-  <dialog id="authDialog" aria-labelledby="authDialogTitle"><form id="authForm" class="dialog-card" autocomplete="off"><header><div><h2 id="authDialogTitle">连接真实 Admin API</h2><p>使用专用 Admin token；token 仅保存在当前页面内存中。</p></div><button class="icon-button" type="button" data-close-auth aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></header><div class="dialog-body"><label for="adminToken">本次页面使用的 Admin token</label><div class="password-input-row"><input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required><button id="adminTokenToggle" type="button" class="icon-button password-toggle" data-password-toggle data-password-target="adminToken" aria-controls="adminToken" aria-pressed="false" aria-label="显示密码"><svg class="icon"><use href="#i-eye"></use></svg><span>显示</span></button></div><p id="adminTokenHelp" class="help">不会写入 URL、浏览器持久化存储、日志或服务器设置。</p></div><footer><button class="button secondary" type="button" data-close-auth>取消</button><button class="button primary" type="submit">连接并读取</button></footer></form></dialog>
+  <dialog id="authDialog" aria-labelledby="authDialogTitle"><form id="authForm" class="dialog-card" autocomplete="off"><header><div><h2 id="authDialogTitle">连接真实 Admin API</h2><p>使用专用 Admin token 换取服务器端 Admin Session；交换完成后输入立即清空。</p></div><button class="icon-button" type="button" data-close-auth aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></header><div class="dialog-body"><label for="adminToken">一次性交换使用的 Admin token</label><div class="password-input-row"><input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required><button id="adminTokenToggle" type="button" class="icon-button password-toggle" data-password-toggle data-password-target="adminToken" aria-controls="adminToken" aria-pressed="false" aria-label="显示密码"><svg class="icon"><use href="#i-eye"></use></svg><span>显示</span></button></div><p id="adminTokenHelp" class="help">不会写入 URL、Web Storage、可读 Cookie、日志或服务器设置；成功后仅保留 HttpOnly Session cookie。</p></div><footer><button class="button secondary" type="button" data-close-auth>取消</button><button class="button primary" type="submit">创建安全会话</button></footer></form></dialog>
   <dialog id="activityLogDialog" aria-labelledby="activityLogDialogTitle"><div class="dialog-card log-dialog-card"><header><div><h2 id="activityLogDialogTitle">运行日志查看器</h2><p>按时间、级别、组件和关键词筛选本页面的管理接口活动。</p></div><button class="icon-button" type="button" data-close-activity-logs aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></header><div class="dialog-body"><div class="log-filter-bar"><label>时间范围<select id="activityLogTime"><option value="15m">最近 15 分钟</option><option value="1h">最近 1 小时</option><option value="24h" selected>最近 24 小时</option><option value="all">全部</option></select></label><label>级别<select id="activityLogLevel"><option value="all">全部级别</option><option value="error">Error</option><option value="info">Info</option></select></label><label>组件<select id="activityLogComponent"><option value="all">全部组件</option><option value="status">Status</option><option value="settings">Settings</option><option value="gateway">Gateway</option><option value="workspaces">Workspaces</option><option value="oauth">OAuth</option><option value="secrets">Secret Vault</option><option value="chat">Conversations</option></select></label><label>关键词<input id="activityLogSearch" type="search" placeholder="搜索路径、状态或错误"></label></div><div class="log-result-toolbar"><strong id="activityLogResultCount">0 条结果</strong><button id="clearActivityLogs" type="button" class="button secondary compact">清空当前页面日志</button></div><div class="log-viewer"><div id="activityLogList" class="log-list"></div><aside id="activityLogDetail" class="log-detail"><div class="empty-state"><span><svg class="icon"><use href="#i-file-text"></use></svg></span><h3>选择一条日志</h3><p>点击记录查看请求方法、路径、HTTP 状态和耗时。</p></div></aside></div></div><footer><span class="log-footer-note">不记录 Admin token、请求体或 Secret 值。</span><button class="button secondary" type="button" data-close-activity-logs>关闭</button></footer></div></dialog>
   <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage"><form method="dialog" class="dialog-card"><header><div><h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p></div></header><footer><button value="cancel" class="button secondary">取消</button><button id="confirmAccept" value="confirm" class="button danger">确认</button></footer></form></dialog>
   <dialog id="clientPasswordDialog" aria-labelledby="clientPasswordTitle" aria-describedby="clientPasswordHelp"><form id="clientPasswordForm" class="dialog-card" autocomplete="off"><header><div><h2 id="clientPasswordTitle">设置 Client 专属密码</h2><p>Client ID：<code id="clientPasswordClientId">—</code></p></div></header><div class="dialog-body"><p id="clientPasswordHelp" class="help">保存后立即生效，只影响这个 Client；未设置或重置后使用全局 OAuth Authorize 密码。</p><label for="clientPasswordValue">Client 专属密码</label><div class="password-input-row"><input id="clientPasswordValue" type="password" autocomplete="new-password" required><button id="clientPasswordToggle" type="button" class="icon-button password-toggle" data-password-toggle data-password-target="clientPasswordValue" aria-controls="clientPasswordValue" aria-pressed="false" aria-label="显示密码"><svg class="icon"><use href="#i-eye"></use></svg><span>显示</span></button></div><p id="clientPasswordError" class="alert danger" role="alert" hidden></p></div><footer><button id="clientPasswordCancel" type="button" class="button secondary">取消</button><button type="submit" class="button primary">保存并立即生效</button></footer></form></dialog>
@@ -282,10 +285,15 @@ function hydrateSettings(payload = {}) {
   return {
     active,
     persisted,
+    effectivePersisted: canonicalSettings(payload.effective_persisted || persisted),
     draft: clone(persisted),
     persistedRevision: String(payload.persisted_revision || ''),
     pendingRestart: Array.isArray(payload.pending_restart) ? [...payload.pending_restart] : [],
     restartRequired: Boolean(payload.restart_required),
+    activeSources: clone(payload.active_sources || {}),
+    fieldStatus: clone(payload.field_status || {}),
+    launcher: String(payload.launcher || ''),
+    managedFields: Array.isArray(payload.managed_fields) ? [...payload.managed_fields] : [],
     conflict: null,
     schema: clone(payload.schema || {}),
   };
@@ -419,10 +427,80 @@ function setControlValue(documentRef, id, value) {
   else control.value = value ?? '';
 }
 
+function formatSettingValue(value) {
+  if (value === undefined || value === null || value === '') return '—';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+function sourceLabel(source) {
+  return ({
+    desktop_cli: 'Desktop CLI override',
+    cli: 'CLI override',
+    environment: '环境变量',
+    persisted: 'persisted',
+    default: 'default',
+    unknown: '未报告',
+  })[source] || source || '未报告';
+}
+
+function conclusionLabel(status = {}) {
+  if (status.state === 'overridden') {
+    if (status.source === 'desktop_cli') return '由 Desktop 启动参数覆盖；单纯重启不会生效，请在 Desktop profile 修改。';
+    if (status.source === 'environment') return '由环境变量覆盖；使用相同环境重启仍不会采用 Persisted 值。';
+    return '由启动命令参数覆盖；使用相同命令重启仍不会采用 Persisted 值。';
+  }
+  if (status.state === 'pending_restart') return 'Effective Persisted 与 Active 不同；重启后可生效。';
+  if (status.state === 'in_sync_default') return '未显式配置；默认值与 Active 一致，无需重启。';
+  return 'Active 与 Effective Persisted 一致，无需重启。';
+}
+
+function renderStatusRows(documentRef, state) {
+  const statuses = state?.fieldStatus || {};
+  const priority = ['host', 'port', 'execution_fs_mode', 'permission_mode', 'shell_env_inherit'];
+  const fields = [...new Set([...priority, ...Object.keys(statuses)])].filter((field) => statuses[field]);
+  for (const id of ['settingsStatusRows', 'systemSettingsStatusRows']) {
+    const root = documentRef.getElementById(id);
+    if (!root) continue;
+    root.replaceChildren();
+    if (!fields.length) {
+      const row = documentRef.createElement('tr');
+      const cell = documentRef.createElement('td');
+      cell.textContent = '后端尚未报告配置来源。';
+      cell.setAttribute('colspan', '5');
+      row.append(cell);
+      root.append(row);
+      continue;
+    }
+    for (const field of fields) {
+      const status = statuses[field] || {};
+      const row = documentRef.createElement('tr');
+      const fieldCell = documentRef.createElement('td');
+      const fieldCode = documentRef.createElement('code');
+      fieldCode.textContent = field;
+      fieldCell.append(fieldCode);
+      const activeCell = documentRef.createElement('td');
+      activeCell.textContent = formatSettingValue(status.active);
+      const persistedCell = documentRef.createElement('td');
+      persistedCell.textContent = status.persisted_explicit
+        ? formatSettingValue(status.persisted)
+        : status.default_value !== undefined && status.default_value !== null
+          ? `未设置（默认 ${formatSettingValue(status.effective_persisted)}）`
+          : '未设置';
+      const sourceCell = documentRef.createElement('td');
+      sourceCell.textContent = sourceLabel(status.source);
+      const conclusionCell = documentRef.createElement('td');
+      conclusionCell.textContent = conclusionLabel(status);
+      row.append(fieldCell, activeCell, persistedCell, sourceCell, conclusionCell);
+      root.append(row);
+    }
+  }
+}
+
 function renderSettingsForm(documentRef, state, permissionPresentation) {
   const draft = state?.draft || {};
-  setControlValue(documentRef, 'settingsHost', draft.host || '');
-  setControlValue(documentRef, 'settingsPort', draft.port || '');
+  setControlValue(documentRef, 'settingsHost', draft.host ?? state?.effectivePersisted?.host ?? '');
+  setControlValue(documentRef, 'settingsPort', draft.port ?? state?.effectivePersisted?.port ?? '');
   setControlValue(documentRef, 'settingsPermission', draft.permission_mode || 'safe');
   setControlValue(documentRef, 'settingsShellEnv', draft.shell_env_inherit || 'core');
   setControlValue(documentRef, 'settingsOauthServerUrl', draft.oauth_server_url || '');
@@ -431,6 +509,28 @@ function renderSettingsForm(documentRef, state, permissionPresentation) {
   const presentation = permissionPresentation(draft.permission_mode || 'safe');
   const help = documentRef.getElementById('permissionHelp');
   if (help) help.textContent = presentation.description;
+  const managedFields = new Set(state?.managedFields || []);
+  for (const [field, id, helpId] of [
+    ['host', 'settingsHost', 'settingsHostHelp'],
+    ['port', 'settingsPort', 'settingsPortHelp'],
+    ['permission_mode', 'settingsPermission', 'permissionHelp'],
+  ]) {
+    const control = documentRef.getElementById(id);
+    if (!control) continue;
+    const managed = state?.launcher === 'desktop' && managedFields.has(field);
+    control.disabled = managed;
+    if (managed) {
+      const fieldHelp = documentRef.getElementById(helpId);
+      if (fieldHelp) fieldHelp.textContent = '由 Desktop profile 的启动参数管理；请在 Desktop profile 修改。';
+    }
+  }
+  const managedNotice = documentRef.getElementById('settingsManagedNotice');
+  if (managedNotice) {
+    managedNotice.hidden = state?.launcher !== 'desktop';
+    managedNotice.textContent = state?.launcher === 'desktop'
+      ? '当前服务由 Desktop 管理。标记为 Desktop CLI override 的字段不会通过此页保存后在 Desktop 重启时生效，请前往 Desktop profile 修改。'
+      : '';
+  }
   const active = documentRef.getElementById('settingsActiveJson');
   if (active) active.textContent = JSON.stringify(state?.active || {}, null, 2);
   const persisted = documentRef.getElementById('settingsPersistedJson');
@@ -442,10 +542,11 @@ function renderSettingsForm(documentRef, state, permissionPresentation) {
     if (!values.length) pending.append(documentRef.createTextNode('无待重启字段。'));
     for (const field of values) {
       const item = documentRef.createElement('li');
-      item.textContent = field;
+      item.textContent = `${field} — ${conclusionLabel(state?.fieldStatus?.[field] || { state: 'pending_restart' })}`;
       pending.append(item);
     }
   }
+  renderStatusRows(documentRef, state);
   const revision = documentRef.getElementById('settingsRevision');
   if (revision) revision.textContent = state?.persistedRevision || '—';
   const conflict = documentRef.getElementById('settingsConflict');
@@ -502,6 +603,19 @@ const SUPPORTED_LOCALES = new Set(['zh-CN', 'en']);
 export const EN_MESSAGES = Object.freeze({
   'Agent 工作台': 'Agent workbench',
   '使用 Wiki': 'User Wiki',
+  'Admin token 只用于一次性 POST /admin/api/session 交换；之后浏览器使用 HttpOnly + SameSite=Strict 的服务器端 Admin Session。': 'The Admin token is used only for the one-time POST /admin/api/session exchange; afterwards the browser uses a server-side Admin Session with an HttpOnly, SameSite=Strict cookie.',
+  '原始 Admin token 不写入 Web Storage、URL 或可读 Cookie；退出会立即吊销服务器端 Session。': 'The raw Admin token is never written to Web Storage, URLs, or script-readable cookies. Signing out immediately revokes the server-side Session.',
+  '使用专用 Admin token 换取服务器端 Admin Session；交换完成后输入立即清空。': 'Exchange the dedicated Admin token for a server-side Admin Session. The input is cleared immediately after the exchange.',
+  '一次性交换使用的 Admin token': 'Admin token used for the one-time exchange',
+  '不会写入 URL、Web Storage、可读 Cookie、日志或服务器设置；成功后仅保留 HttpOnly Session cookie。': 'It is never written to URLs, Web Storage, script-readable cookies, logs, or server settings. After success, only the HttpOnly Session cookie remains.',
+  '创建安全会话': 'Create secure session',
+  'Active / Persisted 来源': 'Active / Persisted sources',
+  '按有效值比较，并区分默认值、Persisted、环境变量、CLI 与 Desktop 启动覆盖。': 'Compare effective values and distinguish defaults, Persisted values, environment variables, CLI overrides, and Desktop launch overrides.',
+  '字段': 'Field',
+  '结论': 'Conclusion',
+  '连接后显示运行值来源。': 'Connect to show runtime value sources.',
+  '配置运行值与来源': 'Configuration runtime values and sources',
+  '这里显示 Effective Persisted 与 Active 的真实差异，并指出是否存在 Desktop/CLI/环境覆盖。': 'Shows the real difference between Effective Persisted and Active values, including Desktop, CLI, or environment overrides.',
   '这里没有单独的 App 密码。请输入启动服务时设置的普通 bearer token。': 'There is no separate App password. Enter the ordinary bearer token configured when the server started.',
   'Operator bearer token（通常是 CODING_TOOLS_MCP_AUTH_TOKEN）': 'Operator bearer token (normally CODING_TOOLS_MCP_AUTH_TOKEN)',
   'Admin token 不能用于这里；此 token 不在 WebUI 中创建，只保存在当前页面内存中。': 'The Admin token cannot be used here. This token is not created in the WebUI and is kept only in page memory.',
@@ -1630,6 +1744,13 @@ function containsCredentialControl(value) {
   });
 }
 
+function restartImpactCount(settings, gateway) {
+  const settingsPending = Array.isArray(settings?.pendingRestart)
+    ? settings.pendingRestart.length
+    : 0;
+  return settingsPending + (gateway?.restart_required ? 1 : 0);
+}
+
 function gatewayServerTemplate(alias = 'new-upstream') {
   return {
     servers: {
@@ -1829,15 +1950,57 @@ function adminComponentForPath(path) {
   return 'status';
 }
 
-function createApiClient(getToken, fetchImpl = globalThis.fetch, onActivity = null) {
+async function parseAdminResponse(response) {
+  let payload = {};
+  try { payload = await response.json(); } catch { payload = {}; }
+  if (!response.ok) throw new ApiError(response.status, payload);
+  return payload;
+}
+
+async function createAdminSession(adminToken, fetchImpl = globalThis.fetch) {
+  const response = await fetchImpl('/admin/api/session', {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ admin_token: String(adminToken || '') }),
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  return parseAdminResponse(response);
+}
+
+async function restoreAdminSession(fetchImpl = globalThis.fetch) {
+  const response = await fetchImpl('/admin/api/session', {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  return parseAdminResponse(response);
+}
+
+async function revokeAdminSession(csrfToken, fetchImpl = globalThis.fetch) {
+  const headers = new Headers({ Accept: 'application/json' });
+  if (csrfToken) headers.set('X-Admin-CSRF', String(csrfToken));
+  const response = await fetchImpl('/admin/api/session', {
+    method: 'DELETE',
+    headers,
+    credentials: 'same-origin',
+    cache: 'no-store',
+  });
+  return parseAdminResponse(response);
+}
+
+function createApiClient(getCsrfToken, fetchImpl = globalThis.fetch, onActivity = null) {
   async function request(path, options = {}) {
-    const token = String(getToken?.() || '');
     const method = options.method || 'GET';
     const startedAt = Date.now();
     const headers = new Headers(options.headers || {});
     headers.set('Accept', 'application/json');
     if (options.body !== undefined) headers.set('Content-Type', 'application/json');
-    if (token) headers.set('Authorization', `Bearer ${token}`);
+    if (!['GET', 'HEAD'].includes(method)) {
+      const csrfToken = String(getCsrfToken?.() || '');
+      if (csrfToken) headers.set('X-Admin-CSRF', csrfToken);
+    }
     try {
       const response = await fetchImpl(`/admin/api${path}`, {
         method,
@@ -2190,7 +2353,7 @@ function initAdminApp(documentRef = document) {
   const workspaceEditor = globalThis.McpWorkspaceEditor;
   const settingsPage = globalThis.McpSettingsPage;
   const state = {
-    token: '', settings: null, workspaces: [], workspaceRevision: '', gateway: null,
+    authenticated: false, csrfToken: '', settings: null, workspaces: [], workspaceRevision: '', gateway: null,
     gatewayRevision: '', editingGatewayAlias: '', conversationPage: 1, conversationTotal: 0,
     selectedConversation: null, messagePage: 1, contextPage: 1,
     clientPasswordClientId: '', clientPasswordReturnFocus: null, section: 'overview',
@@ -2206,7 +2369,7 @@ function initAdminApp(documentRef = document) {
     if (byId('activityLogDialog')?.open) renderActivityLogs();
   }
 
-  const api = createApiClient(() => state.token, globalThis.fetch, recordActivity);
+  const api = createApiClient(() => state.csrfToken, globalThis.fetch, recordActivity);
 
   function status(message, kind = '') {
     const box = byId('globalStatus');
@@ -2374,7 +2537,8 @@ function initAdminApp(documentRef = document) {
     const exposure = state.gateway?.active_status?.exposure_report;
     const catalogCount = Number(exposure?.catalog?.count || exposure?.direct?.count || 0);
     const missingClientAccess = state.oauthClients.filter((client) => client?.enabled !== false && clientWorkspaceIds(client).length === 0);
-    const restartCount = Number(Boolean(state.gateway?.restart_required)) + Number(Boolean(state.settings?.restartRequired)) + Number(state.settings?.pendingRestart?.length || 0);
+    const restartCount = restartImpactCount(state.settings, state.gateway);
+    const overriddenSettings = Object.entries(state.settings?.fieldStatus || {}).filter(([, item]) => item?.state === 'overridden');
 
     const navConnections = byId('navConnectionCount');
     const navWorkspaces = byId('navWorkspaceCount');
@@ -2389,6 +2553,7 @@ function initAdminApp(documentRef = document) {
       taskRoot.replaceChildren();
       const tasks = [];
       if (restartCount) tasks.push({ kind: 'warning', icon: 'alert', title: '需要重启服务', detail: '工具网关或服务器设置已保存，但当前运行时仍可能使用旧快照。', action: '查看影响', section: 'system' });
+      if (overriddenSettings.length) tasks.push({ kind: 'warning', icon: 'settings', title: '启动参数覆盖 Persisted', detail: `${overriddenSettings.length} 个设置由 Desktop、CLI 或环境变量控制；单纯重启不会采用已保存值。`, action: '查看来源', section: 'system' });
       if (!defaultWorkspace) tasks.push({ kind: 'danger', icon: 'folder', title: '检查默认工作区', detail: '当前没有启用且可作为默认项的工作区。', action: '查看工作区', section: 'workspaces' });
       if (missingClientAccess.length) tasks.push({ kind: 'danger', icon: 'users', title: 'OAuth Client 配置', detail: `${missingClientAccess.length} 个启用 Client 缺少 Workspace allowlist。`, action: '查看详情', section: 'oauth' });
       if (!aliases.length) tasks.push({ kind: 'warning', icon: 'plug', title: '尚未配置工具连接', detail: '添加上游 MCP 后才能通过工具网关提供能力。', action: '添加连接', section: 'gateway' });
@@ -2480,9 +2645,28 @@ function initAdminApp(documentRef = document) {
       });
     }
 
+    const hostStatus = state.settings?.fieldStatus?.host;
+    const executionStatus = state.settings?.fieldStatus?.execution_fs_mode;
+    const restartNotes = [];
+    if (hostStatus?.state === 'overridden' && hostStatus?.source === 'desktop_cli') {
+      restartNotes.push('Host 被 Desktop 启动参数覆盖，重启不会采用 Persisted 值。请在 Desktop profile 修改。');
+    }
+    if (executionStatus?.state === 'in_sync_default') {
+      restartNotes.push('execution_fs_mode 未显式配置，默认值与当前运行时一致，无需重启。');
+    }
     if (byId('systemRestartCount')) byId('systemRestartCount').textContent = String(restartCount);
-    if (byId('systemRestartTitle')) byId('systemRestartTitle').textContent = restartCount ? `${restartCount} 项等待生效` : '没有等待生效的项目';
-    if (byId('systemRestartDetail')) byId('systemRestartDetail').textContent = restartCount ? '工具网关或服务器设置需要新建运行时或服务重启。' : 'Active 与 Persisted 配置已同步。';
+    if (byId('systemRestartTitle')) {
+      byId('systemRestartTitle').textContent = restartCount
+        ? `${restartCount} 项等待生效`
+        : overriddenSettings.length
+          ? '没有可通过重启生效的项目'
+          : '没有等待生效的项目';
+    }
+    if (byId('systemRestartDetail')) {
+      const actionable = restartCount ? '仅上方计数中的项目可通过新建运行时或服务重启生效。' : '';
+      const fallback = overriddenSettings.length ? '存在启动器、CLI 或环境变量覆盖，请按来源修改。' : 'Active 与 Effective Persisted 配置已同步。';
+      byId('systemRestartDetail').textContent = [...restartNotes, actionable || fallback].filter(Boolean).join(' ');
+    }
   }
 
   function activityTime(timestamp) {
@@ -2583,7 +2767,13 @@ function initAdminApp(documentRef = document) {
   }
 
   function safeSettingsPayload(payload) {
-    return { ...payload, active: sanitizeAdminValue(payload.active), persisted: sanitizeAdminValue(payload.persisted) };
+    return {
+      ...payload,
+      active: sanitizeAdminValue(payload.active),
+      persisted: sanitizeAdminValue(payload.persisted),
+      effective_persisted: sanitizeAdminValue(payload.effective_persisted),
+      field_status: sanitizeAdminValue(payload.field_status),
+    };
   }
 
   async function loadSettings({ preserveDraft = false } = {}) {
@@ -2892,6 +3082,23 @@ function initAdminApp(documentRef = document) {
     status('Admin 数据已刷新。');
   }
 
+  async function bootstrapAdminSession() {
+    try {
+      const session = await restoreAdminSession(globalThis.fetch);
+      state.csrfToken = String(session.csrf_token || '');
+      state.authenticated = true;
+      setAuthenticationUi(documentRef, true);
+      await refreshAll();
+    } catch (error) {
+      state.csrfToken = '';
+      state.authenticated = false;
+      setAuthenticationUi(documentRef, false);
+      if (!(error instanceof ApiError) || error.status !== 401) {
+        status(error.message, 'danger');
+      }
+    }
+  }
+
   byId('fakeReadonlyLabel').textContent = copy.FAKE_READONLY_COPY.label;
   byId('fakeReadonlyWarning').textContent = copy.FAKE_READONLY_COPY.warning;
   byId('fakeReadonlyEnable').textContent = copy.FAKE_READONLY_COPY.enable;
@@ -2941,7 +3148,7 @@ function initAdminApp(documentRef = document) {
     renderActivityLogs();
   });
   byId('refreshCurrent')?.addEventListener('click', () => {
-    if (!state.token) {
+    if (!state.authenticated) {
       byId('authDialog')?.showModal();
       byId('adminToken')?.focus();
       return;
@@ -2961,22 +3168,45 @@ function initAdminApp(documentRef = document) {
   });
   byId('authForm').addEventListener('submit', async (event) => {
     event.preventDefault();
-    state.token = byId('adminToken').value;
+    const adminToken = byId('adminToken').value;
+    byId('adminToken').value = '';
     try {
-      await refreshAll();
+      const session = await createAdminSession(adminToken, globalThis.fetch);
+      state.csrfToken = String(session.csrf_token || '');
+      state.authenticated = true;
       setAuthenticationUi(documentRef, true);
+      await refreshAll();
       byId('authDialog')?.close();
     } catch (error) {
+      state.csrfToken = '';
+      state.authenticated = false;
       setAuthenticationUi(documentRef, false);
       status(error.message, 'danger');
     }
   });
-  byId('forgetToken').addEventListener('click', () => {
-    state.token = '';
-    setAuthenticationUi(documentRef, false);
-    status('Admin token 已从页面内存清除。');
-    byId('authDialog')?.showModal();
-    byId('adminToken').focus();
+  byId('forgetToken').addEventListener('click', async () => {
+    try {
+      if (state.authenticated) {
+        await revokeAdminSession(state.csrfToken, globalThis.fetch);
+      }
+      state.csrfToken = '';
+      state.authenticated = false;
+      setAuthenticationUi(documentRef, false);
+      status('Admin Session 已注销并在服务器端立即吊销。');
+      byId('authDialog')?.showModal();
+      byId('adminToken').focus();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        state.csrfToken = '';
+        state.authenticated = false;
+        setAuthenticationUi(documentRef, false);
+        status('Admin Session 已失效，请重新连接。', 'warning');
+        byId('authDialog')?.showModal();
+        byId('adminToken').focus();
+        return;
+      }
+      status(error.message, 'danger');
+    }
   });
   byId('refreshAll').addEventListener('click', () => refreshAll().catch((error) => status(error.message, 'danger')));
   byId('reloadSettings').addEventListener('click', () => loadSettings().then(() => status('Settings 已重新读取。')).catch((error) => status(error.message, 'danger')));
@@ -3109,6 +3339,7 @@ function initAdminApp(documentRef = document) {
   resetGatewayServerForm();
   wirePasswordVisibilityToggles(documentRef);
   setAuthenticationUi(documentRef, false);
+  void bootstrapAdminSession();
 
   return { state, api, refreshAll, loadSettings, loadWorkspaces, loadGateway, loadOAuth, loadSecrets, loadConversations, loadConversationDetail, showSection };
 }
@@ -3117,6 +3348,10 @@ globalThis.McpAdminApp = {
   ApiError,
   sanitizeAdminValue,
   containsCredentialControl,
+  restartImpactCount,
+  createAdminSession,
+  restoreAdminSession,
+  revokeAdminSession,
   gatewayServerFromForm,
   gatewayServerTemplate,
   gatewayExposurePreview,
@@ -3135,7 +3370,7 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => initAdminApp(document));
 }
 
-export { ApiError, sanitizeAdminValue, containsCredentialControl, gatewayServerFromForm, gatewayServerTemplate, gatewayExposurePreview, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, setPasswordVisibility, setAuthenticationUi, initAdminApp };
+export { ApiError, sanitizeAdminValue, containsCredentialControl, restartImpactCount, createAdminSession, restoreAdminSession, revokeAdminSession, gatewayServerFromForm, gatewayServerTemplate, gatewayExposurePreview, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, setPasswordVisibility, setAuthenticationUi, initAdminApp };
 </script>
 </body>
 </html>

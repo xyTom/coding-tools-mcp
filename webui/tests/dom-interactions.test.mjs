@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   ApiError,
   confirmDestructive,
+  createAdminSession,
   createApiClient,
   handleSettingsSave,
   renderOAuthItems,
@@ -14,7 +15,7 @@ import {
 } from '../src/admin.js';
 import '../src/settings-copy.js';
 import { hydrateSettings } from '../src/settings-model.js';
-import '../src/settings-page.js';
+import { renderSettingsForm } from '../src/settings-page.js';
 import { renderWorkspaceRows } from '../src/workspace-editor.js';
 
 class FakeClassList {
@@ -147,16 +148,32 @@ test('confirmation dialog restores focus and requires explicit confirm', async (
   assert.equal(documentRef.activeElement, trigger);
 });
 
-test('API client keeps Admin token in request header, never URL or storage', async () => {
+test('Admin token is used only for the one-time session exchange body', async () => {
   let captured;
-  const client = createApiClient(() => 'memory-only-token', async (url, options) => {
+  const session = await createAdminSession('one-time-admin-token', async (url, options) => {
+    captured = { url, options };
+    return { ok: true, status: 201, async json() { return { ok: true, csrf_token: 'csrf-a' }; } };
+  });
+  assert.equal(session.csrf_token, 'csrf-a');
+  assert.equal(captured.url, '/admin/api/session');
+  assert.equal(captured.url.includes('one-time-admin-token'), false);
+  assert.equal(captured.options.headers.Authorization, undefined);
+  assert.deepEqual(JSON.parse(captured.options.body), { admin_token: 'one-time-admin-token' });
+  assert.equal(captured.options.credentials, 'same-origin');
+  assert.equal(captured.options.cache, 'no-store');
+});
+
+test('Admin API client relies on HttpOnly session cookie and CSRF, not Authorization', async () => {
+  let captured;
+  const client = createApiClient(() => 'csrf-memory-only', async (url, options) => {
     captured = { url, options };
     return { ok: true, status: 200, async json() { return { ok: true }; } };
   });
-  await client.request('/status');
-  assert.equal(captured.url, '/admin/api/status');
-  assert.equal(captured.url.includes('memory-only-token'), false);
-  assert.equal(captured.options.headers.get('Authorization'), 'Bearer memory-only-token');
+  await client.request('/settings', { method: 'PUT', body: { value: 1 } });
+  assert.equal(captured.url, '/admin/api/settings');
+  assert.equal(captured.options.headers.get('Authorization'), null);
+  assert.equal(captured.options.headers.get('X-Admin-CSRF'), 'csrf-memory-only');
+  assert.equal(captured.options.credentials, 'same-origin');
   assert.equal(captured.options.cache, 'no-store');
 });
 
@@ -257,6 +274,62 @@ test('OAuth client cards edit multiple allowed Workspaces immediately', () => {
   );
   save.click();
   assert.deepEqual(calls, [['client-unbound', ['ws-a', 'ws-b']]]);
+});
+
+test('Desktop-managed settings show values, sources, and non-restartable conclusions', () => {
+  const documentRef = new FakeDocument();
+  const ids = [
+    'settingsHost', 'settingsPort', 'settingsPermission', 'settingsShellEnv',
+    'settingsOauthServerUrl', 'settingsOauthCompatibility', 'settingsAllowedOrigins',
+    'permissionHelp', 'settingsHostHelp', 'settingsPortHelp', 'settingsManagedNotice',
+    'settingsActiveJson', 'settingsPersistedJson', 'settingsPending',
+    'settingsStatusRows', 'systemSettingsStatusRows', 'settingsRevision',
+    'settingsConflict',
+  ];
+  for (const id of ids) {
+    const tag = id.endsWith('Rows') ? 'tbody' : id.includes('Json') ? 'pre' : 'div';
+    documentRef.register(id, new FakeNode(documentRef, tag));
+  }
+  const state = hydrateSettings({
+    active: {
+      host: '127.0.0.1', port: 8765, permission_mode: 'safe',
+      execution_fs_mode: 'normal', shell_env_inherit: 'core',
+    },
+    persisted: { host: '0.0.0.0', port: 8765, permission_mode: 'safe', shell_env_inherit: 'core' },
+    effective_persisted: {
+      host: '0.0.0.0', port: 8765, permission_mode: 'safe',
+      execution_fs_mode: 'normal', shell_env_inherit: 'core',
+    },
+    persisted_revision: 'rev-source',
+    pending_restart: [],
+    restart_required: false,
+    launcher: 'desktop',
+    managed_fields: ['host'],
+    active_sources: { host: 'desktop_cli', execution_fs_mode: 'default' },
+    field_status: {
+      host: {
+        active: '127.0.0.1', persisted: '0.0.0.0', persisted_explicit: true,
+        effective_persisted: '0.0.0.0', source: 'desktop_cli', state: 'overridden',
+      },
+      execution_fs_mode: {
+        active: 'normal', persisted: null, persisted_explicit: false,
+        effective_persisted: 'normal', default_value: 'normal', source: 'default',
+        state: 'in_sync_default',
+      },
+    },
+  });
+
+  renderSettingsForm(documentRef, state, () => ({ description: 'safe mode' }));
+
+  assert.equal(documentRef.getElementById('settingsHost').disabled, true);
+  assert.match(documentRef.getElementById('settingsHostHelp').textContent, /Desktop profile/);
+  assert.match(documentRef.getElementById('settingsManagedNotice').textContent, /Desktop 管理/);
+  assert.match(documentRef.getElementById('settingsStatusRows').textContent, /Desktop CLI override/);
+  assert.match(documentRef.getElementById('settingsStatusRows').textContent, /0\.0\.0\.0/);
+  assert.match(documentRef.getElementById('settingsStatusRows').textContent, /单纯重启不会生效/);
+  assert.match(documentRef.getElementById('settingsStatusRows').textContent, /未设置（默认 normal）/);
+  assert.match(documentRef.getElementById('settingsStatusRows').textContent, /无需重启/);
+  assert.match(documentRef.getElementById('systemSettingsStatusRows').textContent, /Desktop CLI override/);
 });
 
 

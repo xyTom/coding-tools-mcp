@@ -204,6 +204,33 @@ class DesktopI18nTests(unittest.TestCase):
 
 
 class DesktopRuntimeSafetyTests(unittest.TestCase):
+    def test_desktop_runtime_sets_non_sensitive_launcher_marker(self) -> None:
+        profile = build_profile(str(REPO_ROOT), "review")
+        manager = runtime.RuntimeManager()
+        captured: dict[str, object] = {}
+
+        class FakeProcess:
+            pid = 4321
+
+        def fake_popen(**kwargs: object) -> FakeProcess:
+            captured.update(kwargs)
+            return FakeProcess()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with (
+                mock.patch.object(manager, "_resolve_command", return_value=["coding-tools-mcp"]),
+                mock.patch.object(runtime, "log_dir_for_profile", return_value=Path(temporary_directory)),
+                mock.patch.object(runtime.subprocess, "Popen", side_effect=fake_popen),
+                mock.patch.object(manager, "_wait_for_port_state", return_value=True),
+                mock.patch.object(manager, "_find_pid_by_port", return_value=4321),
+            ):
+                _process, runtime_pid = manager._start_runtime_process(profile)
+
+        self.assertEqual(runtime_pid, 4321)
+        environment = captured["env"]
+        self.assertIsInstance(environment, dict)
+        self.assertEqual(environment["CODING_TOOLS_MCP_LAUNCHER"], "desktop")
+
     def test_public_tunnel_rejects_noauth(self) -> None:
         profile = build_profile(str(REPO_ROOT), "review")
         profile.auth.type = "noauth"

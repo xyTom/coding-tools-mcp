@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import unittest
@@ -10,9 +11,11 @@ from unittest.mock import patch
 from coding_tools_mcp import secret_vault as secret_vault_module
 from coding_tools_mcp import settings_store as settings_store_module
 from coding_tools_mcp.secret_vault import SecretVault, SecretVaultError
+from coding_tools_mcp.server import apply_persisted_runtime_settings
 from coding_tools_mcp.settings_definition import (
     LEGACY_TOOL_PROFILE_WARNING,
     SettingsValidationError,
+    effective_startup_settings,
     normalize_startup_settings_with_warnings,
     pending_restart_fields,
     schema_payload,
@@ -202,6 +205,59 @@ class SettingsDefinitionTests(unittest.TestCase):
         persisted = {"port": 9000, "permission_mode": "safe"}
 
         self.assertEqual(pending_restart_fields(active, persisted), ["port"])
+
+    def test_pending_restart_fields_compare_effective_defaults_not_raw_json(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            active = {
+                "host": "127.0.0.1",
+                "port": 8000,
+                "permission_mode": "safe",
+                "execution_fs_mode": "normal",
+                "shell_env_inherit": "core",
+            }
+            persisted: dict[str, object] = {}
+
+            effective = effective_startup_settings(persisted, workspace)
+
+            self.assertEqual(effective["execution_fs_mode"], "normal")
+            self.assertEqual(effective["permission_mode"], "safe")
+            self.assertEqual(effective["shell_env_inherit"], "core")
+            self.assertEqual(effective["host"], "127.0.0.1")
+            self.assertEqual(pending_restart_fields(active, persisted, workspace), [])
+
+    def test_runtime_setting_sources_distinguish_desktop_cli_environment_persisted_and_default(self) -> None:
+        args = argparse.Namespace(
+            host="0.0.0.0",
+            port=None,
+            permission_mode=None,
+            execution_fs_mode=None,
+            shell_env_inherit=None,
+            dangerously_skip_all_permissions=False,
+        )
+        persisted = {
+            "host": "127.0.0.1",
+            "port": 9000,
+            "permission_mode": "trusted",
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "CODING_TOOLS_MCP_LAUNCHER": "desktop",
+                "CODING_TOOLS_MCP_PORT": "8123",
+            },
+            clear=True,
+        ):
+            sources = apply_persisted_runtime_settings(args, persisted)
+
+        self.assertEqual(args.host, "0.0.0.0")
+        self.assertEqual(sources["host"], "desktop_cli")
+        self.assertEqual(args.port, 8123)
+        self.assertEqual(sources["port"], "environment")
+        self.assertEqual(args.permission_mode, "trusted")
+        self.assertEqual(sources["permission_mode"], "persisted")
+        self.assertEqual(args.execution_fs_mode, "normal")
+        self.assertEqual(sources["execution_fs_mode"], "default")
 
 
 class WorkspaceCatalogTests(unittest.TestCase):

@@ -116,11 +116,17 @@ reload, start, stop, or list-changed path. See
 
 ### Admin WebUI
 
-Configure a dedicated Admin token and open `/admin`. Ordinary MCP bearer and
-OAuth access tokens are never promoted to Admin authority. Settings writes use
-revision checks; a stale HTTP 409 preserves the browser draft and requires an
-explicit conflict resolution. Secret values, token material, hashes, digests,
-and Vault references are never displayed.
+Configure a dedicated Admin token and open `/admin`. The browser sends that raw
+token only once to `POST /admin/api/session`; after validation, Admin requests
+use an in-memory server session identified by an `HttpOnly`, `SameSite=Strict`
+cookie scoped to `/admin/api`. Mutating requests also require a CSRF token.
+Sessions have a 45-minute idle timeout, an 8-hour absolute lifetime, are
+revoked immediately on sign-out, and are invalidated by service restart.
+Ordinary MCP bearer and OAuth access tokens are never promoted to Admin
+authority. Settings writes use revision checks; a stale HTTP 409 preserves the
+browser draft and requires an explicit conflict resolution. Secret values,
+raw token material, hashes, digests, and Vault references are never displayed
+or persisted in browser Web Storage.
 
 ## The local tool catalog
 

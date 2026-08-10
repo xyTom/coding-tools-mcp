@@ -36,10 +36,15 @@ function hydrateSettings(payload = {}) {
   return {
     active,
     persisted,
+    effectivePersisted: canonicalSettings(payload.effective_persisted || persisted),
     draft: clone(persisted),
     persistedRevision: String(payload.persisted_revision || ''),
     pendingRestart: Array.isArray(payload.pending_restart) ? [...payload.pending_restart] : [],
     restartRequired: Boolean(payload.restart_required),
+    activeSources: clone(payload.active_sources || {}),
+    fieldStatus: clone(payload.field_status || {}),
+    launcher: String(payload.launcher || ''),
+    managedFields: Array.isArray(payload.managed_fields) ? [...payload.managed_fields] : [],
     conflict: null,
     schema: clone(payload.schema || {}),
   };

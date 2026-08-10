@@ -9,6 +9,7 @@ import {
   gatewayExposurePreview,
   gatewayServerFromForm,
   gatewayServerTemplate,
+  restartImpactCount,
   sanitizeAdminValue,
 } from '../src/admin.js';
 
@@ -45,6 +46,30 @@ test('new Gateway server template defaults to restart-only broker exposure', () 
   assert.equal(template.servers.chemistry.expose_mode, 'broker');
   assert.deepEqual(template.servers.chemistry.pinned_tools, []);
   assert.deepEqual(template.tool_search.custom_synonyms, {});
+});
+
+test('restart impact count never double counts settings restart_required', () => {
+  assert.equal(
+    restartImpactCount(
+      { pendingRestart: ['host', 'permission_mode'], restartRequired: true },
+      { restart_required: false },
+    ),
+    2,
+  );
+  assert.equal(
+    restartImpactCount(
+      { pendingRestart: [], restartRequired: false },
+      { restart_required: true },
+    ),
+    1,
+  );
+  assert.equal(
+    restartImpactCount(
+      { pendingRestart: ['host', 'permission_mode'], restartRequired: true },
+      { restart_required: true },
+    ),
+    3,
+  );
 });
 
 test('Gateway form builds broker and startup-enable configuration without requiring JSON', () => {

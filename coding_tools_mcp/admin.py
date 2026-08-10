@@ -24,8 +24,11 @@ from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
 from .runner.credentials import RunnerCredentialError, RunnerCredentialStore
 from .secret_vault import SecretVault, SecretVaultError
 from .settings_definition import (
+    EFFECTIVE_DEFAULTS,
+    RESTART_FIELDS,
     SECRET_REFERENCE_FIELDS,
     SettingsValidationError,
+    effective_startup_settings,
     normalize_startup_settings_with_warnings,
     pending_restart_fields,
     schema_payload,
@@ -49,6 +52,7 @@ SENSITIVE_KEY_RE = re.compile(
     r"(?:^|[_-])(token|secret|credential|api[_-]?key|password|passwd|authorization)(?:$|[_-])",
     re.I,
 )
+STARTUP_OVERRIDE_SOURCES = frozenset({"cli", "desktop_cli", "environment"})
 
 
 class AdminServiceError(ValueError):
@@ -322,6 +326,8 @@ class AdminService:
         runner_status: Callable[[], dict[str, Any]] | None = None,
         transcript_store: TranscriptStore | None = None,
         session_scanner: CodexSessionScanner | None = None,
+        active_sources: dict[str, str] | None = None,
+        launcher: str | None = None,
     ) -> None:
         self.settings_store = settings_store
         self.active_settings = _json_copy(active_settings)
@@ -338,6 +344,12 @@ class AdminService:
         self.runner_status = runner_status
         self.transcript_store = transcript_store
         self.session_scanner = session_scanner or CodexSessionScanner()
+        self.active_sources = {
+            str(field): str(source)
+            for field, source in (active_sources or {}).items()
+            if source
+        }
+        self.launcher = str(launcher or "").strip().lower() or None
         self._settings_lock = threading.Lock()
         self._gateway_lock = threading.Lock()
         self._credential_audit_lock = threading.Lock()
@@ -415,10 +427,100 @@ class AdminService:
 
         self.http_session_status = provider
 
+    def _settings_comparison(
+        self,
+        persisted: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]], set[str]]:
+        try:
+            effective_active = effective_startup_settings(
+                self.active_settings,
+                self.fallback_workspace,
+            )
+            effective_persisted = effective_startup_settings(
+                persisted,
+                self.fallback_workspace,
+            )
+            differences = set(
+                pending_restart_fields(
+                    self.active_settings,
+                    persisted,
+                    self.fallback_workspace,
+                )
+            )
+        except SettingsValidationError as exc:
+            raise AdminServiceError(str(exc)) from exc
+
+        field_status: dict[str, dict[str, Any]] = {}
+        for field in sorted(RESTART_FIELDS):
+            active_value = effective_active.get(field)
+            effective_value = effective_persisted.get(field)
+            persisted_explicit = field in persisted
+            source = self.active_sources.get(field)
+            if not source:
+                if active_value == effective_value and persisted_explicit:
+                    source = "persisted"
+                elif (
+                    not persisted_explicit
+                    and field in EFFECTIVE_DEFAULTS
+                    and active_value == EFFECTIVE_DEFAULTS[field]
+                ):
+                    source = "default"
+                else:
+                    source = "unknown"
+
+            differs = field in differences
+            overridden = differs and source in STARTUP_OVERRIDE_SOURCES
+            restart_actionable = differs and not overridden
+            if overridden:
+                state = "overridden"
+                if source == "desktop_cli":
+                    conclusion = (
+                        "Active is controlled by the Desktop launcher; restarting with the same "
+                        "Desktop profile will not use the Persisted value."
+                    )
+                elif source == "environment":
+                    conclusion = (
+                        "Active is controlled by an environment variable; restarting with the same "
+                        "environment will not use the Persisted value."
+                    )
+                else:
+                    conclusion = (
+                        "Active is controlled by a command-line argument; restarting with the same "
+                        "command will not use the Persisted value."
+                    )
+            elif differs:
+                state = "pending_restart"
+                conclusion = "Effective Persisted differs from Active and can take effect after restart."
+            elif not persisted_explicit and field in EFFECTIVE_DEFAULTS:
+                state = "in_sync_default"
+                conclusion = "Persisted is unset; the effective default matches Active."
+            else:
+                state = "in_sync"
+                conclusion = "Active and effective Persisted are already in sync."
+
+            field_status[field] = {
+                "active": active_value,
+                "persisted": persisted.get(field) if persisted_explicit else None,
+                "persisted_explicit": persisted_explicit,
+                "effective_persisted": effective_value,
+                "default_value": EFFECTIVE_DEFAULTS.get(field),
+                "source": source,
+                "state": state,
+                "restart_actionable": restart_actionable,
+                "conclusion": conclusion,
+            }
+
+        actionable = {
+            field
+            for field in differences
+            if field_status.get(field, {}).get("restart_actionable", True)
+        }
+        return effective_persisted, field_status, actionable
+
     def settings_payload(self) -> dict[str, Any]:
         result = self.settings_store.read_result()
         persisted = result.settings
-        pending = set(pending_restart_fields(self.active_settings, persisted))
+        effective_persisted, field_status, pending = self._settings_comparison(persisted)
         pending.update(
             field
             for field in SECRET_REFERENCE_FIELDS
@@ -432,6 +534,13 @@ class AdminService:
             "ok": True,
             "active": sanitize_settings(self.active_settings),
             "persisted": sanitize_settings(persisted),
+            "effective_persisted": sanitize_settings(effective_persisted),
+            "active_sources": dict(sorted(self.active_sources.items())),
+            "field_status": field_status,
+            "launcher": self.launcher,
+            "managed_fields": sorted(
+                field for field, source in self.active_sources.items() if source == "desktop_cli"
+            ),
             "persisted_revision": document_revision(persisted),
             "pending_restart": sorted(pending),
             "restart_required": bool(pending),
@@ -450,7 +559,7 @@ class AdminService:
             )
         except SettingsValidationError as exc:
             raise AdminServiceError(str(exc)) from exc
-        pending = set(pending_restart_fields(self.active_settings, normalized))
+        effective_normalized, field_status, pending = self._settings_comparison(normalized)
         pending.update(
             field
             for field in SECRET_REFERENCE_FIELDS
@@ -460,6 +569,8 @@ class AdminService:
             "ok": True,
             "valid": True,
             "normalized": sanitize_settings(normalized),
+            "effective_normalized": sanitize_settings(effective_normalized),
+            "field_status": field_status,
             "pending_restart": sorted(pending),
             "restart_required": bool(pending),
             "warnings": list(warnings),

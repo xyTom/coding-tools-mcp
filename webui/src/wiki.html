@@ -124,7 +124,7 @@ coding-tools-mcp --workspace "G:\path\to\your\project" --host 127.0.0.1 --port 8
         <h2><span data-lang="zh">3. 三个入口不要混用</span><span data-lang="en" hidden>3. Do not mix the three endpoints</span></h2>
         <div class="endpoint-grid">
           <article><code>/app</code><h3 data-lang="zh">Agent 工作台</h3><h3 data-lang="en" hidden>Agent workbench</h3><p data-lang="zh">使用普通 bearer/OAuth token。</p><p data-lang="en" hidden>Uses an ordinary bearer/OAuth token.</p></article>
-          <article><code>/admin</code><h3 data-lang="zh">管理控制台</h3><h3 data-lang="en" hidden>Admin console</h3><p data-lang="zh">使用独立 Admin token。</p><p data-lang="en" hidden>Uses the separate Admin token.</p></article>
+          <article><code>/admin</code><h3 data-lang="zh">管理控制台</h3><h3 data-lang="en" hidden>Admin console</h3><p data-lang="zh">独立 Admin token 只用于一次性交换服务器端 Admin Session；后续使用 HttpOnly cookie + CSRF。</p><p data-lang="en" hidden>The separate Admin token is used only for a one-time server-side Admin Session exchange; subsequent requests use an HttpOnly cookie plus CSRF.</p></article>
           <article><code>/mcp</code><h3 data-lang="zh">MCP 客户端</h3><h3 data-lang="en" hidden>MCP clients</h3><p data-lang="zh">使用与 /app 相同的普通身份。</p><p data-lang="en" hidden>Uses the same ordinary identity as /app.</p></article>
         </div>
       </section>
@@ -134,7 +134,7 @@ coding-tools-mcp --workspace "G:\path\to\your\project" --host 127.0.0.1 --port 8
         <div class="answer-grid">
           <article><h3 data-lang="zh">可选工作台，不是 GPT 网页</h3><h3 data-lang="en" hidden>Optional workbench, not a GPT webpage</h3><p data-lang="zh">它通过 Codex App Server 驱动 Codex Agent；不提供 ChatGPT/GPT 网页聊天服务。</p><p data-lang="en" hidden>It drives a Codex Agent through Codex App Server; it does not provide a ChatGPT/GPT web chat service.</p></article>
           <article><h3 data-lang="zh">执行主机前提</h3><h3 data-lang="en" hidden>Execution-host prerequisite</h3><p data-lang="zh">执行主机必须安装 Codex CLI，并已完成登录（例如先运行 <code>codex login</code>）。Runner Workspace 必须在对应 Runner 主机完成。</p><p data-lang="en" hidden>The execution host must have Codex CLI installed and signed in (for example, run <code>codex login</code>). A Runner Workspace requires this on its Runner host.</p></article>
-          <article><h3 data-lang="zh">三套不同凭据</h3><h3 data-lang="en" hidden>Three credential sets</h3><p data-lang="zh">App bearer 登录 /app；Admin token 登录 /admin；Codex 登录凭据由 Codex CLI 管理。三者不能互换。</p><p data-lang="en" hidden>The App bearer signs in to /app; the Admin token signs in to /admin; Codex CLI manages Codex sign-in. They are not interchangeable.</p></article>
+          <article><h3 data-lang="zh">三套不同凭据</h3><h3 data-lang="en" hidden>Three credential sets</h3><p data-lang="zh">App bearer/OAuth access token 用于 /app；Admin token 只在 /admin 创建服务器端 Session 时使用；Codex 登录凭据由执行主机上的 Codex CLI 管理。三者不能互换。</p><p data-lang="en" hidden>The App bearer/OAuth access token is for /app; the Admin token is used only to create a server-side Session for /admin; Codex CLI credentials are managed on the execution host. They are not interchangeable.</p></article>
           <article><h3 data-lang="zh">两部分持久化</h3><h3 data-lang="en" hidden>Two-part persistence</h3><p data-lang="zh">Coding Tools MCP SQLite 保存 Agent Session 元数据，Codex thread store 保存模型 thread 与对话连续性；两者共同完成恢复。</p><p data-lang="en" hidden>Coding Tools MCP SQLite stores Agent Session metadata, while the Codex thread store keeps model-thread and conversation continuity; recovery depends on both.</p></article>
         </div>
         <ol data-lang="zh"><li>连接身份并选择 Workspace。</li><li>创建 Agent Session，填写任务说明。</li><li>发送 Turn；遇到审批请求时检查命令再决定。</li><li>运行 Validation 获取结构化证据。</li><li>交接前查看 Handoff 中的分支、指纹、job 和验证结果。</li></ol>
@@ -163,8 +163,8 @@ coding-tools-mcp-runner `
 
       <section id="security">
         <h2><span data-lang="zh">7. 安全清单</span><span data-lang="en" hidden>7. Security checklist</span></h2>
-        <ul data-lang="zh"><li>普通 bearer、Admin token、Runner credential 三者分开。</li><li>不要把 token 放进 URL、二维码、Git、截图或聊天记录。</li><li>公网只使用 HTTPS/WSS 和认证 tunnel。</li><li>不要公开暴露 noauth 服务。</li></ul>
-        <ul data-lang="en" hidden><li>Keep ordinary bearer, Admin token, and Runner credential separate.</li><li>Keep tokens out of URLs, QR codes, Git, screenshots, and chats.</li><li>Use HTTPS/WSS and an authenticated tunnel for public access.</li><li>Never expose a no-auth service publicly.</li></ul>
+        <ul data-lang="zh"><li>普通 bearer/OAuth、Admin token、Runner credential、Codex CLI 登录凭据彼此分开。</li><li>Admin token 只用于 <code>POST /admin/api/session</code> 一次性交换；不要保存到 Web Storage、URL 或可读 Cookie。</li><li>不要把 token 放进 URL、二维码、Git、截图或聊天记录。</li><li>公网只使用 HTTPS/WSS 和认证 tunnel。</li><li>不要公开暴露 noauth 服务。</li></ul>
+        <ul data-lang="en" hidden><li>Keep ordinary bearer/OAuth, Admin token, Runner credentials, and Codex CLI credentials separate.</li><li>Use the Admin token only for the one-time <code>POST /admin/api/session</code> exchange; never store it in Web Storage, URLs, or script-readable cookies.</li><li>Keep tokens out of URLs, QR codes, Git, screenshots, and chats.</li><li>Use HTTPS/WSS and an authenticated tunnel for public access.</li><li>Never expose a no-auth service publicly.</li></ul>
       </section>
     </main>
   </div>

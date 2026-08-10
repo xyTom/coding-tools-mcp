@@ -347,6 +347,7 @@ class RuntimeManager:
     def _start_runtime_process(self, profile: WorkspaceProfile) -> tuple[subprocess.Popen[str], int]:
         command = self._resolve_command(profile)
         env = os.environ.copy()
+        env["CODING_TOOLS_MCP_LAUNCHER"] = "desktop"
         server_url = self._server_url_for_profile(profile)
         if server_url:
             env["CODING_TOOLS_MCP_SERVER_URL"] = server_url

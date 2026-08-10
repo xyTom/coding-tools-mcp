@@ -18,6 +18,7 @@ from coding_tools_mcp.agent_backends.base import (
 )
 from coding_tools_mcp.agent_session_store import AgentSessionStore
 from coding_tools_mcp.agent_sessions import AgentSessionService, AgentSessionServiceError
+from coding_tools_mcp.admin_sessions import ADMIN_SESSION_COOKIE
 from coding_tools_mcp.oauth import OAuthConfig, OAuthIdentity
 from coding_tools_mcp.operator_api import OperatorAPIError, OperatorAPIService, OperatorPrincipal
 from coding_tools_mcp.server import MCPHandler, Runtime, RuntimeHTTPServer, configure_allowed_origins
@@ -428,6 +429,7 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
         *,
         token: str | None = None,
         admin_header: str | None = None,
+        cookie: str | None = None,
         origin: str | None = None,
         method: str = "GET",
         body: dict[str, object] | None = None,
@@ -437,6 +439,8 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
             headers["Authorization"] = f"Bearer {token}"
         if admin_header is not None:
             headers["X-Admin-Token"] = admin_header
+        if cookie is not None:
+            headers["Cookie"] = cookie
         if origin is not None:
             headers["Origin"] = origin
         data = None
@@ -453,6 +457,8 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
     def test_operator_api_uses_ordinary_bearer_and_never_admin_header(self) -> None:
         server, thread = self._server()
         try:
+            self.assertIsNotNone(server.admin_sessions)
+            admin_session_id, _csrf_token = server.admin_sessions.create()
             for request in (
                 self._request(server, "/api/app/workspaces"),
                 self._request(
@@ -464,6 +470,11 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
                     server,
                     "/api/app/workspaces",
                     token="dedicated-admin-token",
+                ),
+                self._request(
+                    server,
+                    "/api/app/workspaces",
+                    cookie=f"{ADMIN_SESSION_COOKIE}={admin_session_id}",
                 ),
             ):
                 with self.assertRaises(urllib.error.HTTPError) as denied:
@@ -521,7 +532,7 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
             with urllib.request.urlopen(
                 self._request(
                     server,
-                    f"/api/app/sessions?workspace_id=ws-default",
+                    "/api/app/sessions?workspace_id=ws-default",
                     token="ordinary-mcp-token",
                 ),
                 timeout=5,
