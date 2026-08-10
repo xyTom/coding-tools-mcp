@@ -41,6 +41,27 @@ Platform skips are recorded as skips, not silently counted as passed behavior.
 The Linux POSIX permission result is supplied by Ubuntu WSL; Windows skips do
 not substitute for it.
 
+### Final merged candidate rerun
+
+After RM13B and the user-facing documentation commit, the Integration Agent
+fast-forwarded the canonical branch to `main` and reran the exact release
+aggregates on merged candidate `140f47d`:
+
+| Exact command/group | Exit | Result |
+| --- | ---: | --- |
+| Core 25 tool-golden/schema-drift/MCP-contract aggregate | 0 | 54 tests; 46 Windows `/dev/null` fixture skips |
+| Runner/resilience aggregate | 0 | 204 tests; 1 PySide6 skip; no failures or unhandled thread exception |
+| Security/persistence aggregate | 0 | 65 tests; 1 Windows POSIX skip |
+| HTTP/Runner/upstream/server/transcript `py_compile` | 0 | Passed |
+| `git diff --check` | 0 | Passed on clean merged `main` |
+| `git diff --check 42d940b...HEAD` | 0 | Passed for the complete integration range |
+| Production/user-document credential and sensitive-artifact scans | 0 | Zero high-risk credential, credential-bearing URL, or database/key artifact matches |
+
+The earlier Ubuntu WSL permission evidence remains applicable because
+`coding_tools_mcp/transcript.py`, `coding_tools_mcp/settings_store.py`, and the
+POSIX permission test did not change between tested commit `81072da` and merged
+candidate `140f47d`.
+
 ### OAuth / Admin / Operator / secrets
 
 - Dedicated Admin token boundary: exit 0.

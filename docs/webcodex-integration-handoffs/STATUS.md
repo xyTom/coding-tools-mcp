@@ -3,7 +3,9 @@
 Canonical branch: `integration/webcodex-runtime-platform`
 Canonical worktree: `G:\LLM\coding-tools-mcp\.worktrees\webcodex-runtime-platform`
 
-The integrated implementation is recorded by commit `d8c1cc855f71303a525da288a6c8e895a76a10b8` on the canonical branch.
+The integrated implementation baseline is `d8c1cc855f71303a525da288a6c8e895a76a10b8`.
+Strict remediation continues through `dccef08cd8a0085bdd484a4741be9848faca301e`;
+the final user-document and merged release-gate candidate is `140f47d6f8cc3af505b9fc91905e067b077a0272`.
 
 | Phase | Status | Implementation | Handoff / Evidence | Notes |
 | --- | --- | --- | --- | --- |
@@ -25,11 +27,11 @@ The integrated implementation is recorded by commit `d8c1cc855f71303a525da288a6c
 | 15 | complete | `d8c1cc8` | Runtime helper suite | Windows truthful capability test green; Linux Landlock behavior remains platform-conditional |
 | 16 | complete | `d8c1cc8` | WorkspaceHost/catalog/binding tests | local/runner targets; remote root opaque; no local fallback |
 | 17 | complete | `d8c1cc8` (source Runner workstream) | Runner transport/WebSocket tests | credential/registry + production outbound Runner peer and `/runner/ws` |
-| 18 | complete | `73888d5` | `phase-18-session-resilience-final.md`, `phase-18-session-resilience-retrospective.md`, `integration-remediation/RM13-final-release-handoff.md`, `integration-remediation/RM13A-post-review-remediation.md` | RM00–RM12 and post-review P1 findings closed; final handoff records exact gates and residual platform limits |
+| 18 | complete | `dccef08` | `phase-18-session-resilience-final.md`, `phase-18-session-resilience-retrospective.md`, `integration-remediation/RM13-final-release-handoff.md`, `integration-remediation/RM13A-post-review-remediation.md`, `integration-remediation/RM13B-concurrent-shutdown-and-runner-id-reuse.md` | RM00–RM13B findings closed; final Integration rerun records exact gates and residual platform limits |
 | 19 | complete | `d8c1cc8` (source `2e705d7`) | Runner job reconciliation tests | recovering/running/completed/failed/cancelled/lost reconciliation |
 | 20 | complete | `d8c1cc8` | Desktop tests | tunnel providers, external URL, mobile onboarding, Runner status |
 | 21 | not enabled (optional) | none by design | `phase-22.md` | no second MCP/OpenAPI facade; stable Core 25-tool surface preserved |
-| 22 | complete | `73888d5` | `phase-22.md`, `integration-remediation/RM12B-linux-posix-evidence.md`, `integration-remediation/RM13-final-release-handoff.md`, `integration-remediation/RM13A-post-review-remediation.md` | RM12 gates and post-review shutdown/redaction findings passed; final handoff recorded |
+| 22 | complete | `140f47d` | `phase-22.md`, `integration-remediation/RM12B-linux-posix-evidence.md`, `integration-remediation/RM13B-concurrent-shutdown-and-runner-id-reuse.md` | Final merged Core, Runner/resilience, and security/persistence aggregates passed |
 
 ## Current Release Evidence
 
@@ -42,6 +44,8 @@ The integrated implementation is recorded by commit `d8c1cc855f71303a525da288a6c
 - `docs/webcodex-integration-handoffs/integration-remediation/RM12B-linux-posix-evidence.md`
 - `docs/webcodex-integration-handoffs/integration-remediation/RM13-final-release-handoff.md`
 - `docs/webcodex-integration-handoffs/integration-remediation/RM13A-post-review-remediation.md`
+- `docs/webcodex-integration-handoffs/integration-remediation/RM13B-concurrent-shutdown-and-runner-id-reuse.md`
+- `docs/webcodex-user-guide.md`
 
 ## Non-claims
 

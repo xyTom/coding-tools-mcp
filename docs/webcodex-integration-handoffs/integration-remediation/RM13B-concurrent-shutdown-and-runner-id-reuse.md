@@ -55,6 +55,24 @@ The broader Core 25, Runner/resilience aggregate, and security/persistence
 release gates were not rerun in this card; earlier results remain historical
 evidence only and are not restated as validation of `dccef08`.
 
+### Post-merge Integration closure
+
+The final Integration Agent fast-forwarded the canonical branch to `main` and
+reran the release gates on merged candidate `140f47d`:
+
+| Command/group | Exit code | Result |
+| --- | ---: | --- |
+| Core 25 tool-golden/schema-drift/MCP-contract aggregate | 0 | 54 tests; 46 Windows `/dev/null` fixture skips |
+| Runner/resilience release aggregate | 0 | 204 tests; 1 PySide6 skip; no unhandled thread exception |
+| Security/persistence aggregate | 0 | 65 tests; 1 Windows POSIX skip |
+| `python -m py_compile` for HTTP/Runner/upstream/server/transcript production modules | 0 | Passed |
+| `git diff --check` and `git diff --check 42d940b...HEAD` | 0 | Passed |
+| High-risk credential, credential-bearing URL, and sensitive artifact scans | 0 | Zero matches in production/user-document scope |
+
+The independent Ubuntu WSL POSIX permission test remains valid evidence: the
+transcript/settings implementation and its permission test are unchanged from
+the tested `81072da` candidate through `140f47d`.
+
 ## Security Review
 
 - Full Session ID/token/argv secret exposed: no
@@ -64,13 +82,11 @@ evidence only and are not restated as validation of `dccef08`.
 
 ## Remaining Risks
 
-- The full release aggregates and platform-specific POSIX evidence were not
-  rerun after `dccef08`; a merge decision should require those gates on the
-  current candidate.
 - The execution book remains intentionally untracked and untouched.
-- The main worktree was not modified.
+- Linux Landlock Inspect enforcement and PySide6 UI execution remain
+  platform-dependent release-infrastructure checks.
 
 ## Next Card Preconditions
 
-- Re-run the release aggregate gates on the implementation plus this handoff
-  commit before treating the final Phase 18/22 release handoff as current.
+- Satisfied by the post-merge Integration closure above. No code release gate
+  remains outstanding for this integration.
