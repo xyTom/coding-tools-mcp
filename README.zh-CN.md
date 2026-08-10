@@ -165,7 +165,7 @@ WebUI 只通过专用 Admin API 管理已经运行的 HTTP 服务器，不是 De
 | 主题 | 文档 |
 | --- | --- |
 | 入门 | [快速开始](docs/quickstart.md)、[客户端配置](docs/mcp-client-config.md)、[故障排查](docs/troubleshooting.md) |
-| Web / Agent / Runner | [WebCodex 用户指南](docs/webcodex-user-guide.md)、[Runner 故障排查](docs/webcodex-runner-troubleshooting.md)、[迁移与回滚](docs/webcodex-migration-rollback.md) |
+| Agent 工作台与 Runner | [中文用户指南](docs/coding-tools-mcp-agent-runner-guide.zh-CN.md)、[English guide](docs/coding-tools-mcp-agent-runner-guide.md)、[Runner 故障排查](docs/webcodex-runner-troubleshooting.md)、[迁移与回滚](docs/webcodex-migration-rollback.md) |
 | Runtime | [工具与 schema](docs/tools-and-schemas.md)、[Runtime 契约](docs/runtime-contract-v0.2.md)、[权限模式](docs/permission-modes.md) |
 | 远程与 OAuth | [Remote MCP](docs/remote-mcp.md)、[升级与回滚](docs/migration-v0.1-to-v0.2.2.md) |
 | 管理 | [Admin API](docs/admin-api.md)、[Admin WebUI](docs/admin-webui.md)、[聊天持久化](docs/chat-persistence.md) |

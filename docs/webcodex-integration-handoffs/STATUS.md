@@ -45,7 +45,8 @@ the final user-document and merged release-gate candidate is `140f47d6f8cc3af505
 - `docs/webcodex-integration-handoffs/integration-remediation/RM13-final-release-handoff.md`
 - `docs/webcodex-integration-handoffs/integration-remediation/RM13A-post-review-remediation.md`
 - `docs/webcodex-integration-handoffs/integration-remediation/RM13B-concurrent-shutdown-and-runner-id-reuse.md`
-- `docs/webcodex-user-guide.md`
+- `docs/coding-tools-mcp-agent-runner-guide.md`
+- `docs/coding-tools-mcp-agent-runner-guide.zh-CN.md`
 
 ## Non-claims
 

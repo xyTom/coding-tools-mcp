@@ -1,6 +1,6 @@
-# WebCodex Runtime Integration Contract
+# Coding Tools MCP Runtime Integration Contract
 
-This document is the integration-level contract for the WebCodex Runtime Platform.
+This document is the integration-level contract for the Coding Tools MCP Runtime Platform.
 It complements the versioned MCP Runtime contract and ADRs; it does not replace
 the stable Core MCP tool/schema contract.
 

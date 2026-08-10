@@ -64,7 +64,7 @@ python scripts/check_desktop_i18n.py
 
 ## Agent 工作台与远程 Runner
 
-Desktop 负责本地 Runtime、profile 和 tunnel 生命周期；浏览器 Agent 工作台、Admin WebUI 与远程 Runner 使用不同的身份边界和操作流程。首次启用这些功能前，请阅读 [WebCodex 用户指南](../../docs/webcodex-user-guide.md)。
+Desktop 负责本地 Runtime、profile 和 tunnel 生命周期；浏览器 Agent 工作台、Admin WebUI 与远程 Runner 使用不同的身份边界和操作流程。首次启用这些功能前，请阅读 [Coding Tools MCP 用户指南](../../docs/coding-tools-mcp-agent-runner-guide.zh-CN.md)。
 
 ## 当前限制
 

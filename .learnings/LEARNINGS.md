@@ -31,6 +31,38 @@ At the start of a dirty-worktree review, record SHA-256 hashes for every relevan
 
 ---
 
+## [LRN-20260810-001] correction
+
+**Logged**: 2026-08-10T00:00:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: docs
+
+### Summary
+
+The public project name must remain Coding Tools MCP; WebCodex is an internal integration codename only.
+
+### Details
+
+New user-facing guide titles and README navigation briefly presented WebCodex as a product name. The package, command, repository, and public documentation must continue to use Coding Tools MCP / `coding-tools-mcp`. Internal historical plans and handoffs may retain their codename filenames.
+
+### Suggested Action
+
+Before committing user-facing documentation, verify both English and Chinese README navigation and keep internal phase codenames out of public product titles.
+
+### Metadata
+
+- Source: user_feedback
+- Related Files: README.md, README.zh-CN.md, docs/coding-tools-mcp-agent-runner-guide.md
+- Tags: naming, documentation, localization
+
+### Resolution
+
+- **Resolved**: 2026-08-10T00:00:00+08:00
+- **Notes**: Added English and Chinese guides under Coding Tools MCP naming and corrected all user-facing navigation.
+
+---
+
 ## [LRN-20260806-001] best_practice
 
 **Logged**: 2026-08-06T12:00:00+08:00

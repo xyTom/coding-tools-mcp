@@ -1,4 +1,4 @@
-# WebCodex Agent 工作台与远程 Runner 用户指南
+# Coding Tools MCP Agent 工作台与远程 Runner 用户指南
 
 这份指南面向需要通过浏览器操作 Agent、管理多个 Workspace，或把执行放到远程机器上的用户。如果只想把 Coding Tools MCP 接入 Claude、Codex、Cursor 等 MCP 客户端，请直接阅读[快速开始](quickstart.md)。
 
@@ -112,4 +112,4 @@ coding-tools-mcp-runner --allow-insecure-ws --server "ws://127.0.0.1:8765/runner
 - 升级前停止或静默服务，并备份 Settings、Vault、OAuth、Agent Session 与 Transcript 数据库。
 - SQLite 正在写入时使用 SQLite-aware backup，不要直接复制活动数据库文件。
 
-升级、回滚和数据备份步骤见 [WebCodex Runtime Platform Migration and Rollback](webcodex-migration-rollback.md)。Admin 的详细接口见 [Admin API](admin-api.md)，MCP 客户端配置见 [Client configuration](mcp-client-config.md)。
+升级、回滚和数据备份步骤见 [Coding Tools MCP Runtime Platform Migration and Rollback](webcodex-migration-rollback.md)。Admin 的详细接口见 [Admin API](admin-api.md)，MCP 客户端配置见 [Client configuration](mcp-client-config.md)。

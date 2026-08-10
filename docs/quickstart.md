@@ -105,4 +105,4 @@ coding-tools-mcp --permission-mode dangerous --workspace /path/to/repo
 Use this only with trusted workspaces and trusted clients in an externally hardened environment. `--dangerously-skip-all-permissions` remains as a compatibility alias.
 
 To use the browser Agent workbench, separate Admin surface, or a remote Runner,
-continue with the [WebCodex user guide](webcodex-user-guide.md).
+continue with the [Coding Tools MCP Agent and Runner guide](coding-tools-mcp-agent-runner-guide.md).

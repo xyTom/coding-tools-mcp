@@ -63,7 +63,8 @@ Runner credentials authenticate `/runner/ws` only. They are distinct from
 ordinary MCP/OAuth credentials and the Admin token. Provision the one-time
 plaintext through `CODING_TOOLS_MCP_RUNNER_CREDENTIAL` or a protected Runner
 credential file; it is intentionally not accepted as a command-line value. See
-the [WebCodex user guide](webcodex-user-guide.md) for the complete setup flow.
+the [Coding Tools MCP Agent and Runner guide](coding-tools-mcp-agent-runner-guide.md)
+for the complete setup flow.
 
 ## Telemetry status
 
