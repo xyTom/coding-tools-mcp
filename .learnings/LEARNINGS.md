@@ -31,6 +31,38 @@ At the start of a dirty-worktree review, record SHA-256 hashes for every relevan
 
 ---
 
+## [LRN-20260810-002] correction
+
+**Logged**: 2026-08-10T00:00:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: docs
+
+### Summary
+
+User onboarding must be reachable inside the running product and must name the exact startup credential expected by `/app`.
+
+### Details
+
+Repository Markdown links were not a usable navigation surface for the user, and the Operator dialog called its input only a bearer token without explaining where to configure it. `/app` has no separate password: the normal static path uses `CODING_TOOLS_MCP_AUTH_TOKEN`, which is read at server startup and is intentionally different from the Admin token.
+
+### Suggested Action
+
+For user-facing runtime features, provide an in-product help route with copyable platform-specific commands. Authentication prompts must name the source environment variable, role boundary, restart requirement, and whether the WebUI can bootstrap the credential.
+
+### Metadata
+
+- Source: user_feedback
+- Related Files: coding_tools_mcp/webui.py, webui/src/wiki.html, webui/src/app.html
+- Tags: onboarding, authentication, wiki, documentation
+
+### Resolution
+
+- **Resolved**: 2026-08-10T00:00:00+08:00
+- **Notes**: Added the bilingual `/wiki` route and linked the Operator authentication dialog directly to its token setup section.
+
+---
+
 ## [LRN-20260810-001] correction
 
 **Logged**: 2026-08-10T00:00:00+08:00

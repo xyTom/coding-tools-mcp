@@ -61,6 +61,9 @@ npx coding-tools-mcp --stdio --workspace /path/to/repo
 `http://127.0.0.1:8765/mcp`。主协议版本为 MCP `2025-11-25`，并明确兼容
 `2025-06-18`。
 
+HTTP 服务启动后，打开 `http://127.0.0.1:8765/wiki` 即可使用可点击跳转的
+中英文 Wiki，其中包含完整 PowerShell 启动命令和 `/app` 凭据说明。
+
 ## 集成后的 v0.2.2 架构
 
 当前 fork 开发版本为 Python `0.3.0.dev0`，对应 npm launcher
@@ -165,7 +168,7 @@ WebUI 只通过专用 Admin API 管理已经运行的 HTTP 服务器，不是 De
 | 主题 | 文档 |
 | --- | --- |
 | 入门 | [快速开始](docs/quickstart.md)、[客户端配置](docs/mcp-client-config.md)、[故障排查](docs/troubleshooting.md) |
-| Agent 工作台与 Runner | [中文用户指南](docs/coding-tools-mcp-agent-runner-guide.zh-CN.md)、[English guide](docs/coding-tools-mcp-agent-runner-guide.md)、[Runner 故障排查](docs/webcodex-runner-troubleshooting.md)、[迁移与回滚](docs/webcodex-migration-rollback.md) |
+| Agent 工作台与 Runner | 运行后访问 `/wiki`、[中文源文档](docs/coding-tools-mcp-agent-runner-guide.zh-CN.md)、[English source](docs/coding-tools-mcp-agent-runner-guide.md)、[Runner 故障排查](docs/webcodex-runner-troubleshooting.md) |
 | Runtime | [工具与 schema](docs/tools-and-schemas.md)、[Runtime 契约](docs/runtime-contract-v0.2.md)、[权限模式](docs/permission-modes.md) |
 | 远程与 OAuth | [Remote MCP](docs/remote-mcp.md)、[升级与回滚](docs/migration-v0.1-to-v0.2.2.md) |
 | 管理 | [Admin API](docs/admin-api.md)、[Admin WebUI](docs/admin-webui.md)、[聊天持久化](docs/chat-persistence.md) |

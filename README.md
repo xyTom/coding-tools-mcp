@@ -70,6 +70,10 @@ For Streamable HTTP, omit `--stdio`. The default endpoint is
 `http://127.0.0.1:8765/mcp`. The primary protocol is MCP `2025-11-25`, with
 explicit `2025-06-18` compatibility.
 
+After the HTTP server starts, open `http://127.0.0.1:8765/wiki` for the
+clickable bilingual User Wiki. It includes exact PowerShell startup commands
+and explains which token `/app` expects.
+
 ## Integrated v0.2.2 architecture
 
 The current fork development release is Python `0.3.0.dev0`, with npm launcher
@@ -199,7 +203,7 @@ result. See [COMPLIANCE.md](COMPLIANCE.md), [BENCHMARK.md](BENCHMARK.md), and
 | Topic | Documents |
 | --- | --- |
 | Getting started | [Quickstart](docs/quickstart.md), [Client configuration](docs/mcp-client-config.md), [Troubleshooting](docs/troubleshooting.md) |
-| Agent workbench and Runner | [User guide](docs/coding-tools-mcp-agent-runner-guide.md), [简体中文](docs/coding-tools-mcp-agent-runner-guide.zh-CN.md), [Runner troubleshooting](docs/webcodex-runner-troubleshooting.md), [Migration and rollback](docs/webcodex-migration-rollback.md) |
+| Agent workbench and Runner | Runtime Wiki at `/wiki`, [English source guide](docs/coding-tools-mcp-agent-runner-guide.md), [简体中文](docs/coding-tools-mcp-agent-runner-guide.zh-CN.md), [Runner troubleshooting](docs/webcodex-runner-troubleshooting.md) |
 | Runtime contract | [Tools and schemas](docs/tools-and-schemas.md), [Runtime contract](docs/runtime-contract-v0.2.md), [Permission modes](docs/permission-modes.md) |
 | Remote and OAuth | [Remote MCP](docs/remote-mcp.md), [Upgrade and rollback](docs/migration-v0.1-to-v0.2.2.md) |
 | Administration | [Admin API](docs/admin-api.md), [Admin WebUI](docs/admin-webui.md), [Chat persistence](docs/chat-persistence.md) |

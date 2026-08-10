@@ -38,14 +38,16 @@ async function buildPage(htmlName, styles, scripts) {
   return `${built.trim()}\n`;
 }
 
-const [adminBuilt, appBuilt] = await Promise.all([
+const [adminBuilt, appBuilt, wikiBuilt] = await Promise.all([
   buildPage('admin.html', ['admin.css'], adminScripts),
   buildPage('app.html', ['admin.css', 'app/app.css'], appScripts),
+  buildPage('wiki.html', ['wiki.css'], ['wiki.js']),
 ]);
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 await Promise.all([
   writeFile(path.join(outDir, 'admin.html'), adminBuilt, 'utf8'),
   writeFile(path.join(outDir, 'app.html'), appBuilt, 'utf8'),
+  writeFile(path.join(outDir, 'wiki.html'), wikiBuilt, 'utf8'),
 ]);
-console.log('Built coding_tools_mcp/webui_dist/{admin,app}.html from webui/src/**');
+console.log('Built coding_tools_mcp/webui_dist/{admin,app,wiki}.html from webui/src/**');

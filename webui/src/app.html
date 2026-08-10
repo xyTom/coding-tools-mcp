@@ -44,6 +44,7 @@
     <header class="topbar operator-topbar">
       <div class="topbar-title"><div><strong>Agent 工作台</strong><span>Durable Codex sessions across windows and devices</span></div></div>
       <div class="topbar-actions">
+        <a href="/wiki" class="button secondary compact">使用 Wiki</a>
         <button id="disconnectOperator" type="button" class="button secondary compact">断开</button>
         <button id="openOperatorAuth" type="button" class="button primary compact"><svg class="icon icon-sm"><use href="#i-key"></use></svg>连接身份</button>
       </div>
@@ -71,9 +72,16 @@
         <section class="operator-stage panel" aria-live="polite">
           <div id="agentEmpty" class="agent-welcome">
             <span class="agent-welcome-icon"><svg class="icon"><use href="#i-message"></use></svg></span>
-            <h2>继续一个 durable Agent Session</h2>
-            <p>选择左侧历史 Session，或在当前 Workspace 创建一个新的 Codex Session。页面刷新不会自动重复最后一次 Turn。</p>
-            <button id="startNewSessionEmpty" type="button" class="button primary">开始新 Session</button>
+            <span class="agent-onboarding-badge">可选功能</span>
+            <h2>Coding Tools MCP Codex Agent 工作台</h2>
+            <p class="agent-onboarding-lead">这是可选的 Codex Agent 工作台，不是 GPT/ChatGPT 网页。它在执行主机上调用已经登录的 Codex CLI。</p>
+            <div class="agent-onboarding-grid">
+              <article><h3>运行前提</h3><p>执行主机必须安装 Codex CLI，并已完成 Codex 登录（例如先运行 codex login）。本地 Workspace 使用本机；Runner Workspace 使用对应 Runner 主机。</p></article>
+              <article><h3>三套凭据互不相同</h3><p>App bearer、Admin token、Codex 登录凭据是三套不同凭据。App bearer 登录 /app，Admin token 登录 /admin，Codex 登录凭据由 Codex CLI 自己管理。</p></article>
+              <article><h3>持久化由两部分共同完成</h3><p>持久化由 Coding Tools MCP SQLite 与 Codex thread store 共同完成。前者保存 Agent Session 元数据，后者保存模型 thread 与对话连续性。</p></article>
+            </div>
+            <p>准备完成后，选择左侧历史 Session，或在当前 Workspace 创建新的 Codex Session。页面刷新不会自动重复最后一次 Turn。</p>
+            <div class="button-row"><button id="startNewSessionEmpty" type="button" class="button primary">开始新 Session</button><a href="/wiki#agent-flow" class="button secondary">查看完整使用 Wiki</a></div>
           </div>
 
           <div id="agentSessionPanel" class="agent-session-panel" hidden>
@@ -113,12 +121,13 @@
 
   <dialog id="operatorAuthDialog" aria-labelledby="operatorAuthTitle">
     <form id="operatorAuthForm" class="dialog-card" autocomplete="off">
-      <header><div><h2 id="operatorAuthTitle">连接 Operator 身份</h2><p>输入普通 Operator/OAuth bearer。它只保存在当前页面内存中。</p></div></header>
+      <header><div><h2 id="operatorAuthTitle">连接 Operator 身份</h2><p>这里没有单独的 App 密码。请输入启动服务时设置的普通 bearer token。</p></div></header>
       <div class="dialog-body">
-        <label for="operatorAccessToken">Operator bearer token
+        <label for="operatorAccessToken">Operator bearer token（通常是 CODING_TOOLS_MCP_AUTH_TOKEN）
           <input id="operatorAccessToken" type="password" autocomplete="off" required>
         </label>
-        <p class="help">不会写入 URL、浏览器持久化存储或 Admin 设置。</p>
+        <p class="help">Admin token 不能用于这里；此 token 不在 WebUI 中创建，只保存在当前页面内存中。</p>
+        <p class="help"><a href="/wiki#app-token" target="_blank" rel="noopener">打开启动与密码说明</a></p>
       </div>
       <footer><button id="closeOperatorAuth" type="button" class="button secondary">取消</button><button type="submit" class="button primary">连接</button></footer>
     </form>

@@ -7,9 +7,11 @@ from pathlib import Path
 from coding_tools_mcp.webui import (
     ADMIN_HTML,
     APP_HTML,
+    WIKI_HTML,
     WEBUI_DIST,
     admin_console_html,
     operator_app_html,
+    user_guide_html,
 )
 
 
@@ -21,7 +23,7 @@ class WebUIBuildTests(unittest.TestCase):
     def test_packaged_admin_page_is_generated_self_contained_source(self) -> None:
         self.assertEqual(
             sorted(path.name for path in WEBUI_DIST.iterdir() if path.is_file()),
-            ["admin.html", "app.html"],
+            ["admin.html", "app.html", "wiki.html"],
         )
         built = ADMIN_HTML.read_text(encoding="utf-8")
         self.assertEqual(admin_console_html(), built)
@@ -36,6 +38,22 @@ class WebUIBuildTests(unittest.TestCase):
             source = (WEBUI_SRC / name).read_text(encoding="utf-8").strip()
             self.assertIn(f'data-build-source="{name}"', built)
             self.assertIn(source, built)
+        self.assertIsNone(re.search(r'<link\b[^>]*href=["\'][^"\']+\.css', built, re.I))
+        self.assertIsNone(re.search(r'<script\b[^>]*src=["\'][^"\']+\.js', built, re.I))
+
+    def test_packaged_wiki_is_self_contained_and_explains_auth_bootstrap(self) -> None:
+        built = WIKI_HTML.read_text(encoding="utf-8")
+        self.assertEqual(user_guide_html(), built)
+        for name in ("wiki.css", "wiki.js"):
+            source = (WEBUI_SRC / name).read_text(encoding="utf-8").strip()
+            self.assertIn(f'data-build-source="{name}"', built)
+            self.assertIn(source, built)
+        self.assertIn("CODING_TOOLS_MCP_AUTH_TOKEN", built)
+        self.assertIn("coding-tools-mcp --workspace", built)
+        self.assertIn("Codex CLI", built)
+        self.assertIn("Codex thread store", built)
+        self.assertIn('id="app-token"', built)
+        self.assertIn('href="/app"', built)
         self.assertIsNone(re.search(r'<link\b[^>]*href=["\'][^"\']+\.css', built, re.I))
         self.assertIsNone(re.search(r'<script\b[^>]*src=["\'][^"\']+\.js', built, re.I))
 
@@ -54,6 +72,13 @@ class WebUIBuildTests(unittest.TestCase):
             self.assertIn(source, built)
         self.assertIn("/api/app", built)
         self.assertNotIn("/admin/api", built)
+        self.assertIn('href="/wiki#app-token"', built)
+        self.assertIn("CODING_TOOLS_MCP_AUTH_TOKEN", built)
+        self.assertIn("这是可选的 Codex Agent 工作台", built)
+        self.assertIn("不是 GPT/ChatGPT 网页", built)
+        self.assertIn("执行主机必须安装 Codex CLI", built)
+        self.assertIn("App bearer、Admin token、Codex 登录凭据", built)
+        self.assertIn("Coding Tools MCP SQLite 与 Codex thread store", built)
         self.assertIsNone(re.search(r'<link\b[^>]*href=["\'][^"\']+\.css', built, re.I))
         self.assertIsNone(re.search(r'<script\b[^>]*src=["\'][^"\']+\.js', built, re.I))
 

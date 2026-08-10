@@ -1,5 +1,8 @@
 # Coding Tools MCP Agent Workbench and Remote Runner Guide
 
+> For clickable in-browser navigation, start the HTTP server and open
+> `http://127.0.0.1:8765/wiki`. This Markdown file is the repository fallback.
+
 This guide is for users who want to operate an Agent in the browser, manage
 multiple Workspaces, or run tools on another machine. If you only need to
 connect Coding Tools MCP to an MCP client such as Claude, Codex, or Cursor,
@@ -15,6 +18,16 @@ start with the [Quickstart](quickstart.md).
 
 An Admin token cannot sign in to `/app`, and an ordinary bearer/OAuth token
 cannot call the Admin API. Always use different tokens for these roles.
+
+### `/app` product boundary
+
+- `/app` is an optional Codex Agent workbench, not a GPT/ChatGPT webpage.
+- The execution host must have Codex CLI installed and signed in; for a Runner
+  Workspace, that prerequisite applies to its Runner host.
+- App bearer, Admin token, and Codex sign-in credentials are three separate
+  credential sets and are not interchangeable.
+- Coding Tools MCP SQLite stores Agent Session metadata, while the Codex thread
+  store keeps model-thread and conversation continuity; recovery depends on both.
 
 ## Start a local server
 

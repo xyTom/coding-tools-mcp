@@ -50,6 +50,12 @@ Endpoint:
 http://127.0.0.1:8765/mcp
 ```
 
+Clickable bilingual User Wiki:
+
+```text
+http://127.0.0.1:8765/wiki
+```
+
 Pass a different workspace, host, port, or extra server flags with Make variables:
 
 ```bash
@@ -104,5 +110,5 @@ coding-tools-mcp --permission-mode dangerous --workspace /path/to/repo
 
 Use this only with trusted workspaces and trusted clients in an externally hardened environment. `--dangerously-skip-all-permissions` remains as a compatibility alias.
 
-To use the browser Agent workbench, separate Admin surface, or a remote Runner,
-continue with the [Coding Tools MCP Agent and Runner guide](coding-tools-mcp-agent-runner-guide.md).
+The runtime Wiki explains the complete CLI startup flow and that `/app` uses
+the server's `CODING_TOOLS_MCP_AUTH_TOKEN`, not a separate WebUI password.

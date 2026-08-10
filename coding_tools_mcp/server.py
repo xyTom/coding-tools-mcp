@@ -159,7 +159,7 @@ from .workspace_binding import (
     WorkspaceBindingError,
     WorkspaceBindingResolver,
 )
-from .webui import admin_console_html, operator_app_html
+from .webui import admin_console_html, operator_app_html, user_guide_html
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError, WorkspaceEntry
 from .workspace_host import RemoteMcpHttpRuntimeProxy, WorkspaceHostError, WorkspaceHostFactory
 
@@ -5925,6 +5925,23 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if normalized == "/wiki":
+            origin = self.headers.get("Origin")
+            if origin and not is_allowed_origin(origin):
+                self.send_json(
+                    {"error": {"code": "origin_denied", "message": "Origin denied"}},
+                    status=403,
+                )
+                return
+            body = user_guide_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if normalized == "/admin":
             if self._admin_service() is None:
                 self.send_json({"error": "Unknown endpoint"}, status=404)
@@ -6019,6 +6036,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             and normalized not in {
             "/app",
             "/admin",
+            "/wiki",
             MCP_ENDPOINT_PATH,
             "/.well-known/mcp.json",
             "/.well-known/mcp/server-card.json",

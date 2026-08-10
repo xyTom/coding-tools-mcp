@@ -1,5 +1,8 @@
 # Coding Tools MCP Agent 工作台与远程 Runner 用户指南
 
+> 需要可点击跳转的页面时，请先启动 HTTP 服务，再打开
+> `http://127.0.0.1:8765/wiki`。本 Markdown 仅作为仓库内的备用源文档。
+
 这份指南面向需要通过浏览器操作 Agent、管理多个 Workspace，或把执行放到远程机器上的用户。如果只想把 Coding Tools MCP 接入 Claude、Codex、Cursor 等 MCP 客户端，请直接阅读[快速开始](quickstart.md)。
 
 ## 先认识三个入口
@@ -11,6 +14,13 @@
 | `/admin` | Workspace、OAuth、Gateway、Secret 和 Runner 管理 | 独立的 Admin token |
 
 Admin token 不能登录 `/app`，普通 bearer/OAuth token 也不能调用 Admin API。请为两种角色使用不同的 token。
+
+### `/app` 的产品边界
+
+- `/app` 是可选的 Codex Agent 工作台，不是 GPT/ChatGPT 网页。
+- 执行主机必须安装 Codex CLI，并已完成 Codex 登录；Runner Workspace 要在对应 Runner 主机完成。
+- App bearer、Admin token、Codex 登录凭据是三套不同凭据，不能互换。
+- Agent Session 元数据由 Coding Tools MCP SQLite 保存；模型 thread 与对话连续性由 Codex thread store 保存，两者共同提供恢复能力。
 
 ## 本地启动
 
