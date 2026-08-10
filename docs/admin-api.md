@@ -36,6 +36,9 @@ All responses use `Cache-Control: no-store`, apply the same validated allowed-or
 | POST | `/admin/api/workspaces/{id}/disable` | Disable a non-default Workspace. |
 | POST | `/admin/api/workspaces/{id}/default` | Select an enabled default Workspace. |
 | GET | `/admin/api/workspaces/{id}/check` | Check only a catalog Workspace ID; arbitrary paths are not accepted. |
+| POST | `/admin/api/runners/{runner_id}/credential` | Issue or rotate a Runner credential; plaintext is returned only in this response. |
+| GET | `/admin/api/runners/{runner_id}/credential` | Return configured state and a non-secret fingerprint only. |
+| DELETE | `/admin/api/runners/{runner_id}/credential` | Revoke the Runner credential idempotently. |
 | GET | `/admin/api/oauth/{collection}` | List redacted Clients, Grants, Tokens, Refresh Families, Signing Keys, or Audit Events. |
 | POST | `/admin/api/oauth/{resource}/{id}/{action}` | Perform an exact-ID idempotent OAuth action. |
 | PUT | `/admin/api/oauth/clients/{client_id}/authorization-password` | Set or rotate one Client's dedicated Authorize password; takes effect immediately. |
@@ -55,6 +58,12 @@ All responses use `Cache-Control: no-store`, apply the same validated allowed-or
 | DELETE | `/admin/api/codex/sessions/{workspace_id}/{session_id}` | Stable-ID idempotent imported-session deletion. |
 
 OAuth collections are `clients`, `grants`, `tokens`, `refresh-families`, `signing-keys`, and `audit`. Supported actions are Client `enable`/`disable`, Grant/Token/Refresh Family `revoke`, and Signing Key `activate`/`retire`/`revoke`.
+
+Runner credentials authenticate `/runner/ws` only. They are distinct from
+ordinary MCP/OAuth credentials and the Admin token. Provision the one-time
+plaintext through `CODING_TOOLS_MCP_RUNNER_CREDENTIAL` or a protected Runner
+credential file; it is intentionally not accepted as a command-line value. See
+the [WebCodex user guide](webcodex-user-guide.md) for the complete setup flow.
 
 ## Telemetry status
 

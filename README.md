@@ -199,6 +199,7 @@ result. See [COMPLIANCE.md](COMPLIANCE.md), [BENCHMARK.md](BENCHMARK.md), and
 | Topic | Documents |
 | --- | --- |
 | Getting started | [Quickstart](docs/quickstart.md), [Client configuration](docs/mcp-client-config.md), [Troubleshooting](docs/troubleshooting.md) |
+| Web/Agent/Runner | [WebCodex user guide](docs/webcodex-user-guide.md), [Runner troubleshooting](docs/webcodex-runner-troubleshooting.md), [Migration and rollback](docs/webcodex-migration-rollback.md) |
 | Runtime contract | [Tools and schemas](docs/tools-and-schemas.md), [Runtime contract](docs/runtime-contract-v0.2.md), [Permission modes](docs/permission-modes.md) |
 | Remote and OAuth | [Remote MCP](docs/remote-mcp.md), [Upgrade and rollback](docs/migration-v0.1-to-v0.2.2.md) |
 | Administration | [Admin API](docs/admin-api.md), [Admin WebUI](docs/admin-webui.md), [Chat persistence](docs/chat-persistence.md) |
