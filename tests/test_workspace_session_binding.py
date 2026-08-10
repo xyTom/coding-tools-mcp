@@ -185,6 +185,97 @@ class WorkspaceSessionBindingTests(unittest.TestCase):
                     OAuthIdentity("client-remote", "grant-remote", "remote", "jti-remote"),
                 )
 
+    def test_http_factory_project_context_is_single_flight(self) -> None:
+        with test_root() as root:
+            catalog = WorkspaceCatalog(
+                [WorkspaceEntry("local", "Local", root, enabled=True, default=True)],
+                "local",
+            )
+            resolver = WorkspaceBindingResolver(catalog)
+            args = build_parser().parse_args([])
+            factory = BoundRuntimeFactory(
+                args,
+                runtime_policy_from_args(args),
+                resolver,
+                auth_token=None,
+                oauth_config=None,
+            )
+            binding = resolver.resolve_stdio()
+            sentinel = object()
+            thread_count = 8
+            barrier = threading.Barrier(thread_count)
+            results: list[object] = []
+            with patch(
+                "coding_tools_mcp.server.load_project_context",
+                return_value=sentinel,
+            ) as loader:
+                def load_in_thread() -> None:
+                    barrier.wait()
+                    results.append(factory.project_context(binding))
+
+                workers = [
+                    threading.Thread(target=load_in_thread)
+                    for _ in range(thread_count)
+                ]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(timeout=5)
+            self.assertFalse(any(worker.is_alive() for worker in workers))
+            self.assertEqual(loader.call_count, 1)
+            self.assertEqual(results, [sentinel] * thread_count)
+
+    def test_http_factory_reuses_primed_control_context(self) -> None:
+        with test_root() as root:
+            catalog = WorkspaceCatalog(
+                [WorkspaceEntry("local", "Local", root, enabled=True, default=True)],
+                "local",
+            )
+            resolver = WorkspaceBindingResolver(catalog)
+            args = build_parser().parse_args([])
+            factory = BoundRuntimeFactory(
+                args,
+                runtime_policy_from_args(args),
+                resolver,
+                auth_token=None,
+                oauth_config=None,
+            )
+            binding = resolver.resolve_stdio()
+            sentinel = object()
+            factory.prime_project_context(binding, sentinel)
+            with patch(
+                "coding_tools_mcp.server.load_project_context",
+                return_value=object(),
+            ) as loader:
+                self.assertIs(factory.project_context(binding), sentinel)
+            loader.assert_not_called()
+
+    def test_http_factory_project_context_recovers_after_load_failure(self) -> None:
+        with test_root() as root:
+            catalog = WorkspaceCatalog(
+                [WorkspaceEntry("local", "Local", root, enabled=True, default=True)],
+                "local",
+            )
+            resolver = WorkspaceBindingResolver(catalog)
+            args = build_parser().parse_args([])
+            factory = BoundRuntimeFactory(
+                args,
+                runtime_policy_from_args(args),
+                resolver,
+                auth_token=None,
+                oauth_config=None,
+            )
+            binding = resolver.resolve_stdio()
+            sentinel = object()
+            with patch(
+                "coding_tools_mcp.server.load_project_context",
+                side_effect=[RuntimeError("synthetic context failure"), sentinel],
+            ) as loader:
+                with self.assertRaisesRegex(RuntimeError, "synthetic context failure"):
+                    factory.project_context(binding)
+                self.assertIs(factory.project_context(binding), sentinel)
+            self.assertEqual(loader.call_count, 2)
+
     def test_oauth_sessions_bind_immutable_isolated_workspaces(self) -> None:
         with test_root() as root:
             first = root / "first"

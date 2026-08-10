@@ -7317,17 +7317,44 @@ class BoundRuntimeFactory:
         self.runner_route_service = runner_route_service
         self.runner_job_reconciler = runner_job_reconciler
         self._project_contexts: dict[tuple[str, str], ProjectContext] = {}
+        self._project_context_loading: dict[tuple[str, str], threading.Event] = {}
         self._lock = threading.Lock()
 
     def project_context(self, binding: WorkspaceBinding) -> ProjectContext:
         key = (binding.workspace_id, str(binding.root))
+        while True:
+            with self._lock:
+                cached = self._project_contexts.get(key)
+                if cached is not None:
+                    return cached
+                loading = self._project_context_loading.get(key)
+                if loading is None:
+                    loading = threading.Event()
+                    self._project_context_loading[key] = loading
+                    break
+            loading.wait()
+            with self._lock:
+                cached = self._project_contexts.get(key)
+                if cached is not None:
+                    return cached
+
+        try:
+            loaded = load_project_context(binding.root)
+        except BaseException:
+            with self._lock:
+                self._project_context_loading.pop(key, None)
+                loading.set()
+            raise
         with self._lock:
-            cached = self._project_contexts.get(key)
-        if cached is not None:
-            return cached
-        loaded = load_project_context(binding.root)
+            self._project_contexts[key] = loaded
+            self._project_context_loading.pop(key, None)
+            loading.set()
+        return loaded
+
+    def prime_project_context(self, binding: WorkspaceBinding, context: ProjectContext) -> None:
+        key = (binding.workspace_id, str(binding.root))
         with self._lock:
-            return self._project_contexts.setdefault(key, loaded)
+            self._project_contexts.setdefault(key, context)
 
     def __call__(self, context: AuthorizationContext) -> Any:
         entry = self.resolver.resolve_http_entry(context.method, context.oauth_identity)
@@ -7658,6 +7685,7 @@ def run_http(args: argparse.Namespace) -> int:
         runner_route_service=runner_route_service,
         runner_job_reconciler=runner_job_reconciler,
     )
+    runtime_factory.prime_project_context(control_binding, runtime.project_context)
 
     try:
         admin_token = resolve_admin_token(args, startup_settings, server_vault)

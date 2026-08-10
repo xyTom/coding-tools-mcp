@@ -958,7 +958,7 @@ class OAuthAuthorizationStore:
         now: float | None = None,
     ) -> dict[str, str] | None:
         checked_at = time.time() if now is None else now
-        with self._transaction("access-token query") as conn:
+        with self._connection("access-token query") as conn:
             row = conn.execute(
                 """
                 SELECT t.expires_at, t.revoked_at, t.client_id, t.grant_id,
@@ -989,20 +989,32 @@ class OAuthAuthorizationStore:
             )
             if not active:
                 return None
-            conn.execute(
-                """
-                UPDATE oauth_access_tokens
-                SET last_used_at=?
-                WHERE jti=? AND (last_used_at IS NULL OR last_used_at < ?)
-                """,
-                (checked_at, jti, checked_at - 60),
-            )
-            return {
-                "client_id": str(row["client_id"]),
-                "grant_id": str(row["grant_id"]),
-                "workspace_id": workspace_id,
-                "jti": jti,
-            }
+
+        try:
+            self._touch_access_token_last_used(jti, checked_at)
+        except OAuthStoreError:
+            pass
+        return {
+            "client_id": str(row["client_id"]),
+            "grant_id": str(row["grant_id"]),
+            "workspace_id": workspace_id,
+            "jti": jti,
+        }
+
+    def _touch_access_token_last_used(self, jti: str, checked_at: float) -> None:
+        """Best-effort metadata update that must not fail the auth decision."""
+        try:
+            with self._transaction("access-token last-used update", immediate=True) as conn:
+                conn.execute(
+                    """
+                    UPDATE oauth_access_tokens
+                    SET last_used_at=?
+                    WHERE jti=? AND (last_used_at IS NULL OR last_used_at < ?)
+                    """,
+                    (checked_at, jti, checked_at - 60),
+                )
+        except OAuthStoreError:
+            pass
 
     def access_token_is_active(self, jti: str, *, now: float | None = None) -> bool:
         return self.active_access_token_identity(jti, now=now) is not None

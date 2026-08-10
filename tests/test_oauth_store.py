@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import gc
 import os
 import shutil
 import sqlite3
@@ -34,11 +35,28 @@ def oauth_root() -> Iterator[Path]:
     finally:
         database = root / "oauth.sqlite3"
         if database.exists():
-            with closing(sqlite3.connect(database)) as conn:
-                conn.execute("PRAGMA busy_timeout = 5000")
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                conn.execute("PRAGMA journal_mode=DELETE")
-                conn.commit()
+            for obj in gc.get_objects():
+                if isinstance(obj, sqlite3.Connection):
+                    try:
+                        rows = obj.execute("PRAGMA database_list").fetchall()
+                    except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                        continue
+                    if rows and os.path.normcase(str(rows[0][2])) == os.path.normcase(
+                        str(database)
+                    ):
+                        obj.close()
+            for attempt in range(20):
+                try:
+                    with closing(sqlite3.connect(database)) as conn:
+                        conn.execute("PRAGMA busy_timeout = 5000")
+                        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+                        conn.execute("PRAGMA journal_mode=DELETE")
+                        conn.commit()
+                    break
+                except sqlite3.OperationalError:
+                    if attempt == 19:
+                        raise
+                    time.sleep(0.05)
         for attempt in range(20):
             try:
                 shutil.rmtree(root)
@@ -395,6 +413,102 @@ class OAuthStoreTests(unittest.TestCase):
                 if item["event_type"] == "access_token_revoked"
             ]
             self.assertEqual(len(revoked_events), 1)
+
+    def test_concurrent_access_token_checks_do_not_raise_database_locked(self) -> None:
+        with oauth_root() as root:
+            store, grant_id = prepared_store(root)
+            store.record_access_token(
+                "jti-concurrent",
+                grant_id,
+                "agent-a",
+                "key-a",
+                "mcp",
+                issued_at=1,
+                expires_at=FUTURE,
+            )
+            stores = [store for _ in range(24)]
+            barrier = threading.Barrier(len(stores))
+            results: list[dict[str, str] | None] = []
+            errors: list[BaseException] = []
+
+            def check(candidate: OAuthAuthorizationStore) -> None:
+                try:
+                    barrier.wait(timeout=10)
+                    results.append(
+                        candidate.active_access_token_identity(
+                            "jti-concurrent", now=100.0
+                        )
+                    )
+                except BaseException as exc:  # pragma: no cover - reported below
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(target=check, args=(candidate,), daemon=True)
+                for candidate in stores
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+
+            del stores
+            gc.collect()
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), len(threads))
+            self.assertTrue(all(item is not None for item in results))
+            with sqlite3.connect(root / "oauth.sqlite3") as conn:
+                row = conn.execute(
+                    "SELECT last_used_at FROM oauth_access_tokens WHERE jti=?",
+                    ("jti-concurrent",),
+                ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertIsNotNone(row[0])
+
+    def test_active_access_token_identity_survives_last_used_update_failure(self) -> None:
+        with oauth_root() as root:
+            store, grant_id = prepared_store(root)
+            store.record_access_token(
+                "jti-update-failure",
+                grant_id,
+                "agent-a",
+                "key-a",
+                "mcp",
+                issued_at=1,
+                expires_at=FUTURE,
+            )
+            with patch.object(
+                store,
+                "_touch_access_token_last_used",
+                side_effect=OAuthStoreError("synthetic last-used failure"),
+            ):
+                identity = store.active_access_token_identity(
+                    "jti-update-failure", now=100.0
+                )
+            self.assertIsNotNone(identity)
+            self.assertEqual(identity["jti"], "jti-update-failure")
+
+    def test_active_access_token_identity_read_failure_stays_fail_closed(self) -> None:
+        with oauth_root() as root:
+            store, grant_id = prepared_store(root)
+            store.record_access_token(
+                "jti-read-failure",
+                grant_id,
+                "agent-a",
+                "key-a",
+                "mcp",
+                issued_at=1,
+                expires_at=FUTURE,
+            )
+            with patch.object(
+                store,
+                "_connection",
+                side_effect=OAuthStoreError("synthetic read failure"),
+            ):
+                with self.assertRaises(OAuthStoreError):
+                    store.active_access_token_identity(
+                        "jti-read-failure", now=100.0
+                    )
 
     def test_refresh_token_is_stored_only_as_peppered_digest(self) -> None:
         with oauth_root() as root:
