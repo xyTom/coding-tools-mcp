@@ -132,7 +132,10 @@ class WindowsMsvcEnvironmentSmokeTests(unittest.TestCase):
                 run_result = client.call_tool(
                     "exec_command",
                     {
-                        "cmd": "hello.exe",
+                        # PowerShell intentionally does not search the current
+                        # directory for executables; this spelling also works
+                        # unchanged under the cmd.exe compatibility fallback.
+                        "cmd": r".\hello.exe",
                         "timeout_ms": 30000,
                         "yield_time_ms": 30000,
                         "max_output_bytes": 20000,
