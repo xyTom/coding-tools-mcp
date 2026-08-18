@@ -76,6 +76,22 @@ walkthroughs, and troubleshooting live in
 [docs/quickstart.md](docs/quickstart.md) and
 [docs/mcp-client-config.md](docs/mcp-client-config.md).
 
+On Windows, string commands prefer PowerShell 7 (`pwsh`) with
+`-NoLogo -NoProfile -NonInteractive`. If `pwsh` is unavailable, the server
+automatically preserves command execution through a trusted `cmd.exe`
+compatibility fallback. `server_info`, `check_exec_environment`, and each
+`exec_command` result disclose the selected shell so agents can use the right
+syntax. Set `CODING_TOOLS_MCP_PWSH_PATH` to an absolute trusted `pwsh.exe` path
+to pin PowerShell; an invalid explicit pin is reported instead of ignored.
+
+Because PowerShell resolves commands at runtime, `safe` mode on Windows gates
+dynamic syntax — variables, splatting, call and dot-source operators, `::`
+member access, alias/expression evaluation, and nested shells — behind the
+`shell_expansion` and `inline_script` permissions. Literal commands are
+unaffected; use `request_permissions` or `trusted` mode for the rest. Under the
+`cmd.exe` fallback, percent expansion, caret escaping, and `CALL`/`FOR`
+evaluation likewise require `shell_expansion`.
+
 ## Seven things to try
 
 **1. Make Claude Desktop your coding agent.** The config above is all it
@@ -122,9 +138,11 @@ Per-workspace profiles, server and tunnel start/stop, credential setup with
 clipboard helpers, live health checks. English and 简体中文.
 
 **6. Keep an interactive command alive.** `exec_command` starts a REPL or
-debugger under a real PTY; `write_stdin` feeds it across turns; `read_output`
-pages long output; `kill_command` cleans up. Long-running processes are
-first-class, with deadline watchdogs and bounded buffers.
+debugger under a real POSIX PTY; `write_stdin` feeds it across turns;
+`read_output` pages long output; `kill_command` cleans up. Long-running
+processes are first-class, with deadline watchdogs and bounded buffers.
+Windows prefers PowerShell 7 and otherwise uses the disclosed `cmd.exe`
+fallback for non-TTY commands; ConPTY remains a separate limitation.
 
 **7. Give your own agent production-grade hands.** Building an agent loop with
 the Anthropic SDK or anything else? Don't hand-roll file and exec tools —

@@ -2,9 +2,9 @@ name: compliance
 
 on:
   push:
-    branches: [main, "recover-*", "release/**", "hotfix/**"]
+    branches: [main, "recover-*"]
   pull_request:
-    branches: [main, "release/**"]
+    branches: [main]
   workflow_dispatch:
   workflow_call:
 
@@ -123,4 +123,6 @@ jobs:
         run: |
           call "%VCVARSALL%" x64
           where cl.exe
-          python -m unittest tests.compliance.test_windows_msvc_smoke
+          python -m unittest ^
+            tests.compliance.test_windows_msvc_smoke ^
+            tests.test_windows_pwsh

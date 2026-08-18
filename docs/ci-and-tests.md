@@ -116,6 +116,8 @@ Windows reports unsupported TTY requests explicitly, force-kills a background
 command without relying on POSIX `SIGKILL`, initializes Visual Studio with
 `vcvarsall.bat x64`, checks the narrow default `core` environment, and confirms
 that `--shell-env-inherit all` can compile and run a single-file `cl.exe` smoke.
+It also exercises PowerShell 7 selection, the trusted `cmd.exe` compatibility
+fallback, and the shell-specific safe-mode policy gates.
 
 Manual SWE-bench workflow:
 

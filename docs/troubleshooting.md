@@ -22,6 +22,26 @@ If `exec_command` returns a warning about Linux Landlock being unavailable, the 
 
 If an older client or server reports `SANDBOX_UNAVAILABLE` as an error, upgrade to the current behavior or run on a Landlock-capable Linux kernel.
 
+## Windows Command Shell
+
+Windows string commands prefer PowerShell 7 (`pwsh`). If it is not installed or
+an unpinned copy cannot be verified, the server automatically uses the trusted
+Windows `cmd.exe` compatibility fallback. The selected interpreter appears as
+`command_shell` in `server_info`, `check_exec_environment`, and
+`exec_command`; fallback results also include a warning so the agent can switch
+to cmd syntax.
+
+The selection is resolved once and pinned for the server process, so concurrent
+commands always agree on one interpreter. `check_exec_environment` re-resolves
+the pin: after installing PowerShell 7, run that tool (or restart the server) to
+leave the `cmd.exe` fallback.
+
+To require a specific PowerShell installation, set
+`CODING_TOOLS_MCP_PWSH_PATH` to its absolute `pwsh.exe` path. A bad explicit pin
+returns `SHELL_NOT_FOUND` or `SHELL_VERSION_UNSUPPORTED` instead of falling back.
+If neither interpreter can be resolved, restore `cmd.exe` or install PowerShell
+7.
+
 ## Command Hangs Or Times Out
 
 If the result returns `status: "running"`, poll with `write_stdin` using empty `chars`, or terminate with `kill_command`. Command deadlines still apply when the client stops polling.
