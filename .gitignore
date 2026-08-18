@@ -33,6 +33,13 @@ docs/.mcp-probe/
 docs/graph-insights/latest.json
 docs/graph-insights/latest.md
 AGENTS.md
+!/AGENTS.md
+!/apps/desktop-client/AGENTS.md
+!/infra/cloudflare/sandbox-control/AGENTS.md
+!/docs/AGENTS.md
+!/integrations/tunnels/AGENTS.md
+!/packages/npm-launcher/AGENTS.md
+!/media/promo-video/AGENTS.md
 CLAUDE.md
 docs/project-context.md
 docs/project-context/

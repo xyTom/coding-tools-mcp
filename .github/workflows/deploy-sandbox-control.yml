@@ -11,7 +11,7 @@ on:
   push:
     branches: [main]
     paths:
-      - cloudflare/sandbox-control/**
+      - infra/cloudflare/sandbox-control/**
       - .github/workflows/start-sandbox.yml
       - .github/workflows/deploy-sandbox-control.yml
       - scripts/check_dispatch_inputs.py
@@ -72,14 +72,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          committed="$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("cloudflare/sandbox-control/wrangler.toml").read_text()).get("vars", {}).get("TUNNEL_HOSTNAME", ""))')"
+          committed="$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("infra/cloudflare/sandbox-control/wrangler.toml").read_text()).get("vars", {}).get("TUNNEL_HOSTNAME", ""))')"
           effective="${TUNNEL_HOSTNAME_OVERRIDE:-$committed}"
           case "$effective" in
             ""|mcp.example.com)
               echo "TUNNEL_HOSTNAME resolves to the placeholder '${effective}'." >&2
               echo "Deploying would overwrite the live Worker's hostname with a value that does not resolve." >&2
               echo "Set the repository variable SANDBOX_TUNNEL_HOSTNAME, or commit the real hostname" >&2
-              echo "in cloudflare/sandbox-control/wrangler.toml, then re-run." >&2
+              echo "in infra/cloudflare/sandbox-control/wrangler.toml, then re-run." >&2
               exit 1
               ;;
           esac
@@ -91,7 +91,7 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: >-
-            deploy --config cloudflare/sandbox-control/wrangler.toml
+            deploy --config infra/cloudflare/sandbox-control/wrangler.toml
             --var TUNNEL_HOSTNAME:${{ steps.deploy_vars.outputs.tunnel_hostname }}
 
       - name: Summarize
@@ -103,7 +103,7 @@ jobs:
             echo "## sandbox-control Worker deployed"
             echo ""
             echo "- Commit: \`${GITHUB_SHA}\`"
-            echo "- Config: \`cloudflare/sandbox-control/wrangler.toml\`"
+            echo "- Config: \`infra/cloudflare/sandbox-control/wrangler.toml\`"
             echo "- TUNNEL_HOSTNAME: \`${TUNNEL_HOSTNAME}\`"
             echo ""
             echo "\`wrangler.toml\` is now the source of truth for the Worker's plain-text"

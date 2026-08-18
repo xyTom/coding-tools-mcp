@@ -76,7 +76,7 @@ Gemini CLI 或 Cline——各家的 JSON 配置完全相同（偏好 Node 的话
 **2. 随时随地连回自己的电脑写代码。**
 
 ```bash
-CODING_TOOLS_MCP_AUTH_MODE=bearer ./scripts/tunnel.sh cloudflared /path/to/repo
+CODING_TOOLS_MCP_AUTH_MODE=bearer ./integrations/tunnels/tunnel.sh cloudflared /path/to/repo
 ```
 
 回环地址绑定 + 带认证的 HTTPS 隧道（`cloudflared`、`ngrok` 或 Microsoft Dev
@@ -96,7 +96,7 @@ docker run --rm --init -it -p 8765:8765 -v "$PWD:/workspace" coding-tools-mcp-sa
 PR，用完即毁。→ [docs/docker.md](docs/docker.md)
 
 **4. 一个 MCP 调用，起一台云沙箱。**内置的
-[Cloudflare Worker 控制面](cloudflare/sandbox-control/README.md) 把
+[Cloudflare Worker 控制面](infra/cloudflare/sandbox-control/README.md) 把
 `start_coding_tools_sandbox` 暴露为 MCP 工具：一次调用即派发 GitHub Actions
 运行器，启动 Docker 沙箱并发布到带认证的 Cloudflare Tunnel 之后。
 临时算力，无需自备服务器。
@@ -177,11 +177,12 @@ SWE-bench 榜单成绩——[docs/swe-bench.md](docs/swe-bench.md) 写明了测�
 
 | | |
 | --- | --- |
+| 文档导航 | [按主题浏览文档](docs/README.md) |
 | 上手 | [快速开始](docs/quickstart.md) · [客户端配置](docs/mcp-client-config.md) · [排障](docs/troubleshooting.md) |
-| 远程与沙箱 | [Remote MCP](docs/remote-mcp.md) · [Docker 沙箱](docs/docker.md) · [云沙箱 Worker](cloudflare/sandbox-control/README.md) |
+| 远程与沙箱 | [Remote MCP](docs/remote-mcp.md) · [Docker 沙箱](docs/docker.md) · [云沙箱 Worker](infra/cloudflare/sandbox-control/README.md) |
 | 工具与契约 | [工具与 Schema](docs/tools-and-schemas.md) · [运行时契约](docs/runtime-contract-v0.3.md) · [迁移到 0.3](docs/migration-0.3.md) · [权限模式](docs/permission-modes.md) |
 | 命令执行 | [Exec 配方](docs/exec-command-recipes.md) · [Exec 排障](docs/troubleshooting-exec.md) |
-| 集成 | [嵌入指南](docs/embedding.md) · [npm 启动器](npm/coding-tools-mcp/README.md) |
+| 集成 | [嵌入指南](docs/embedding.md) · [npm 启动器](packages/npm-launcher/README.md) |
 | 安全与质量 | [安全策略](SECURITY.md) · [安全边界](docs/security-boundary.md) · [CI 与测试](docs/ci-and-tests.md) · [已知限制](docs/limitations.md) · [竞品分析](docs/competitive-analysis.md) |
 
 ## 开发

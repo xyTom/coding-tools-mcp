@@ -145,7 +145,7 @@ command execution:
 
 ```bash
 CODING_TOOLS_MCP_AUTH_MODE=bearer \
-scripts/tunnel.sh cloudflared /path/to/repo
+integrations/tunnels/tunnel.sh cloudflared /path/to/repo
 ```
 
 Configure the remote MCP client with:
@@ -168,7 +168,7 @@ connectors offer OAuth or no authentication — there is no static bearer
 header to enter.
 
 ```bash
-CODING_TOOLS_MCP_AUTH_MODE=oauth scripts/tunnel.sh cloudflared /path/to/repo
+CODING_TOOLS_MCP_AUTH_MODE=oauth integrations/tunnels/tunnel.sh cloudflared /path/to/repo
 ```
 
 In ChatGPT, enable developer mode (Settings → Connectors → Advanced

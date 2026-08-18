@@ -36,7 +36,7 @@ same-release-commit property holds by construction, and a failed evidence job
 blocks both registries.
 
 The npm launcher keeps its own version. The pipeline publishes it only when
-`npm/coding-tools-mcp/package.json` names a version that is not yet on the
+`packages/npm-launcher/package.json` names a version that is not yet on the
 registry, so server-only releases skip the npm jobs automatically; bump the
 launcher version whenever its source changes (npm versions cannot be
 overwritten).

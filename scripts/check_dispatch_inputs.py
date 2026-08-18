@@ -134,7 +134,7 @@ def main() -> int:
     parser.add_argument(
         "--worker",
         type=Path,
-        default=Path("cloudflare/sandbox-control/src/index.mjs"),
+        default=Path("infra/cloudflare/sandbox-control/src/index.mjs"),
     )
     args = parser.parse_args()
 

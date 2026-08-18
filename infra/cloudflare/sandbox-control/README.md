@@ -21,20 +21,20 @@ Use a Cloudflare named tunnel for the MCP endpoint. Quick tunnels are fine for a
 6. Configure Worker secrets:
 
 ```bash
-npx wrangler secret put CONTROL_TOKEN --config cloudflare/sandbox-control/wrangler.toml
-npx wrangler secret put GITHUB_TOKEN --config cloudflare/sandbox-control/wrangler.toml
+npx wrangler secret put CONTROL_TOKEN --config infra/cloudflare/sandbox-control/wrangler.toml
+npx wrangler secret put GITHUB_TOKEN --config infra/cloudflare/sandbox-control/wrangler.toml
 ```
 
 7. Deploy the Worker:
 
 ```bash
-npx wrangler deploy --config cloudflare/sandbox-control/wrangler.toml
+npx wrangler deploy --config infra/cloudflare/sandbox-control/wrangler.toml
 ```
 
 ## Deploying From CI
 
 The `deploy-sandbox-control` workflow deploys this Worker on every push to `main`
-that touches `cloudflare/sandbox-control/**` or `.github/workflows/start-sandbox.yml`.
+that touches `infra/cloudflare/sandbox-control/**` or `.github/workflows/start-sandbox.yml`.
 It needs two repository secrets, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 
 Deploy from CI rather than by hand. The Worker builds the `workflow_dispatch` body

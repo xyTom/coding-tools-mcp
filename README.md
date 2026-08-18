@@ -85,7 +85,7 @@ commit-review a real repository.
 **2. Code on your own machine from anywhere.**
 
 ```bash
-CODING_TOOLS_MCP_AUTH_MODE=bearer ./scripts/tunnel.sh cloudflared /path/to/repo
+CODING_TOOLS_MCP_AUTH_MODE=bearer ./integrations/tunnels/tunnel.sh cloudflared /path/to/repo
 ```
 
 Loopback bind + authenticated HTTPS tunnel (`cloudflared`, `ngrok`, or
@@ -106,7 +106,7 @@ A containerized server with toolchains and caches preconfigured, safe to point
 at a sketchy PR and destroy afterwards. → [docs/docker.md](docs/docker.md)
 
 **4. Spin up a cloud sandbox with one MCP call.** The bundled
-[Cloudflare Worker control plane](cloudflare/sandbox-control/README.md) exposes
+[Cloudflare Worker control plane](infra/cloudflare/sandbox-control/README.md) exposes
 `start_coding_tools_sandbox` as an MCP tool: one call dispatches a GitHub
 Actions runner that boots the Docker sandbox and publishes it behind an
 authenticated Cloudflare Tunnel. Ephemeral compute, no server of your own.
@@ -195,11 +195,12 @@ measured. More: [COMPLIANCE.md](COMPLIANCE.md) · [BENCHMARK.md](BENCHMARK.md) �
 
 | | |
 | --- | --- |
+| Documentation map | [Browse docs by topic](docs/README.md) |
 | Getting started | [Quickstart](docs/quickstart.md) · [Client configuration](docs/mcp-client-config.md) · [Troubleshooting](docs/troubleshooting.md) |
-| Remote & sandboxed | [Remote MCP](docs/remote-mcp.md) · [Docker sandbox](docs/docker.md) · [Cloud sandbox worker](cloudflare/sandbox-control/README.md) |
+| Remote & sandboxed | [Remote MCP](docs/remote-mcp.md) · [Docker sandbox](docs/docker.md) · [Cloud sandbox worker](infra/cloudflare/sandbox-control/README.md) |
 | Tools & contract | [Tools and schemas](docs/tools-and-schemas.md) · [Runtime contract](docs/runtime-contract-v0.3.md) · [Migrating to 0.3](docs/migration-0.3.md) · [Permission modes](docs/permission-modes.md) |
 | Execution | [Exec recipes](docs/exec-command-recipes.md) · [Exec troubleshooting](docs/troubleshooting-exec.md) |
-| Integration | [Embedding](docs/embedding.md) · [npm launcher](npm/coding-tools-mcp/README.md) |
+| Integration | [Embedding](docs/embedding.md) · [npm launcher](packages/npm-launcher/README.md) |
 | Security & quality | [Security policy](SECURITY.md) · [Security boundary](docs/security-boundary.md) · [CI and tests](docs/ci-and-tests.md) · [Limitations](docs/limitations.md) · [Competitive analysis](docs/competitive-analysis.md) |
 
 ## Development

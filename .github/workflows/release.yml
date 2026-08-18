@@ -38,7 +38,7 @@ jobs:
       - name: Check whether the npm launcher version is already published
         id: npm
         run: |
-          version="$(python -c 'import json; print(json.load(open("npm/coding-tools-mcp/package.json"))["version"])')"
+          version="$(python -c 'import json; print(json.load(open("packages/npm-launcher/package.json"))["version"])')"
           if npm view "coding-tools-mcp@${version}" version >/dev/null 2>&1; then
             already=true
           else
@@ -175,14 +175,14 @@ jobs:
         run: make check-npm-launcher
 
       - name: Pack launcher
-        working-directory: npm/coding-tools-mcp
+        working-directory: packages/npm-launcher
         run: npm pack
 
       - name: Upload npm package artifact
         uses: actions/upload-artifact@v7.0.1
         with:
           name: npm-package-distribution
-          path: npm/coding-tools-mcp/*.tgz
+          path: packages/npm-launcher/*.tgz
           if-no-files-found: error
           retention-days: 7
 

@@ -27,7 +27,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/xyTom/coding-tools-mcp.git",
-    "directory": "npm/coding-tools-mcp"
+    "directory": "packages/npm-launcher"
   },
   "homepage": "https://github.com/xyTom/coding-tools-mcp#readme",
   "bugs": {

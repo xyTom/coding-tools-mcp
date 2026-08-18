@@ -37,7 +37,7 @@ def validate_release(root: Path, tag: str) -> tuple[str, str]:
     if re.search(r"^## Unreleased\s*$", changelog, re.MULTILINE):
         raise SystemExit("CHANGELOG.md still contains an Unreleased section")
 
-    npm_package = json.loads((root / "npm" / "coding-tools-mcp" / "package.json").read_text(encoding="utf-8"))
+    npm_package = json.loads((root / "packages" / "npm-launcher" / "package.json").read_text(encoding="utf-8"))
     npm_version = npm_package["version"]
     if re.search(r"(?:^|[-.])(alpha|beta|rc|dev|next)(?:[-.]|$)", npm_version, re.IGNORECASE):
         raise SystemExit(f"npm launcher version {npm_version!r} is not stable")

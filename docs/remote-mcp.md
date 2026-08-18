@@ -25,7 +25,7 @@ From a checkout, the equivalent commands are:
 
 ```bash
 export CODING_TOOLS_MCP_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-CODING_TOOLS_MCP_AUTH_MODE=bearer scripts/tunnel.sh cloudflared /path/to/repo
+CODING_TOOLS_MCP_AUTH_MODE=bearer integrations/tunnels/tunnel.sh cloudflared /path/to/repo
 ```
 
 The scripts also support `ngrok` and `devtunnel`.
@@ -37,7 +37,7 @@ OAuth discovery:
 
 ```bash
 CODING_TOOLS_MCP_AUTH_MODE=oauth \
-scripts/tunnel.sh cloudflared /path/to/repo
+integrations/tunnels/tunnel.sh cloudflared /path/to/repo
 ```
 
 The server implements Authorization Code + PKCE S256 and RFC 7591 dynamic

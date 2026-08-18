@@ -32,8 +32,8 @@ check-dispatch-inputs:
 	$(PYTHON) scripts/check_dispatch_inputs.py
 
 check-npm-launcher:
-	cd npm/coding-tools-mcp && npm test
-	cd npm/coding-tools-mcp && npm pack --dry-run --json >/dev/null
+	cd packages/npm-launcher && npm test
+	cd packages/npm-launcher && npm pack --dry-run --json >/dev/null
 
 check-release:
 	$(PYTHON) scripts/check_release_versions.py --tag "$(RELEASE_TAG)"

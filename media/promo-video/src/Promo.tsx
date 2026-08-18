@@ -331,7 +331,7 @@ const SafetyScene: React.FC = () => (
 const TRICKS = [
   {
     title: "Code from anywhere",
-    cmd: "./scripts/tunnel.sh cloudflared ~/repo",
+    cmd: "./integrations/tunnels/tunnel.sh cloudflared ~/repo",
     note: "authenticated HTTPS tunnel to your own machine — drive it from your phone",
   },
   {
