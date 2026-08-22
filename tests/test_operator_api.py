@@ -21,7 +21,9 @@ from coding_tools_mcp.agent_sessions import AgentSessionService, AgentSessionSer
 from coding_tools_mcp.admin_sessions import ADMIN_SESSION_COOKIE
 from coding_tools_mcp.oauth import OAuthConfig, OAuthIdentity
 from coding_tools_mcp.operator_api import OperatorAPIError, OperatorAPIService, OperatorPrincipal
+from coding_tools_mcp.operator_sessions import OPERATOR_SESSION_COOKIE
 from coding_tools_mcp.server import MCPHandler, Runtime, RuntimeHTTPServer, configure_allowed_origins
+from coding_tools_mcp.transcript import TranscriptStore
 from coding_tools_mcp.validation import ValidationResult
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 
@@ -133,6 +135,7 @@ class OperatorAPIServiceTests(unittest.TestCase):
             return backend
 
         store = AgentSessionStore(root / "agent-sessions.sqlite3")
+        self.transcripts = TranscriptStore(root / "transcripts.sqlite3")
         sessions = AgentSessionService(store, self.catalog, backend_factory)
         self.handoff_jobs: list[dict[str, object]] = []
         self.validation_backends: list[FakeValidationBackend] = []
@@ -151,6 +154,7 @@ class OperatorAPIServiceTests(unittest.TestCase):
                 else ()
             ),
             validation_backend_factory=validation_factory,
+            transcript_store=self.transcripts,
         )
         self.alice = OperatorPrincipal("oauth:alice:grant-1", ("ws-a",))
         self.bob = OperatorPrincipal("oauth:bob:grant-2", ("ws-b",))
@@ -205,6 +209,15 @@ class OperatorAPIServiceTests(unittest.TestCase):
         self.assertEqual(second_window["events"], first_window["events"])
         caught_up = self.service.events(self.alice, session_id, after=1)
         self.assertEqual(caught_up["events"], [])
+
+        detail = self.transcripts.conversation_detail("ws-a", created["conversation_id"])
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual([item["role"] for item in detail["messages"]], ["user", "assistant"])
+        self.assertEqual([item["content"] for item in detail["messages"]], ["hello", "hello"])
+        listed = self.service.list_sessions(self.alice, "ws-a")["sessions"]
+        self.assertEqual(listed[0]["title"], "hello")
+        self.assertEqual(listed[0]["summary"], "hello")
 
     def test_operator_decisions_map_to_codex_approval_values(self) -> None:
         created = self.service.create_session(
@@ -430,6 +443,7 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
         token: str | None = None,
         admin_header: str | None = None,
         cookie: str | None = None,
+        csrf: str | None = None,
         origin: str | None = None,
         method: str = "GET",
         body: dict[str, object] | None = None,
@@ -441,6 +455,8 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
             headers["X-Admin-Token"] = admin_header
         if cookie is not None:
             headers["Cookie"] = cookie
+        if csrf is not None:
+            headers["X-Operator-CSRF"] = csrf
         if origin is not None:
             headers["Origin"] = origin
         data = None
@@ -504,6 +520,97 @@ class OperatorHTTPAuthenticationTests(unittest.TestCase):
                     timeout=5,
                 )
             self.assertEqual(bad_origin.exception.code, 403)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_operator_browser_session_survives_refresh_and_requires_csrf_for_writes(self) -> None:
+        server, thread = self._server()
+        try:
+            with urllib.request.urlopen(
+                self._request(server, "/api/app/session"),
+                timeout=5,
+            ) as response:
+                probe = json.loads(response.read())
+            self.assertFalse(probe["authenticated"])
+            self.assertFalse(probe["persistent"])
+
+            with urllib.request.urlopen(
+                self._request(
+                    server,
+                    "/api/app/session",
+                    token="ordinary-mcp-token",
+                    method="POST",
+                ),
+                timeout=5,
+            ) as response:
+                self.assertEqual(response.status, 201)
+                payload = json.loads(response.read())
+                set_cookie = response.headers.get("Set-Cookie", "")
+            self.assertTrue(payload["persistent"])
+            csrf = payload["csrf_token"]
+            cookie = set_cookie.split(";", 1)[0]
+            self.assertTrue(cookie.startswith(f"{OPERATOR_SESSION_COOKIE}="))
+            self.assertNotIn("ordinary-mcp-token", set_cookie)
+
+            with urllib.request.urlopen(
+                self._request(server, "/api/app/workspaces", cookie=cookie),
+                timeout=5,
+            ) as response:
+                workspaces = json.loads(response.read())["workspaces"]
+            self.assertEqual([item["id"] for item in workspaces], ["ws-default"])
+
+            with urllib.request.urlopen(
+                self._request(server, "/api/app/session", cookie=cookie),
+                timeout=5,
+            ) as response:
+                refreshed = json.loads(response.read())
+            self.assertTrue(refreshed["persistent"])
+            csrf = refreshed["csrf_token"]
+
+            without_csrf = self._request(
+                server,
+                "/api/app/sessions",
+                cookie=cookie,
+                method="POST",
+                body={"workspace_id": "ws-default", "backend_kind": "codex"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as denied:
+                urllib.request.urlopen(without_csrf, timeout=5)
+            self.assertEqual(denied.exception.code, 403)
+
+            with urllib.request.urlopen(
+                self._request(
+                    server,
+                    "/api/app/sessions",
+                    cookie=cookie,
+                    csrf=csrf,
+                    method="POST",
+                    body={"workspace_id": "ws-default", "backend_kind": "codex"},
+                ),
+                timeout=5,
+            ) as response:
+                self.assertEqual(response.status, 201)
+
+            with urllib.request.urlopen(
+                self._request(
+                    server,
+                    "/api/app/session",
+                    cookie=cookie,
+                    csrf=csrf,
+                    method="DELETE",
+                ),
+                timeout=5,
+            ) as response:
+                self.assertTrue(json.loads(response.read())["revoked"])
+
+            with self.assertRaises(urllib.error.HTTPError) as expired:
+                urllib.request.urlopen(
+                    self._request(server, "/api/app/workspaces", cookie=cookie),
+                    timeout=5,
+                )
+            self.assertEqual(expired.exception.code, 401)
         finally:
             server.shutdown()
             server.server_close()

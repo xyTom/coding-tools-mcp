@@ -618,7 +618,7 @@ export const EN_MESSAGES = Object.freeze({
   '这里显示 Effective Persisted 与 Active 的真实差异，并指出是否存在 Desktop/CLI/环境覆盖。': 'Shows the real difference between Effective Persisted and Active values, including Desktop, CLI, or environment overrides.',
   '这里没有单独的 App 密码。请输入启动服务时设置的普通 bearer token。': 'There is no separate App password. Enter the ordinary bearer token configured when the server started.',
   'Operator bearer token（通常是 CODING_TOOLS_MCP_AUTH_TOKEN）': 'Operator bearer token (normally CODING_TOOLS_MCP_AUTH_TOKEN)',
-  'Admin token 不能用于这里；此 token 不在 WebUI 中创建，只保存在当前页面内存中。': 'The Admin token cannot be used here. This token is not created in the WebUI and is kept only in page memory.',
+  'Admin token 不能用于这里；原始 token 仅用于建立服务端 Operator 会话，不写入浏览器存储。登录后使用 HttpOnly Cookie，刷新页面无需重新输入，服务重启或会话过期后需要再次登录。': 'The Admin token cannot be used here. The raw token is used only to establish a server-side Operator session and is not written to browser storage. After sign-in, an HttpOnly cookie keeps the session across page reloads; sign in again after the server restarts or the session expires.',
   '打开启动与密码说明': 'Open startup and password help',
   '/app 登录凭据不在此页面设置': '/app credentials are not configured on this page',
   '普通 bearer token 由服务启动时的 CODING_TOOLS_MCP_AUTH_TOKEN 提供；Admin token 不能登录 /app。': 'The ordinary bearer token comes from CODING_TOOLS_MCP_AUTH_TOKEN at server startup; the Admin token cannot sign in to /app.',

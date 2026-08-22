@@ -309,6 +309,21 @@ class AgentSessionService:
         self._workspace(record.workspace_id)
         return record
 
+    def bind_conversation(
+        self,
+        session_id: str,
+        owner_principal_id: str,
+        conversation_id: str,
+    ) -> AgentSessionRecord:
+        record = self._record_for_owner(session_id, owner_principal_id)
+        self._workspace(record.workspace_id)
+        return self.store.update_state(
+            record.session_id,
+            record.workspace_id,
+            record.owner_principal_id,
+            conversation_id=conversation_id,
+        )
+
     def close_session(
         self,
         session_id: str,

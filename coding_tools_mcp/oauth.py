@@ -353,7 +353,15 @@ def create_authorization_grant(
             raise OAuthWorkspaceAccessRequiredError("Select at least one Workspace.")
         if len(set(workspace_ids)) != len(workspace_ids):
             raise OAuthWorkspaceSelectionError("Selected Workspace IDs must be unique.")
-        authorized_workspace_ids = workspace_ids
+        unauthorized_workspace_ids = tuple(
+            selected_workspace_id
+            for selected_workspace_id in workspace_ids
+            if selected_workspace_id not in authorized_workspace_ids
+        )
+        if unauthorized_workspace_ids:
+            raise OAuthWorkspaceSelectionError(
+                "Selected Workspace is not authorized for this OAuth client."
+            )
     if not authorized_workspace_ids:
         raise OAuthWorkspaceAccessRequiredError(
             "OAuth client has no authorized Workspaces."

@@ -117,6 +117,36 @@ test('operator API client uses the operator namespace and keeps bearer material 
   });
 });
 
+test('operator API client exchanges the raw token for a cookie session and uses CSRF for writes', async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    const isSession = url === '/api/app/session';
+    return {
+      ok: true,
+      status: isSession && options.method === 'POST' ? 201 : 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      async json() {
+        return isSession
+          ? { ok: true, persistent: true, csrf_token: 'csrf-only-in-memory' }
+          : { sessions: [] };
+      },
+    };
+  };
+  const client = createOperatorApiClient({ fetchImpl });
+
+  await client.establishBrowserSession('one-time-bearer');
+  await client.listSessions('workspace/a');
+  await client.createSession({ workspace_id: 'workspace/a', backend_kind: 'codex' });
+
+  assert.equal(calls[0].url, '/api/app/session');
+  assert.equal(calls[0].options.headers.get('Authorization'), 'Bearer one-time-bearer');
+  assert.equal(calls[1].options.headers.has('Authorization'), false);
+  assert.equal(calls[1].options.credentials, 'same-origin');
+  assert.equal(calls[2].options.headers.has('Authorization'), false);
+  assert.equal(calls[2].options.headers.get('X-Operator-CSRF'), 'csrf-only-in-memory');
+});
+
 test('SSE parser preserves incomplete frames and parses bounded JSON events', () => {
   const first = parseSseChunk('', 'id: 7\ndata: {"sequence":7,"kind":"assistant"}\n\nid: 8\ndata: {"sequence":');
   assert.equal(first.events.length, 1);

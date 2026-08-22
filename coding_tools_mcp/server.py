@@ -99,6 +99,11 @@ from .operator_api import (
     OperatorPrincipal,
     operator_error_status,
 )
+from .operator_sessions import (
+    OPERATOR_SESSION_ABSOLUTE_LIFETIME_SECONDS,
+    OPERATOR_SESSION_COOKIE,
+    OperatorSessionStore,
+)
 from .secret_vault import SecretVault, SecretVaultError
 from .settings_definition import (
     SettingsValidationError,
@@ -148,7 +153,7 @@ from .runner.websocket import AsyncSocketWebSocket, BlockingWebSocket, WebSocket
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
 from .tool_results import make_tool_result
-from .transcript import TranscriptStore
+from .transcript import TranscriptStore, TranscriptStoreError
 from .transport_http import HTTPSessionAdmissionError, HTTPSessionLimits, HTTPSessionManager
 from .transport_stdio import serve_stdio
 from .upstream import (
@@ -5420,6 +5425,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         return service if isinstance(service, OperatorAPIService) else None
 
     def _operator_principal(self) -> OperatorPrincipal | None:
+        browser_principal = getattr(self, "_operator_browser_principal", None)
+        if isinstance(browser_principal, OperatorPrincipal):
+            return browser_principal
         context = getattr(self, "_authorization_context", None)
         service = self._operator_service()
         if not isinstance(context, AuthorizationContext) or service is None:
@@ -5533,7 +5541,24 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 head_only=head_only,
             )
             return
-        if not self.is_authorized():
+        normalized_request_path = posixpath.normpath(urllib.parse.urlsplit(self.path).path)
+        authorized = self.is_authorized()
+        if (
+            not authorized
+            and method == "GET"
+            and normalized_request_path == f"{OPERATOR_API_PREFIX}/session"
+        ):
+            self.send_json(
+                {
+                    "ok": True,
+                    "authenticated": False,
+                    "persistent": False,
+                    "csrf_token": None,
+                },
+                head_only=head_only,
+            )
+            return
+        if not authorized:
             self._send_operator_unauthorized(head_only=head_only)
             return
         principal = self._operator_principal()
@@ -5550,6 +5575,80 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             for key, values in urllib.parse.parse_qs(parsed.query, keep_blank_values=True).items()
             if values
         }
+        store = self._operator_session_store()
+        browser_principal = getattr(self, "_operator_browser_principal", None)
+        if method == "GET" and segments == ["session"]:
+            csrf_token = (
+                store.issue_csrf(self._operator_session_id())
+                if store is not None and isinstance(browser_principal, OperatorPrincipal)
+                else None
+            )
+            self.send_json(
+                {
+                    "ok": True,
+                    "authenticated": True,
+                    "persistent": csrf_token is not None,
+                    "csrf_token": csrf_token,
+                },
+                head_only=head_only,
+            )
+            return
+        if method == "POST" and segments == ["session"]:
+            context = getattr(self, "_authorization_context", None)
+            if isinstance(context, AuthorizationContext) and context.method == "noauth":
+                self.send_json(
+                    {"ok": True, "authenticated": True, "persistent": False, "csrf_token": None},
+                    status=201,
+                    head_only=head_only,
+                )
+                return
+            if store is None or not isinstance(context, AuthorizationContext):
+                self._send_operator_unauthorized(head_only=head_only)
+                return
+            session_id, csrf_token = store.create(principal.principal_id, principal.workspace_ids)
+            self.send_json(
+                {
+                    "ok": True,
+                    "authenticated": True,
+                    "persistent": True,
+                    "csrf_token": csrf_token,
+                },
+                status=201,
+                extra_headers={"Set-Cookie": self._operator_session_cookie_header(session_id)},
+                head_only=head_only,
+            )
+            return
+        if method in {"POST", "DELETE"} and isinstance(browser_principal, OperatorPrincipal):
+            csrf_token = self.headers.get("X-Operator-CSRF", "").strip()
+            if (
+                store is None
+                or store.authorize(
+                    self._operator_session_id(),
+                    csrf_token=csrf_token,
+                    require_csrf=True,
+                )
+                is None
+            ):
+                self.send_json(
+                    {
+                        "error": {
+                            "code": "operator_csrf_required",
+                            "message": "A valid Operator CSRF token is required.",
+                        }
+                    },
+                    status=403,
+                    head_only=head_only,
+                )
+                return
+        if method == "DELETE" and segments == ["session"]:
+            if store is not None:
+                store.revoke(self._operator_session_id())
+            self.send_json(
+                {"ok": True, "revoked": True},
+                extra_headers={"Set-Cookie": self._operator_session_cookie_header("", clear=True)},
+                head_only=head_only,
+            )
+            return
         if method == "GET" and segments == ["workspaces"]:
             self.send_json(service.list_workspaces(principal), head_only=head_only)
             return
@@ -5741,7 +5840,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         store = getattr(self.server, "admin_sessions", None)  # type: ignore[attr-defined]
         return store if isinstance(store, AdminSessionStore) else None
 
-    def _admin_session_id(self) -> str:
+    def _operator_session_store(self) -> OperatorSessionStore | None:
+        store = getattr(self.server, "operator_sessions", None)  # type: ignore[attr-defined]
+        return store if isinstance(store, OperatorSessionStore) else None
+
+    def _cookie_value(self, name: str) -> str:
         raw_cookie = self.headers.get("Cookie", "")
         if not raw_cookie:
             return ""
@@ -5750,8 +5853,14 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             cookie.load(raw_cookie)
         except http.cookies.CookieError:
             return ""
-        morsel = cookie.get(ADMIN_SESSION_COOKIE)
+        morsel = cookie.get(name)
         return morsel.value.strip() if morsel is not None else ""
+
+    def _admin_session_id(self) -> str:
+        return self._cookie_value(ADMIN_SESSION_COOKIE)
+
+    def _operator_session_id(self) -> str:
+        return self._cookie_value(OPERATOR_SESSION_COOKIE)
 
     def _request_is_secure(self) -> bool:
         if isinstance(self.connection, ssl.SSLSocket):
@@ -5769,6 +5878,20 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         parts = [
             f"{ADMIN_SESSION_COOKIE}={value}",
             "Path=/admin/api",
+            "HttpOnly",
+            "SameSite=Strict",
+            f"Max-Age={max_age}",
+        ]
+        if self._request_is_secure():
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def _operator_session_cookie_header(self, session_id: str, *, clear: bool = False) -> str:
+        value = "" if clear else session_id
+        max_age = 0 if clear else OPERATOR_SESSION_ABSOLUTE_LIFETIME_SECONDS
+        parts = [
+            f"{OPERATOR_SESSION_COOKIE}={value}",
+            "Path=/api/app",
             "HttpOnly",
             "SameSite=Strict",
             f"Max-Age={max_age}",
@@ -6197,6 +6320,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized.startswith(ADMIN_API_PREFIX):
             self.handle_admin_request("DELETE")
             return
+        if normalized.startswith(OPERATOR_API_PREFIX):
+            self.handle_operator_request("DELETE")
+            return
         if normalized != MCP_ENDPOINT_PATH:
             self.send_json({"error": "Unknown endpoint"}, status=404)
             return
@@ -6494,10 +6620,22 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def is_authorized(self) -> bool:
         self._authorization_context = None
+        self._operator_browser_principal = None
         if not self.runtime.auth_enabled():
             self._authorization_context = AuthorizationContext("noauth")
             return True
+        request_path = posixpath.normpath(self.path.split("?", 1)[0])
         header = self.headers.get("Authorization", "").strip()
+        if request_path.startswith(OPERATOR_API_PREFIX) and not header:
+            store = self._operator_session_store()
+            if store is not None:
+                identity = store.authorize(self._operator_session_id())
+                if identity is not None:
+                    self._operator_browser_principal = OperatorPrincipal(
+                        identity.principal_id,
+                        identity.workspace_ids,
+                    )
+                    return True
         if self.runtime.auth_token is not None:
             if secrets.compare_digest(header, f"Bearer {self.runtime.auth_token}"):
                 self._authorization_context = AuthorizationContext("bearer")
@@ -7126,6 +7264,7 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         self.admin_token = admin_token or None
         self.admin_sessions = AdminSessionStore() if self.admin_token else None
         self.operator_service = operator_service
+        self.operator_sessions = OperatorSessionStore() if operator_service is not None else None
         self.workspace_catalog = workspace_catalog
         self.runner_route_service = runner_route_service
         self.runner_credentials = runner_credentials
@@ -7135,6 +7274,8 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
     def server_close(self) -> None:
         if self.admin_sessions is not None:
             self.admin_sessions.revoke_all()
+        if self.operator_sessions is not None:
+            self.operator_sessions.revoke_all()
         if self.runner_route_service is not None:
             self.runner_route_service.close_transports_sync()
         self.sessions.close()
@@ -7987,6 +8128,13 @@ def run_http(args: argparse.Namespace) -> int:
         runtime.close()
         print(f"ERROR: Admin authentication is unavailable: {exc}", file=sys.stderr)
         return 2
+    try:
+        transcript_store = TranscriptStore(config_dir / TRANSCRIPT_DB_FILENAME)
+    except (TranscriptStoreError, OSError) as exc:
+        runtime.close()
+        print(f"ERROR: Transcript persistence is unavailable: {exc}", file=sys.stderr)
+        return 2
+
     admin_service: AdminService | None = None
     if admin_token:
         gateway_path = upstream_config_path(args, config_dir)
@@ -8017,7 +8165,7 @@ def run_http(args: argparse.Namespace) -> int:
                 active_gateway_status=runtime.upstream_manager.status_payload,
                 runner_credentials=runner_credentials,
                 runner_status=runner_admin_status,
-                transcript_store=TranscriptStore(config_dir / TRANSCRIPT_DB_FILENAME),
+                transcript_store=transcript_store,
                 session_scanner=CodexSessionScanner(),
                 active_sources=active_setting_sources,
                 launcher=(os.environ.get(f"{ENV_PREFIX}_LAUNCHER") or None),
@@ -8137,6 +8285,7 @@ def run_http(args: argparse.Namespace) -> int:
             workspace_status=lambda entry: workspace_hosts.create(entry).snapshot_status(),
             handoff_jobs=operator_handoff_jobs,
             validation_backend_factory=operator_validation_backend,
+            transcript_store=transcript_store,
         )
     except (AgentSessionStoreError, OSError) as exc:
         runtime.close()

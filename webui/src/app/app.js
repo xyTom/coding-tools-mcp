@@ -140,7 +140,6 @@ export function initOperatorApp(documentRef = globalThis.document) {
   if (!documentRef || typeof apiFactory !== 'function' || typeof model.projectWorkspaces !== 'function') return null;
 
   const state = {
-    accessToken: '',
     workspaces: [],
     sessions: [],
     workspaceId: '',
@@ -148,7 +147,7 @@ export function initOperatorApp(documentRef = globalThis.document) {
     streamAbort: null,
     api: null,
   };
-  state.api = apiFactory({ getAccessToken: () => state.accessToken });
+  state.api = apiFactory();
 
   const nodes = collectNodes(documentRef);
   const preferred = readRouteState();
@@ -335,13 +334,24 @@ export function initOperatorApp(documentRef = globalThis.document) {
   nodes.closeAuth?.addEventListener('click', () => nodes.authDialog?.close?.());
   nodes.authForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    state.accessToken = String(nodes.accessToken?.value ?? '').trim();
-    if (nodes.accessToken) nodes.accessToken.value = '';
-    nodes.authDialog?.close?.();
-    await loadWorkspaces();
+    const accessToken = String(nodes.accessToken?.value ?? '').trim();
+    if (!accessToken) return;
+    try {
+      await state.api.establishBrowserSession(accessToken);
+      nodes.authDialog?.close?.();
+      await loadWorkspaces();
+    } catch (error) {
+      handleApiError(error, setBanner, nodes.authDialog);
+    } finally {
+      if (nodes.accessToken) nodes.accessToken.value = '';
+    }
   });
-  nodes.disconnect?.addEventListener('click', () => {
-    state.accessToken = '';
+  nodes.disconnect?.addEventListener('click', async () => {
+    try {
+      await state.api.endBrowserSession?.();
+    } catch {
+      // Local UI state still disconnects even if the server session already expired.
+    }
     stopStream();
     state.workspaces = [];
     state.sessions = [];
@@ -351,7 +361,15 @@ export function initOperatorApp(documentRef = globalThis.document) {
   });
 
   renderShell();
-  loadWorkspaces();
+  (async () => {
+    try {
+      await state.api.resumeBrowserSession?.();
+      await loadWorkspaces();
+    } catch (error) {
+      handleApiError(error, setBanner, nodes.authDialog);
+      renderShell();
+    }
+  })();
   return Object.freeze({ state, reload: loadWorkspaces, openSession, stop: stopStream });
 }
 

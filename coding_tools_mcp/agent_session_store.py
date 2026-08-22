@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -297,6 +297,7 @@ class AgentSessionStore:
         *,
         status: str | None = None,
         backend_thread_id: str | None = None,
+        conversation_id: str | None = None,
         last_turn_id: str | None = None,
         instruction_digest: str | None = None,
         repo_fingerprint: Mapping[str, Any] | None = None,
@@ -305,6 +306,11 @@ class AgentSessionStore:
         next_status = current.status if status is None else _status(status)
         next_thread = current.backend_thread_id if backend_thread_id is None else _require_id(
             backend_thread_id, "backend_thread_id"
+        )
+        next_conversation = (
+            current.conversation_id
+            if conversation_id is None
+            else _require_id(conversation_id, "conversation_id")
         )
         next_turn = current.last_turn_id if last_turn_id is None else _require_id(
             last_turn_id, "last_turn_id"
@@ -325,13 +331,14 @@ class AgentSessionStore:
             cursor = conn.execute(
                 """
                 UPDATE agent_sessions
-                SET status=?, backend_thread_id=?, last_turn_id=?, instruction_digest=?,
+                SET status=?, backend_thread_id=?, conversation_id=?, last_turn_id=?, instruction_digest=?,
                     repo_fingerprint_json=?, updated_at=?
                 WHERE session_id=? AND workspace_id=? AND owner_principal_id=?
                 """,
                 (
                     next_status,
                     next_thread,
+                    next_conversation,
                     next_turn,
                     next_digest,
                     fingerprint_json,

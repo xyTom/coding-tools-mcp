@@ -13,6 +13,7 @@ export function createOperatorApiClient({
   fetchImpl = globalThis.fetch,
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new TypeError('fetch implementation is required');
+  let csrfToken = '';
 
   async function request(path, options = {}) {
     const response = await rawRequest(path, options);
@@ -23,22 +24,51 @@ export function createOperatorApiClient({
 
   async function rawRequest(path, options = {}) {
     const normalized = path.startsWith('/') ? path : `/${path}`;
+    const { accessToken, ...fetchOptions } = options;
     const headers = new Headers(options.headers || {});
     if (!headers.has('Accept')) headers.set('Accept', 'application/json');
-    const token = String(getAccessToken?.() ?? '').trim();
+    const token = String(accessToken ?? getAccessToken?.() ?? '').trim();
     if (token) headers.set('Authorization', `Bearer ${token}`);
+    const method = String(fetchOptions.method || 'GET').toUpperCase();
+    if (csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+      headers.set('X-Operator-CSRF', csrfToken);
+    }
     let body = options.body;
     if (body !== undefined && body !== null && typeof body !== 'string') {
       headers.set('Content-Type', 'application/json');
       body = JSON.stringify(body);
     }
     return fetchImpl(`/api/app${normalized}`, {
-      ...options,
+      ...fetchOptions,
       headers,
       body,
       cache: 'no-store',
       credentials: 'same-origin',
     });
+  }
+
+  async function establishBrowserSession(accessToken) {
+    const payload = await request('/session', { method: 'POST', accessToken });
+    csrfToken = String(payload?.csrf_token || '');
+    return payload;
+  }
+
+  async function resumeBrowserSession() {
+    const payload = await request('/session');
+    if (payload?.authenticated === false) {
+      csrfToken = '';
+      throw new OperatorApiError(401, { error: { message: 'Operator authentication is required.' } });
+    }
+    csrfToken = String(payload?.csrf_token || '');
+    return payload;
+  }
+
+  async function endBrowserSession() {
+    try {
+      return await request('/session', { method: 'DELETE' });
+    } finally {
+      csrfToken = '';
+    }
   }
 
   async function streamEvents(sessionId, {
@@ -80,6 +110,9 @@ export function createOperatorApiClient({
 
   return Object.freeze({
     request,
+    establishBrowserSession,
+    resumeBrowserSession,
+    endBrowserSession,
     listWorkspaces: () => request('/workspaces'),
     listSessions: (workspaceId = '') => request(`/sessions${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''}`),
     getSession: (sessionId) => request(`/sessions/${encodeURIComponent(sessionId)}`),

@@ -7,6 +7,7 @@ and an ephemeral multi-window event cursor over the live backend queue.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -17,6 +18,7 @@ from .agent_backends.base import AgentBackendEvent
 from .agent_session_store import AgentSessionRecord
 from .agent_sessions import AgentSessionService, AgentSessionServiceError
 from .handoff import build_session_handoff
+from .transcript import TranscriptStore, TranscriptStoreError
 from .validation import ValidationBackend
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError, WorkspaceEntry
 
@@ -68,12 +70,14 @@ class OperatorAPIService:
             Callable[[OperatorPrincipal, WorkspaceEntry], Iterable[Mapping[str, Any]]] | None
         ) = None,
         validation_backend_factory: Callable[[WorkspaceEntry], ValidationBackend] | None = None,
+        transcript_store: TranscriptStore | None = None,
     ) -> None:
         self.agent_sessions = agent_sessions
         self.workspace_catalog = workspace_catalog
         self.workspace_status = workspace_status
         self.handoff_jobs = handoff_jobs
         self.validation_backend_factory = validation_backend_factory
+        self.transcript_store = transcript_store
         self._event_lock = threading.RLock()
         self._events: dict[str, deque[dict[str, Any]]] = {}
         self._next_sequence: dict[str, int] = {}
@@ -110,7 +114,22 @@ class OperatorAPIService:
             principal.principal_id,
             limit=max(1, min(int(limit), 200)),
         )
-        return {"sessions": [record.summary_payload() for record in records]}
+        summaries = self._conversation_summary_map(workspace_id)
+        normalized_records: list[AgentSessionRecord] = []
+        summaries_changed = False
+        for record in records:
+            if not record.conversation_id or record.conversation_id not in summaries:
+                record = self._ensure_transcript_conversation(record)
+                summaries_changed = True
+            normalized_records.append(record)
+        if summaries_changed:
+            summaries = self._conversation_summary_map(workspace_id)
+        return {
+            "sessions": [
+                self._session_summary_payload(record, summaries.get(record.conversation_id or ""))
+                for record in normalized_records
+            ]
+        }
 
     def create_session(
         self,
@@ -143,6 +162,7 @@ class OperatorAPIService:
             backend_kind=backend_kind,
             instructions=instructions,
         )
+        record = self._ensure_transcript_conversation(record)
         return {"session": self._detail_payload(record)}
 
     def get_session(
@@ -154,6 +174,7 @@ class OperatorAPIService:
     ) -> dict[str, Any]:
         session_id = self._required_string(session_id, "session_id", 256)
         record = self.agent_sessions.get_session(session_id, principal.principal_id)
+        record = self._ensure_transcript_conversation(record)
         self._require_workspace(principal, record.workspace_id)
         backend_error: dict[str, Any] | None = None
         if resume and record.status != "closed":
@@ -192,8 +213,21 @@ class OperatorAPIService:
                 status=400,
             )
         record = self._resume_for_action(principal, session_id)
+        first_turn = record.last_turn_id is None
         record = self.agent_sessions.send_turn(record.session_id, principal.principal_id, message)
-        return {"session": record.summary_payload()}
+        self._record_transcript_messages(
+            record,
+            [
+                {
+                    "message_id": f"{record.session_id}:{record.last_turn_id or 'turn'}:user",
+                    "role": "user",
+                    "content": message,
+                    "source": "operator-app",
+                }
+            ],
+            title=self._message_title(message) if first_turn else None,
+        )
+        return {"session": self._session_summary_payload(record)}
 
     def interrupt(
         self,
@@ -262,7 +296,7 @@ class OperatorAPIService:
                     principal.principal_id,
                     limit=MAX_OPERATOR_EVENT_PULL,
                 )
-            self._append_events(session_id, backend_events)
+            self._append_events(record, backend_events)
         events = self._buffered_events(session_id, after=max(0, int(after)))
         cursor = events[-1]["sequence"] if events else max(0, int(after))
         return {"events": events, "cursor": cursor}
@@ -354,9 +388,11 @@ class OperatorAPIService:
             record = self.agent_sessions.resume_session(session_id, principal.principal_id)
         return record
 
-    def _append_events(self, session_id: str, events: list[AgentBackendEvent]) -> None:
+    def _append_events(self, record: AgentSessionRecord, events: list[AgentBackendEvent]) -> None:
         if not events:
             return
+        session_id = record.session_id
+        transcript_messages: list[dict[str, Any]] = []
         with self._event_lock:
             buffer = self._events.setdefault(session_id, deque(maxlen=MAX_OPERATOR_EVENTS))
             sequence = self._next_sequence.get(session_id, 0)
@@ -371,7 +407,12 @@ class OperatorAPIService:
                         "approval_id": event.approval_id,
                     }
                 )
+                message = self._assistant_transcript_message(record, event)
+                if message is not None:
+                    transcript_messages.append(message)
             self._next_sequence[session_id] = sequence
+        if transcript_messages:
+            self._record_transcript_messages(record, transcript_messages)
 
     def _buffered_events(self, session_id: str, *, after: int) -> list[dict[str, Any]]:
         with self._event_lock:
@@ -400,6 +441,136 @@ class OperatorAPIService:
                 status=404,
             ) from exc
 
+    def _ensure_transcript_conversation(self, record: AgentSessionRecord) -> AgentSessionRecord:
+        store = self.transcript_store
+        if store is None:
+            return record
+        if not record.conversation_id:
+            record = self.agent_sessions.bind_conversation(
+                record.session_id,
+                record.owner_principal_id,
+                f"agent-{record.session_id}",
+            )
+        try:
+            existing = store.conversation_detail(
+                record.workspace_id,
+                record.conversation_id or "",
+                message_page_size=1,
+                context_page_size=1,
+            )
+            if existing is None:
+                store.record_messages(
+                    record.workspace_id,
+                    record.conversation_id or "",
+                    [],
+                    title=f"Agent Session {record.session_id[:8]}",
+                    source="operator-app",
+                )
+        except (TranscriptStoreError, OSError):
+            return record
+        return record
+
+    def _conversation_summary_map(self, workspace_id: str) -> dict[str, dict[str, Any]]:
+        store = self.transcript_store
+        if store is None:
+            return {}
+        try:
+            payload = store.list_conversations(workspace_id, page=1, page_size=200)
+        except (TranscriptStoreError, OSError):
+            return {}
+        return {
+            str(item.get("conversation_id")): dict(item)
+            for item in payload.get("items", [])
+            if isinstance(item, dict) and item.get("conversation_id")
+        }
+
+    def _session_summary_payload(
+        self,
+        record: AgentSessionRecord,
+        summary: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = record.summary_payload()
+        if summary is None and record.conversation_id:
+            summary = self._conversation_summary_map(record.workspace_id).get(record.conversation_id)
+        if summary:
+            title = summary.get("title")
+            preview = summary.get("preview")
+            if isinstance(title, str) and title.strip():
+                payload["title"] = title.strip()
+            if isinstance(preview, str) and preview.strip():
+                payload["summary"] = preview.strip()
+            payload["message_count"] = int(summary.get("message_count") or 0)
+        return payload
+
+    def _record_transcript_messages(
+        self,
+        record: AgentSessionRecord,
+        messages: list[dict[str, Any]],
+        *,
+        title: str | None = None,
+    ) -> bool:
+        store = self.transcript_store
+        if store is None or not record.conversation_id:
+            return False
+        try:
+            store.record_messages(
+                record.workspace_id,
+                record.conversation_id,
+                messages,
+                title=title,
+                source="operator-app",
+            )
+        except (TranscriptStoreError, OSError):
+            return False
+        return True
+
+    def _assistant_transcript_message(
+        self,
+        record: AgentSessionRecord,
+        event: AgentBackendEvent,
+    ) -> dict[str, Any] | None:
+        text = ""
+        message_id = ""
+        metadata: dict[str, Any] = {"method": event.method}
+        if event.method == "item/completed":
+            item = event.params.get("item")
+            if not isinstance(item, dict) or item.get("type") not in {"agentMessage", "agent_message"}:
+                return None
+            raw_text = item.get("text")
+            if isinstance(raw_text, str):
+                text = raw_text.strip()
+            raw_id = item.get("id")
+            if isinstance(raw_id, str) and raw_id.strip():
+                message_id = raw_id.strip()
+            phase = item.get("phase")
+            if isinstance(phase, str) and phase:
+                metadata["phase"] = phase
+        elif event.kind == "assistant" or event.method in {"turn/assistant", "assistant/message"}:
+            for key in ("text", "message", "content"):
+                value = event.params.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
+        if not text:
+            return None
+        if not message_id:
+            digest = hashlib.sha256(
+                f"{event.method}\0{event.sequence}\0{text}".encode("utf-8")
+            ).hexdigest()[:24]
+            message_id = f"event-{digest}"
+        return {
+            "message_id": f"{record.session_id}:{message_id}:assistant",
+            "role": "assistant",
+            "content": text,
+            "source": "operator-app",
+            "metadata": metadata,
+        }
+
+    @staticmethod
+    def _message_title(message: str) -> str:
+        normalized = " ".join(message.split())
+        return normalized[:120] if normalized else "Agent Session"
+
     def _workspace_payload(self, entry: WorkspaceEntry) -> dict[str, Any]:
         runner_status = "local"
         if entry.target == "runner":
@@ -419,9 +590,8 @@ class OperatorAPIService:
             "runner_status": runner_status,
         }
 
-    @staticmethod
-    def _detail_payload(record: AgentSessionRecord) -> dict[str, Any]:
-        payload = record.summary_payload()
+    def _detail_payload(self, record: AgentSessionRecord) -> dict[str, Any]:
+        payload = self._session_summary_payload(record)
         payload.update(
             {
                 "explicit_instructions": record.explicit_instructions,

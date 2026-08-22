@@ -666,42 +666,6 @@ class OAuthAuthorizationStore:
                 raise OAuthStoreWorkspaceAccessError(
                     "Selected Workspace is not authorized for this OAuth client."
                 )
-            existing_workspace_ids = self._client_workspace_ids(conn, client_id)
-            if (
-                selected_workspace_ids is not None
-                and existing_workspace_ids != selected_workspace_ids
-            ):
-                conn.execute(
-                    "DELETE FROM oauth_client_workspaces WHERE client_id=?",
-                    (client_id,),
-                )
-                conn.executemany(
-                    """
-                    INSERT INTO oauth_client_workspaces(client_id, workspace_id, created_at)
-                    VALUES(?,?,?)
-                    """,
-                    (
-                        (client_id, selected_workspace_id, now)
-                        for selected_workspace_id in selected_workspace_ids
-                    ),
-                )
-                conn.execute(
-                    "UPDATE oauth_clients SET workspace_id=?, updated_at=? WHERE client_id=?",
-                    (
-                        selected_workspace_ids[0]
-                        if len(selected_workspace_ids) == 1
-                        else None,
-                        now,
-                        client_id,
-                    ),
-                )
-                self._audit(
-                    conn,
-                    "client_workspaces_updated",
-                    client_id=client_id,
-                    actor_kind="user",
-                    details={"workspace_ids": list(selected_workspace_ids)},
-                )
             conn.execute(
                 """
                 INSERT INTO oauth_grants(

@@ -131,7 +131,7 @@
         <label for="operatorAccessToken">Operator token（CODING_TOOLS_MCP_AUTH_TOKEN 或 OAuth access token）
           <input id="operatorAccessToken" type="password" autocomplete="off" required>
         </label>
-        <p class="help">Admin token 不能用于这里；此 token 不在 WebUI 中创建，只保存在当前页面内存中。</p>
+        <p class="help">Admin token 不能用于这里；原始 token 仅用于建立服务端 Operator 会话，不写入浏览器存储。登录后使用 HttpOnly Cookie，刷新页面无需重新输入，服务重启或会话过期后需要再次登录。</p>
         <p class="help"><a href="/wiki#app-token" target="_blank" rel="noopener">打开启动与密码说明</a></p>
       </div>
       <footer><button id="closeOperatorAuth" type="button" class="button secondary">取消</button><button type="submit" class="button primary">连接</button></footer>

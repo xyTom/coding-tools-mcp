@@ -361,6 +361,15 @@ class PersistentOAuthCompositionTests(unittest.TestCase):
                     registered = json.loads(response.read())
                 client_id = str(registered["client_id"])
 
+                # Workspace access is an administrator-managed client allowlist.
+                # The authorization form may select from that allowlist, but it
+                # must not create or expand the client's permissions.
+                assert config.store is not None
+                config.store.set_client_workspaces(
+                    client_id,
+                    ["workspace-a", "workspace-b"],
+                )
+
                 query = urllib.parse.urlencode(
                     {
                         "response_type": "code",

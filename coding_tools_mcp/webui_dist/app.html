@@ -187,7 +187,7 @@ dialog{width:min(620px,calc(100% - 2rem));max-height:min(90dvh,860px);padding:0;
         <label for="operatorAccessToken">Operator token（CODING_TOOLS_MCP_AUTH_TOKEN 或 OAuth access token）
           <input id="operatorAccessToken" type="password" autocomplete="off" required>
         </label>
-        <p class="help">Admin token 不能用于这里；此 token 不在 WebUI 中创建，只保存在当前页面内存中。</p>
+        <p class="help">Admin token 不能用于这里；原始 token 仅用于建立服务端 Operator 会话，不写入浏览器存储。登录后使用 HttpOnly Cookie，刷新页面无需重新输入，服务重启或会话过期后需要再次登录。</p>
         <p class="help"><a href="/wiki#app-token" target="_blank" rel="noopener">打开启动与密码说明</a></p>
       </div>
       <footer><button id="closeOperatorAuth" type="button" class="button secondary">取消</button><button type="submit" class="button primary">连接</button></footer>
@@ -421,6 +421,7 @@ export function createOperatorApiClient({
   fetchImpl = globalThis.fetch,
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new TypeError('fetch implementation is required');
+  let csrfToken = '';
 
   async function request(path, options = {}) {
     const response = await rawRequest(path, options);
@@ -431,22 +432,51 @@ export function createOperatorApiClient({
 
   async function rawRequest(path, options = {}) {
     const normalized = path.startsWith('/') ? path : `/${path}`;
+    const { accessToken, ...fetchOptions } = options;
     const headers = new Headers(options.headers || {});
     if (!headers.has('Accept')) headers.set('Accept', 'application/json');
-    const token = String(getAccessToken?.() ?? '').trim();
+    const token = String(accessToken ?? getAccessToken?.() ?? '').trim();
     if (token) headers.set('Authorization', `Bearer ${token}`);
+    const method = String(fetchOptions.method || 'GET').toUpperCase();
+    if (csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+      headers.set('X-Operator-CSRF', csrfToken);
+    }
     let body = options.body;
     if (body !== undefined && body !== null && typeof body !== 'string') {
       headers.set('Content-Type', 'application/json');
       body = JSON.stringify(body);
     }
     return fetchImpl(`/api/app${normalized}`, {
-      ...options,
+      ...fetchOptions,
       headers,
       body,
       cache: 'no-store',
       credentials: 'same-origin',
     });
+  }
+
+  async function establishBrowserSession(accessToken) {
+    const payload = await request('/session', { method: 'POST', accessToken });
+    csrfToken = String(payload?.csrf_token || '');
+    return payload;
+  }
+
+  async function resumeBrowserSession() {
+    const payload = await request('/session');
+    if (payload?.authenticated === false) {
+      csrfToken = '';
+      throw new OperatorApiError(401, { error: { message: 'Operator authentication is required.' } });
+    }
+    csrfToken = String(payload?.csrf_token || '');
+    return payload;
+  }
+
+  async function endBrowserSession() {
+    try {
+      return await request('/session', { method: 'DELETE' });
+    } finally {
+      csrfToken = '';
+    }
   }
 
   async function streamEvents(sessionId, {
@@ -488,6 +518,9 @@ export function createOperatorApiClient({
 
   return Object.freeze({
     request,
+    establishBrowserSession,
+    resumeBrowserSession,
+    endBrowserSession,
     listWorkspaces: () => request('/workspaces'),
     listSessions: (workspaceId = '') => request(`/sessions${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''}`),
     getSession: (sessionId) => request(`/sessions/${encodeURIComponent(sessionId)}`),
@@ -695,7 +728,6 @@ export function initOperatorApp(documentRef = globalThis.document) {
   if (!documentRef || typeof apiFactory !== 'function' || typeof model.projectWorkspaces !== 'function') return null;
 
   const state = {
-    accessToken: '',
     workspaces: [],
     sessions: [],
     workspaceId: '',
@@ -703,7 +735,7 @@ export function initOperatorApp(documentRef = globalThis.document) {
     streamAbort: null,
     api: null,
   };
-  state.api = apiFactory({ getAccessToken: () => state.accessToken });
+  state.api = apiFactory();
 
   const nodes = collectNodes(documentRef);
   const preferred = readRouteState();
@@ -890,13 +922,24 @@ export function initOperatorApp(documentRef = globalThis.document) {
   nodes.closeAuth?.addEventListener('click', () => nodes.authDialog?.close?.());
   nodes.authForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    state.accessToken = String(nodes.accessToken?.value ?? '').trim();
-    if (nodes.accessToken) nodes.accessToken.value = '';
-    nodes.authDialog?.close?.();
-    await loadWorkspaces();
+    const accessToken = String(nodes.accessToken?.value ?? '').trim();
+    if (!accessToken) return;
+    try {
+      await state.api.establishBrowserSession(accessToken);
+      nodes.authDialog?.close?.();
+      await loadWorkspaces();
+    } catch (error) {
+      handleApiError(error, setBanner, nodes.authDialog);
+    } finally {
+      if (nodes.accessToken) nodes.accessToken.value = '';
+    }
   });
-  nodes.disconnect?.addEventListener('click', () => {
-    state.accessToken = '';
+  nodes.disconnect?.addEventListener('click', async () => {
+    try {
+      await state.api.endBrowserSession?.();
+    } catch {
+      // Local UI state still disconnects even if the server session already expired.
+    }
     stopStream();
     state.workspaces = [];
     state.sessions = [];
@@ -906,7 +949,15 @@ export function initOperatorApp(documentRef = globalThis.document) {
   });
 
   renderShell();
-  loadWorkspaces();
+  (async () => {
+    try {
+      await state.api.resumeBrowserSession?.();
+      await loadWorkspaces();
+    } catch (error) {
+      handleApiError(error, setBanner, nodes.authDialog);
+      renderShell();
+    }
+  })();
   return Object.freeze({ state, reload: loadWorkspaces, openSession, stop: stopStream });
 }
 
