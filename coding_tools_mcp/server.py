@@ -8292,6 +8292,11 @@ def run_http(args: argparse.Namespace) -> int:
         print(f"ERROR: Agent Session persistence is unavailable: {exc}", file=sys.stderr)
         return 2
 
+    if admin_service is not None:
+        # Conversation Center reuses the authorized Agent/Transcript facade while
+        # keeping the two durable stores independent.
+        admin_service.conversation_service = operator_service
+
     server = RuntimeHTTPServer(
         (args.host, args.port),
         MCPHandler,

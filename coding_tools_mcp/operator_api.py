@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -100,6 +101,167 @@ class OperatorAPIService:
             workspaces.append(self._workspace_payload(entry))
         workspaces.sort(key=lambda item: (str(item["name"]).casefold(), str(item["id"])))
         return {"workspaces": workspaces}
+
+    def list_conversations(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        query: str | None = None,
+    ) -> dict[str, Any]:
+        self._require_workspace(principal, workspace_id)
+        store = self._require_transcript_store()
+        payload = store.list_conversations(
+            workspace_id,
+            page=max(1, int(page)),
+            page_size=max(1, min(int(page_size), 200)),
+            query=query,
+        )
+        records = self._conversation_execution_map(principal, workspace_id)
+        items: list[dict[str, Any]] = []
+        for raw in payload.get("items", []):
+            if not isinstance(raw, dict) or not raw.get("conversation_id"):
+                continue
+            item = dict(raw)
+            record = records.get(str(item["conversation_id"]))
+            item["execution"] = self._conversation_execution_payload(record) if record else None
+            items.append(item)
+        return {"items": items, "page": payload.get("page"), "page_size": payload.get("page_size"), "total": payload.get("total")}
+
+    def create_conversation(
+        self,
+        principal: OperatorPrincipal,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        workspace_id = self._required_string(body.get("workspace_id"), "workspace_id", 128)
+        self._require_workspace(principal, workspace_id)
+        store = self._require_transcript_store()
+        title = body.get("title")
+        if title is not None and not isinstance(title, str):
+            raise OperatorAPIError("operator_invalid_request", "title must be a string.", status=400)
+        result = store.record_messages(
+            workspace_id,
+            f"conversation-{uuid.uuid4().hex}",
+            [],
+            title=title or "New Conversation",
+            source="admin-api",
+        )
+        return {"conversation": self.get_conversation(
+            principal,
+            workspace_id,
+            str(result["conversation_id"]),
+        )}
+
+    def get_conversation(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+    ) -> dict[str, Any]:
+        conversation_id = self._required_string(conversation_id, "conversation_id", 256)
+        self._require_workspace(principal, workspace_id)
+        store = self._require_transcript_store()
+        summary = store.conversation_detail(
+            workspace_id,
+            conversation_id,
+            message_page=1,
+            message_page_size=100,
+            context_page=1,
+            context_page_size=100,
+        )
+        if summary is None:
+            raise OperatorAPIError(
+                "operator_conversation_not_found",
+                "Conversation is unavailable.",
+                status=404,
+            )
+        records = self.agent_sessions.list_sessions(workspace_id, principal.principal_id, limit=200)
+        executions = [
+            self._detail_payload(record)
+            for record in reversed(records)
+            if record.conversation_id == conversation_id
+        ]
+        return {**summary, "executions": executions}
+
+    def create_execution(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.get_conversation(principal, workspace_id, conversation_id)
+        raw_backend = self._required_string(body.get("backend_kind", "codex"), "backend_kind", 128)
+        backend_kind = {"codex": "codex-app-server", "codex-app-server": "codex-app-server"}.get(raw_backend)
+        if backend_kind is None:
+            raise OperatorAPIError("operator_backend_unsupported", "Unsupported Agent backend.", status=400)
+        instructions = body.get("instructions")
+        if instructions is not None and not isinstance(instructions, str):
+            raise OperatorAPIError("operator_invalid_request", "instructions must be a string.", status=400)
+        record = self.agent_sessions.create_session(
+            workspace_id=workspace_id,
+            owner_principal_id=principal.principal_id,
+            backend_kind=backend_kind,
+            instructions=instructions,
+            conversation_id=conversation_id,
+        )
+        record = self._ensure_transcript_conversation(record)
+        return {"execution": self._detail_payload(record)}
+
+    def send_conversation_turn(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        record = self._latest_execution_for_action(
+            principal,
+            workspace_id,
+            conversation_id,
+            body.get("session_id"),
+        )
+        return self.send_turn(principal, record.session_id, body)
+
+    def resume_conversation(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        record = self._latest_execution_for_action(
+            principal,
+            workspace_id,
+            conversation_id,
+            body.get("session_id"),
+            allow_closed=False,
+        )
+        try:
+            record = self.agent_sessions.resume_session(record.session_id, principal.principal_id)
+        except AgentSessionServiceError as exc:
+            if not exc.retryable:
+                raise
+            record = self.agent_sessions.get_session(record.session_id, principal.principal_id)
+        return {"execution": self._detail_payload(self._ensure_transcript_conversation(record))}
+
+    def close_conversation_execution(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        record = self._latest_execution_for_action(
+            principal,
+            workspace_id,
+            conversation_id,
+            body.get("session_id"),
+        )
+        record = self.agent_sessions.close_session(record.session_id, principal.principal_id)
+        return {"execution": record.summary_payload()}
 
     def list_sessions(
         self,
@@ -388,6 +550,64 @@ class OperatorAPIService:
             record = self.agent_sessions.resume_session(session_id, principal.principal_id)
         return record
 
+    def _require_transcript_store(self) -> TranscriptStore:
+        if self.transcript_store is None:
+            raise OperatorAPIError(
+                "operator_persistence_unavailable",
+                "Conversation persistence is unavailable.",
+                status=503,
+            )
+        return self.transcript_store
+
+    def _conversation_execution_map(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+    ) -> dict[str, AgentSessionRecord]:
+        records = self.agent_sessions.list_sessions(workspace_id, principal.principal_id, limit=200)
+        result: dict[str, AgentSessionRecord] = {}
+        for record in records:
+            if record.conversation_id and record.conversation_id not in result:
+                result[record.conversation_id] = record
+        return result
+
+    def _conversation_execution_payload(self, record: AgentSessionRecord) -> dict[str, Any]:
+        payload = record.summary_payload()
+        payload.pop("workspace_id", None)
+        payload.pop("conversation_id", None)
+        return payload
+
+    def _latest_execution_for_action(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+        requested_session_id: Any,
+        *,
+        allow_closed: bool = True,
+    ) -> AgentSessionRecord:
+        conversation_id = self._required_string(conversation_id, "conversation_id", 256)
+        records = [
+            record
+            for record in reversed(
+                self.agent_sessions.list_sessions(workspace_id, principal.principal_id, limit=200)
+            )
+            if record.conversation_id == conversation_id
+        ]
+        if isinstance(requested_session_id, str) and requested_session_id.strip():
+            selected = [record for record in records if record.session_id == requested_session_id.strip()]
+        else:
+            selected = [record for record in records if allow_closed or record.status != "closed"]
+            if not selected:
+                selected = records
+        if not selected:
+            raise OperatorAPIError(
+                "operator_conversation_not_found",
+                "Conversation is unavailable.",
+                status=404,
+            )
+        return self._resume_for_action(principal, selected[-1].session_id)
+
     def _append_events(self, record: AgentSessionRecord, events: list[AgentBackendEvent]) -> None:
         if not events:
             return
@@ -628,11 +848,15 @@ def operator_error_status(exc: AgentSessionServiceError) -> int:
     return 400
 
 
+ConversationService = OperatorAPIService
+
+
 __all__ = [
     "MAX_OPERATOR_EVENTS",
     "OPERATOR_API_PREFIX",
     "OperatorAPIError",
     "OperatorAPIService",
     "OperatorPrincipal",
+    "ConversationService",
     "operator_error_status",
 ]

@@ -21,6 +21,7 @@ from .oauth import (
     oauth_client_authorization_password_secret_ref,
 )
 from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
+from .operator_api import OperatorPrincipal
 from .runner.credentials import RunnerCredentialError, RunnerCredentialStore
 from .secret_vault import SecretVault, SecretVaultError
 from .settings_definition import (
@@ -328,6 +329,7 @@ class AdminService:
         session_scanner: CodexSessionScanner | None = None,
         active_sources: dict[str, str] | None = None,
         launcher: str | None = None,
+        conversation_service: Any | None = None,
     ) -> None:
         self.settings_store = settings_store
         self.active_settings = _json_copy(active_settings)
@@ -350,6 +352,7 @@ class AdminService:
             if source
         }
         self.launcher = str(launcher or "").strip().lower() or None
+        self.conversation_service = conversation_service
         self._settings_lock = threading.Lock()
         self._gateway_lock = threading.Lock()
         self._credential_audit_lock = threading.Lock()
@@ -1378,6 +1381,112 @@ class AdminService:
         self._workspace_entry(workspace_id)
         return {"ok": True, **store.clear_workspace(workspace_id)}
 
+    def conversation_list(self, query: dict[str, str]) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        principal = self._conversation_principal(query)
+        payload = service.list_conversations(
+            principal,
+            principal.workspace_ids[0],
+            page=_query_int(query, "page", 1),
+            page_size=_query_int(query, "page_size", 50),
+            query=query.get("query") or None,
+        )
+        return {"ok": True, **payload}
+
+    def conversation_create(self, body: dict[str, Any]) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        workspace_id = body.get("workspace_id")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            raise AdminServiceError("workspace_id is required.")
+        return {"ok": True, **service.create_conversation(self._conversation_principal({"workspace_id": workspace_id}), body)}
+
+    def conversation_detail(self, workspace_id: str, conversation_id: str) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        return {
+            "ok": True,
+            "conversation": service.get_conversation(
+                OperatorPrincipal("admin", (workspace_id,)),
+                workspace_id,
+                conversation_id,
+            ),
+        }
+
+    def conversation_execution_create(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        return {
+            "ok": True,
+            **service.create_execution(
+                OperatorPrincipal("admin", (workspace_id,)),
+                workspace_id,
+                conversation_id,
+                body,
+            ),
+        }
+
+    def conversation_turn(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        return service.send_conversation_turn(
+            OperatorPrincipal("admin", (workspace_id,)),
+            workspace_id,
+            conversation_id,
+            body,
+        )
+
+    def conversation_resume(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        return service.resume_conversation(
+            OperatorPrincipal("admin", (workspace_id,)),
+            workspace_id,
+            conversation_id,
+            body,
+        )
+
+    def conversation_close(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        return service.close_conversation_execution(
+            OperatorPrincipal("admin", (workspace_id,)),
+            workspace_id,
+            conversation_id,
+            body,
+        )
+
+    @staticmethod
+    def _conversation_principal(query: dict[str, str]) -> OperatorPrincipal:
+        workspace_id = query.get("workspace_id") or ""
+        if not workspace_id:
+            raise AdminServiceError("workspace_id is required.")
+        return OperatorPrincipal("admin", (workspace_id,))
+
+    def _require_conversation_service(self) -> Any:
+        if self.conversation_service is None:
+            raise AdminUnavailableError("Conversation Center is unavailable.")
+        return self.conversation_service
+
     def codex_scan(self, body: dict[str, Any]) -> dict[str, Any]:
         workspace_id = body.get("workspace_id")
         if not isinstance(workspace_id, str):
@@ -1543,6 +1652,21 @@ class AdminService:
             return self.oauth_action(parts[1], parts[2], parts[3])
         if method == "GET" and parts == ["chat", "conversations"]:
             return self.chat_conversations(query)
+        if method == "GET" and parts == ["conversations"]:
+            return self.conversation_list(query)
+        if method == "POST" and parts == ["conversations"]:
+            return self.conversation_create(body)
+        if len(parts) == 3 and parts[:2] == ["conversations"] and method == "GET":
+            return self.conversation_detail(parts[1], parts[2])
+        if len(parts) == 4 and parts[:2] == ["conversations"] and parts[3] == "executions" and method == "POST":
+            return self.conversation_execution_create(parts[1], parts[2], body)
+        if len(parts) == 4 and parts[:2] == ["conversations"] and method == "POST":
+            if parts[3] == "turns":
+                return self.conversation_turn(parts[1], parts[2], body)
+            if parts[3] == "resume":
+                return self.conversation_resume(parts[1], parts[2], body)
+            if parts[3] == "close":
+                return self.conversation_close(parts[1], parts[2], body)
         if len(parts) == 4 and parts[:2] == ["chat", "conversations"] and method == "GET":
             return self.chat_conversation_detail(parts[2], parts[3], query)
         if len(parts) == 5 and parts[:2] == ["chat", "conversations"] and method == "POST":
