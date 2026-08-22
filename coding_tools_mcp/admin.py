@@ -1089,6 +1089,30 @@ class AdminService:
             "authorize_login": {"configured": True, "mode": "client"},
         }
 
+    def get_oauth_client_password(self, client_id: str) -> dict[str, Any]:
+        store = self._require_oauth_store()
+        if store.get_client(client_id) is None:
+            raise AdminNotFoundError("OAuth client is not present.")
+        if self.oauth_secret_vault is None or self.oauth_password is None:
+            raise AdminUnavailableError(
+                "OAuth client password management is not available."
+            )
+        reference = oauth_client_authorization_password_secret_ref(client_id)
+        try:
+            if reference not in self.oauth_secret_vault.list_names():
+                raise AdminNotFoundError(
+                    "This OAuth client uses the global password; no dedicated password is set."
+                )
+            value = self.oauth_secret_vault.get_secret(reference)
+        except SecretVaultError as exc:
+            raise AdminUnavailableError(str(exc)) from exc
+        return {
+            "ok": True,
+            "client_id": client_id,
+            "value": value,
+            "authorize_login": {"configured": True, "mode": "client"},
+        }
+
     def reset_oauth_client_password(self, client_id: str) -> dict[str, Any]:
         store = self._require_oauth_store()
         if store.get_client(client_id) is None:
@@ -1507,6 +1531,8 @@ class AdminService:
             len(parts) == 4
             and parts[:2] == ["oauth", "clients"]
         ):
+            if parts[3] == "authorization-password" and method == "GET":
+                return self.get_oauth_client_password(parts[2])
             if parts[3] == "authorization-password" and method == "PUT":
                 return self.set_oauth_client_password(parts[2], body)
             if parts[3] == "authorization-password" and method == "DELETE":

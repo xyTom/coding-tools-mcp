@@ -20,6 +20,7 @@ from coding_tools_mcp.oauth_store import (
     OAuthStoreError,
     RefreshTokenClientMismatchError,
     RefreshTokenResult,
+    recover_public_client_registrations,
 )
 
 
@@ -281,6 +282,63 @@ class OAuthStoreTests(unittest.TestCase):
             grant_id = migrated.create_grant("legacy-workspace-agent", "mcp")
             self.assertEqual(
                 migrated.get_grant(grant_id)["workspace_id"], "legacy-workspace"
+            )
+
+    def test_public_client_registrations_can_be_recovered_without_old_token_state(self) -> None:
+        with oauth_root() as root:
+            source_path = root / "source.sqlite3"
+            target_path = root / "target.sqlite3"
+            source = OAuthAuthorizationStore(source_path, pepper=b"old-pepper")
+            source.upsert_client(
+                "persisted-chatgpt-client",
+                display_name="ChatGPT",
+                redirect_uri="https://chatgpt.com/connector/oauth/callback-id",
+                scopes="mcp",
+            )
+            source.set_client_workspaces(
+                "persisted-chatgpt-client",
+                ["workspace-a", "workspace-b"],
+            )
+            source.create_grant(
+                "persisted-chatgpt-client",
+                "mcp",
+                workspace_id="workspace-a",
+            )
+            source.upsert_client(
+                "confidential-client",
+                redirect_uri="https://example.test/callback",
+                scopes="mcp",
+                client_type="confidential",
+                token_endpoint_auth_method="client_secret_basic",
+                client_secret_digest=hashlib.sha256(b"secret").hexdigest(),
+            )
+            with closing(sqlite3.connect(source_path)) as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                conn.execute("PRAGMA journal_mode=DELETE")
+
+            target = OAuthAuthorizationStore(target_path, pepper=b"new-pepper")
+            result = recover_public_client_registrations(source_path, target_path)
+
+            self.assertEqual(result.imported_client_ids, ("persisted-chatgpt-client",))
+            self.assertEqual(result.existing_client_ids, ())
+            self.assertEqual(result.skipped_client_ids, ("confidential-client",))
+            recovered = target.get_client("persisted-chatgpt-client")
+            self.assertEqual(
+                recovered["redirect_uris"],
+                ["https://chatgpt.com/connector/oauth/callback-id"],
+            )
+            self.assertEqual(
+                recovered["workspace_ids"],
+                ["workspace-a", "workspace-b"],
+            )
+            self.assertEqual(target.list_grants(), [])
+            self.assertEqual(target.list_access_tokens(), [])
+
+            repeated = recover_public_client_registrations(source_path, target_path)
+            self.assertEqual(repeated.imported_client_ids, ())
+            self.assertEqual(
+                repeated.existing_client_ids,
+                ("persisted-chatgpt-client",),
             )
 
     def test_confidential_client_metadata_round_trips_without_plaintext_secret(self) -> None:

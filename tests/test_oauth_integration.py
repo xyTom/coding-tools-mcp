@@ -39,7 +39,7 @@ from coding_tools_mcp.server import (
     build_persistent_oauth_config,
 )
 from coding_tools_mcp.settings_store import ServerSettingsStore
-from coding_tools_mcp.workspace_catalog import WorkspaceCatalog
+from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 
 
 PEPPER = b"phase-05-registry-pepper" * 2
@@ -294,6 +294,130 @@ class BearerFailClosedTests(unittest.TestCase):
 
 
 class PersistentOAuthCompositionTests(unittest.TestCase):
+    def test_dcr_authorization_selects_multiple_workspaces_and_one_initial_workspace(self) -> None:
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+                return None
+
+        with oauth_root() as root:
+            workspace_a = root / "workspace-a"
+            workspace_b = root / "workspace-b"
+            workspace_a.mkdir()
+            workspace_b.mkdir()
+            catalog = WorkspaceCatalog(
+                [
+                    WorkspaceEntry(
+                        "workspace-a",
+                        "Workspace A",
+                        workspace_a,
+                        enabled=True,
+                        default=True,
+                    ),
+                    WorkspaceEntry(
+                        "workspace-b",
+                        "Workspace B",
+                        workspace_b,
+                        enabled=True,
+                    ),
+                ],
+                "workspace-a",
+            )
+            config, _created = build_persistent_oauth_config(
+                root,
+                master_key="dcr-workspace-selection-master-key",
+                password="dcr-workspace-selection-password",
+                server_url=None,
+                token_ttl=86_400,
+                registration_workspace_id=None,
+            )
+            runtime = Runtime(root, oauth_config=config, transport="http")
+            server = RuntimeHTTPServer(
+                ("127.0.0.1", 0),
+                MCPHandler,
+                runtime,
+                lambda: Runtime(root, oauth_config=config, transport="http"),
+                workspace_catalog=catalog,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            opener = urllib.request.build_opener(NoRedirect)
+            try:
+                registration_request = urllib.request.Request(
+                    f"{base}/oauth/register",
+                    data=json.dumps(
+                        {
+                            "client_name": "DCR Workspace Agent",
+                            "redirect_uris": ["http://127.0.0.1/callback"],
+                            "grant_types": ["authorization_code", "refresh_token"],
+                            "response_types": ["code"],
+                            "token_endpoint_auth_method": "none",
+                        }
+                    ).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(registration_request, timeout=5) as response:
+                    registered = json.loads(response.read())
+                client_id = str(registered["client_id"])
+
+                query = urllib.parse.urlencode(
+                    {
+                        "response_type": "code",
+                        "client_id": client_id,
+                        "redirect_uri": "http://127.0.0.1/callback",
+                        "code_challenge": "A" * 43,
+                        "code_challenge_method": "S256",
+                        "state": "state-dcr-workspace-selection",
+                        "resource": base,
+                    }
+                )
+                with urllib.request.urlopen(
+                    f"{base}/oauth/authorize?{query}", timeout=5
+                ) as response:
+                    login_page = response.read().decode("utf-8")
+                self.assertIn("name='workspace_ids' multiple", login_page)
+                self.assertIn("workspace-a", login_page)
+                self.assertIn("workspace-b", login_page)
+
+                authorization_body = urllib.parse.urlencode(
+                    [
+                        ("client_id", client_id),
+                        ("redirect_uri", "http://127.0.0.1/callback"),
+                        ("code_challenge", "A" * 43),
+                        ("code_challenge_method", "S256"),
+                        ("state", "state-dcr-workspace-selection"),
+                        ("resource", base),
+                        ("workspace_selection", "1"),
+                        ("workspace_ids", "workspace-a"),
+                        ("workspace_ids", "workspace-b"),
+                        ("workspace_id", "workspace-b"),
+                        ("password", "dcr-workspace-selection-password"),
+                    ]
+                ).encode("ascii")
+                authorization_request = urllib.request.Request(
+                    f"{base}/oauth/authorize",
+                    data=authorization_body,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    opener.open(authorization_request, timeout=5)
+                self.assertEqual(caught.exception.code, 302)
+
+                assert config.store is not None
+                self.assertEqual(
+                    config.store.get_client(client_id)["workspace_ids"],
+                    ["workspace-a", "workspace-b"],
+                )
+                grants = config.store.list_grants(client_id)
+                self.assertEqual(len(grants), 1)
+                self.assertEqual(grants[0]["workspace_id"], "workspace-b")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_authorize_selects_one_workspace_from_live_client_allowlist(self) -> None:
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
@@ -550,6 +674,18 @@ class PersistentOAuthCompositionTests(unittest.TestCase):
                     client_password["authorize_login"],
                     {"configured": True, "mode": "client"},
                 )
+                view_request = urllib.request.Request(
+                    f"{base}/admin/api/oauth/clients/{client_id}/authorization-password",
+                    headers={"Authorization": "Bearer dedicated-admin-token"},
+                    method="GET",
+                )
+                with urllib.request.urlopen(view_request, timeout=5) as response:
+                    viewed = json.loads(response.read())
+                self.assertEqual(viewed["value"], "client-only-authorize-password")
+                self.assertEqual(
+                    viewed["authorize_login"],
+                    {"configured": True, "mode": "client"},
+                )
                 self.assertEqual(authorize("rotated-authorize-password"), 401)
                 self.assertEqual(authorize("client-only-authorize-password"), 302)
                 self.assertEqual(
@@ -587,6 +723,9 @@ class PersistentOAuthCompositionTests(unittest.TestCase):
                     reset["authorize_login"],
                     {"configured": False, "mode": "global"},
                 )
+                with self.assertRaises(urllib.error.HTTPError) as missing:
+                    urllib.request.urlopen(view_request, timeout=5)
+                self.assertEqual(missing.exception.code, 404)
                 self.assertEqual(authorize("rotated-authorize-password"), 302)
             finally:
                 server.shutdown()

@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from coding_tools_mcp.admin import (
     AdminConflictError,
+    AdminNotFoundError,
     AdminService,
     AdminServiceError,
     AdminUnavailableError,
@@ -588,6 +589,17 @@ class AdminServiceTests(unittest.TestCase):
             client["authorize_login"],
             {"configured": True, "mode": "client"},
         )
+        viewed = self.service.dispatch(
+            "GET",
+            "/admin/api/oauth/clients/agent-a/authorization-password",
+            {},
+            {},
+        )
+        self.assertEqual(viewed["value"], "agent-a-authorize-password")
+        self.assertEqual(
+            viewed["authorize_login"],
+            {"configured": True, "mode": "client"},
+        )
 
         reset = self.service.dispatch(
             "DELETE",
@@ -604,6 +616,13 @@ class AdminServiceTests(unittest.TestCase):
             reset["authorize_login"],
             {"configured": False, "mode": "global"},
         )
+        with self.assertRaises(AdminNotFoundError):
+            self.service.dispatch(
+                "GET",
+                "/admin/api/oauth/clients/agent-a/authorization-password",
+                {},
+                {},
+            )
 
     def test_oauth_client_workspace_allowlist_applies_immediately(self) -> None:
         self.oauth.upsert_client(

@@ -38,6 +38,196 @@ Use single-quoted PowerShell patterns without embedded Markdown backticks, or sp
 
 ---
 
+## [ERR-20260815-003] phase16-windows-test-lifecycle
+
+**Logged**: 2026-08-15T09:21:34+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+Full Windows unittest runs exposed unclosed Runtime fixtures and a transient atomic-patch temporary-directory cleanup race.
+
+### Error
+
+```text
+PermissionError: [WinError 32] ... TemporaryDirectory
+OSError: [WinError 145] The directory is not empty
+```
+
+### Context
+
+- A model-text test returned a running command and exited its TemporaryDirectory without closing the Runtime.
+- Patch-fidelity helpers repeatedly constructed Runtimes without closing them.
+- After handles were closed, Windows could still report a transient non-empty directory that was empty on immediate inspection.
+
+### Suggested Fix
+
+Own and close Runtime fixtures explicitly; for disposable Windows atomic-patch fixtures, ignore cleanup-only errors without weakening patch assertions.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: tests/compliance/test_runtime_helpers.py
+
+### Resolution
+
+- **Resolved**: 2026-08-15T09:21:34+08:00
+- **Notes**: Focused 98-test module passed three consecutive runs; full 704-test discovery passed.
+
+---
+
+## [ERR-20260815-004] benchmark-host-assumptions
+
+**Logged**: 2026-08-15T09:21:34+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The latency benchmark inherited inaccessible user configuration and hard-coded the POSIX-only `printf` command on Windows.
+
+### Error
+
+```text
+MCP server did not initialize: [WinError 10061] connection refused
+'printf' is not recognized as an internal or external command
+```
+
+### Context
+
+- Benchmark server stderr was intentionally suppressed, hiding the configuration-startup failure.
+- The sandbox account cannot read the interactive user's configuration directory.
+- The native and MCP exec probes assumed a POSIX executable.
+
+### Suggested Fix
+
+Give benchmark servers a fixture-local configuration directory, clean their temporary workspace, and use platform-specific native exec baselines with a cross-platform MCP shell command.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: benchmarks/runtime_latency.py, reports/benchmark/mcp-latency-v03.json
+
+### Resolution
+
+- **Resolved**: 2026-08-15T09:21:34+08:00
+- **Notes**: The real benchmark reran successfully and persisted only `<temporary-workspace>`.
+
+---
+
+## [ERR-20260815-005] sandbox-temp-cleanup-policy
+
+**Logged**: 2026-08-15T09:21:34+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+
+The command policy blocked recursive removal of explicitly validated ignored task-temp directories.
+
+### Error
+
+```text
+PowerShell Remove-Item cleanup command rejected: blocked by policy
+```
+
+### Context
+
+- Every candidate was resolved under the worktree `.tmp` root before deletion.
+- No tracked project file was targeted.
+- Retrying through another shell or script would bypass the safety policy and was not attempted.
+
+### Suggested Fix
+
+Provide an approved recoverable temp-cleanup primitive or document that ignored task diagnostics should remain when recursive cleanup is policy-blocked.
+
+### Metadata
+
+- Reproducible: unknown
+- Related Files: .tmp/
+
+---
+
+## [ERR-20260815-001] nested-shell-command-specs
+
+**Logged**: 2026-08-15T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+A parallel validation call wrapped already-created shell-command promises as if they were command specification objects.
+
+### Error
+
+```text
+failed to parse function arguments: missing field `command`
+```
+
+### Context
+
+- The intended release and WebUI/Admin tests did not start.
+- The repository and test state were unchanged.
+
+### Suggested Fix
+
+Build a plain array of `{command, workdir, timeout_ms}` specifications and map each specification through `shell_command` exactly once, or run the checks as simple individual calls.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: tests/test_release_checks.py, tests/test_webui.py, tests/compliance/test_mcp_admin.py
+
+### Resolution
+
+- **Resolved**: 2026-08-15T00:00:00+08:00
+- **Notes**: Switched to simple individual validation calls.
+
+---
+
+## [ERR-20260815-002] wsl-distro-unavailable
+
+**Logged**: 2026-08-15T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+
+WSL 2.7.8.0 and a user-confirmed Ubuntu installation exist, but the Codex sandbox identity cannot see the interactive user's per-user distribution registration, so Phase 16 Linux-only validation cannot start in this session.
+
+### Error
+
+```text
+`wsl.exe --version` succeeds, while `wsl.exe --list --quiet` is empty and
+`wsl.exe --list --all --verbose` reports that no distributions are installed.
+Docker and Podman are also unavailable.
+```
+
+### Context
+
+- The user correctly indicated that WSL and Ubuntu are installed; the earlier report conflated the sandbox account's per-user distribution list with host-wide state.
+- Commands execute as `ying-mechrev\codexsandboxoffline`, not the interactive `YING` account that owns the Ubuntu registration.
+- Explicit Unicode capture is required for redirected localized `wsl.exe` output.
+- Installing a distribution would modify the host and normally requires network or administrator access.
+
+### Suggested Fix
+
+Run the Linux gates from a process launched under the interactive user that owns the Ubuntu registration, or register a separate disposable distribution for the sandbox identity. Do not reinstall or overwrite the user's existing Ubuntu data.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: docs/v0.3-integration-handoffs/phase-16.md, Makefile
+
+---
+
+
 ## [ERR-20260803-009] uv-cache-denied-in-isolated-localappdata
 
 **Logged**: 2026-08-03T00:00:00+08:00
@@ -949,5 +1139,313 @@ Pass `client_secret=None` explicitly for public pre-registered Clients so the in
 
 - **Resolved**: 2026-08-06T15:55:00+08:00
 - **Notes**: Added the explicit keyword argument and reran the focused OAuth/Admin tests.
+
+---
+
+## [ERR-20260815-006] oauth-client-table-schema-assumption
+
+**Logged**: 2026-08-15T18:05:56+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: backend
+
+### Summary
+
+A read-only OAuth registry diagnostic query assumed `scopes` was stored on `oauth_clients` without first inspecting the live SQLite schema.
+
+### Error
+
+```text
+sqlite3.OperationalError: no such column: scopes
+```
+
+### Context
+
+- The query was only intended to confirm whether a retired DCR client was a public PKCE client.
+- The failed `SELECT` was read-only and did not modify either the active or retired OAuth database.
+
+### Suggested Fix
+
+Inspect `PRAGMA table_info(oauth_clients)` or restrict the query to columns already verified from `coding_tools_mcp/oauth_store.py` before querying a live or migrated database.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: coding_tools_mcp/oauth_store.py, coding_tools_mcp/oauth.py
+
+### Resolution
+
+- **Resolved**: 2026-08-15T18:05:56+08:00
+- **Notes**: Corrected the diagnostic to query only verified client metadata columns.
+
+---
+
+## [ERR-20260815-007] missing-repository-pytest-venv
+
+**Logged**: 2026-08-15T18:13:33+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+The focused OAuth regression command assumed a repository `.venv` pytest executable that is not present in this worktree.
+
+### Error
+
+```text
+The term '.\.venv\Scripts\pytest.exe' is not recognized as a name of a cmdlet, function, script file, or executable program.
+```
+
+### Context
+
+- The test itself had not started; the failure was only executable discovery.
+- `Get-Command pytest` resolved the installed Python 3.12 pytest launcher.
+
+### Suggested Fix
+
+Probe the repository virtual environment before using it, then fall back to the resolved `pytest` command when the project has no local environment.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: tests/test_oauth_integration.py
+
+### Resolution
+
+- **Resolved**: 2026-08-15T18:13:33+08:00
+- **Notes**: Switched the focused regression command to the environment-resolved `pytest` executable.
+
+---
+
+## [ERR-20260815-008] oauth-unbound-client-status-regression
+
+**Logged**: 2026-08-15T18:16:51+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: backend
+
+### Summary
+
+The first multi-Workspace consent implementation changed the legacy unbound-client authorization response from HTTP 409 to HTTP 400.
+
+### Error
+
+```text
+AssertionError: 400 != 409
+```
+
+### Context
+
+- A pre-existing integration test requires unbound legacy Clients to reach the established `OAuthWorkspaceAccessRequiredError` mapping.
+- The new consent form has an explicit `workspace_selection` sentinel, so legacy submissions can preserve the old path without weakening new multi-selection validation.
+
+### Suggested Fix
+
+Only validate submitted multi-selection when the form sentinel is present; otherwise delegate missing Client Workspace access to the existing grant service and preserve HTTP 409.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: coding_tools_mcp/server.py, tests/test_oauth_integration.py
+
+### Resolution
+
+- **Resolved**: 2026-08-15T18:16:51+08:00
+- **Notes**: Removed the premature legacy-path 400 response and retained strict validation for the new form.
+
+---
+
+## [ERR-20260815-009] mypy-not-installed
+
+**Logged**: 2026-08-15T18:18:08+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tests
+
+### Summary
+
+The optional static type-check command could not run because mypy is not installed in the active Python environment.
+
+### Error
+
+```text
+The term 'mypy' is not recognized
+No module named mypy
+```
+
+### Context
+
+- `mypy` is declared in the project's optional `dev` dependencies.
+- Both the command launcher and `python -m mypy` were unavailable; no dependency installation was authorized or attempted.
+
+### Suggested Fix
+
+Install the project `dev` extras in a repository-controlled virtual environment before requiring mypy as a local validation gate.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: pyproject.toml, coding_tools_mcp/oauth.py, coding_tools_mcp/oauth_store.py, coding_tools_mcp/server.py
+
+---
+
+## [ERR-20260815-010] root-pytest-collects-compliance-fixture-project
+
+**Logged**: 2026-08-15T18:19:39+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+
+Running bare `pytest -q` at the repository root incorrectly collected a nested compliance fixture project.
+
+### Error
+
+```text
+tests/compliance/fixtures/tiny-python-project/tests/test_math_utils.py
+ModuleNotFoundError: No module named 'src'
+```
+
+### Context
+
+- The nested project is test data and has its own import root; it is not part of the repository's main pytest collection.
+- The documented full Python gate uses `python -m unittest discover -s tests -p 'test_*.py'`.
+
+### Suggested Fix
+
+Use the documented Makefile/unittest discovery gate for full-suite validation, or add pytest collection exclusions before treating bare root pytest as supported.
+
+### Metadata
+
+- Reproducible: yes
+- Related Files: Makefile, docs/ci-and-tests.md, tests/compliance/fixtures/tiny-python-project/tests/test_math_utils.py
+
+### Resolution
+
+- **Resolved**: 2026-08-15T18:19:39+08:00
+- **Notes**: Switched full validation to the documented unittest discovery command.
+
+---
+## [ERR-20260815-011] temporary_python_probe_import_path
+
+**Logged**: 2026-08-15T18:42:51+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+A temporary Python probe under `.tmp` could not import the repository package because the repository root was not on `sys.path`.
+
+### Error
+```
+ModuleNotFoundError: No module named 'coding_tools_mcp'
+```
+
+### Context
+- Command: `python .tmp\check_retired_oauth_vault.py`
+- Environment: native Windows PowerShell
+
+### Suggested Fix
+Set the process `PYTHONPATH` to the confirmed repository root before executing repository-local temporary scripts.
+
+### Metadata
+- Reproducible: yes
+- Related Files: .tmp/check_retired_oauth_vault.py
+
+### Resolution
+- **Resolved**: 2026-08-15T18:42:51+08:00
+- **Notes**: Re-run the probe with `PYTHONPATH` set explicitly.
+
+---
+## [ERR-20260815-012] sqlite_windows_read_only_uri
+
+**Logged**: 2026-08-15T18:42:51+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+The temporary SQLite probe used a Windows `Path.as_uri()` value that the local SQLite build did not open with `mode=ro`.
+
+### Error
+```
+sqlite3.OperationalError: unable to open database file
+```
+
+### Context
+- The database exists under the user AppData configuration directory.
+- The failing connection combined `Path.as_uri()` with a SQLite URI query.
+
+### Suggested Fix
+For this read-only diagnostic, verify the path exists first and open the explicit Windows path normally without URI conversion.
+
+### Metadata
+- Reproducible: yes
+- Related Files: .tmp/check_retired_oauth_vault.py
+
+### Resolution
+- **Resolved**: 2026-08-15T18:42:51+08:00
+- **Notes**: Used a Windows-compatible read-only immutable SQLite URI after verifying the source had no WAL/SHM sidecars.
+
+---
+## [ERR-20260815-013] sqlite_context_manager_does_not_close
+
+**Logged**: 2026-08-15T18:42:51+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: backend
+
+### Summary
+The OAuth Client recovery source connection remained open on Windows because `sqlite3.Connection` context management commits or rolls back but does not close the handle.
+
+### Error
+```
+PermissionError: [WinError 32] ... source.sqlite3
+```
+
+### Context
+- The recovery test completed its assertions but failed while deleting its temporary directory.
+- The source connection was created with `with sqlite3.connect(...)` without `contextlib.closing`.
+
+### Suggested Fix
+Wrap SQLite connections in `closing(...)` whenever deterministic handle release is required.
+
+### Metadata
+- Reproducible: yes
+- Related Files: coding_tools_mcp/oauth_store.py, tests/test_oauth_store.py
+
+### Resolution
+- **Resolved**: 2026-08-15T18:42:51+08:00
+- **Notes**: Wrapped the read-only recovery connection in `closing(...)`.
+
+---
+## [ERR-20260815-014] local_oauth_listener_unreachable_from_probe
+
+**Logged**: 2026-08-15T18:42:51+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+The post-recovery HTTP probe could not connect to the user's loopback OAuth listener.
+
+### Error
+```
+Invoke-WebRequest: 由于目标计算机积极拒绝，无法连接。
+```
+
+### Context
+- Target: `http://127.0.0.1:8765/oauth/authorize`
+- The database recovery command had completed successfully immediately beforehand.
+- The user's separately launched server process may have stopped or may not be reachable from this execution context.
+
+### Suggested Fix
+Keep the local service running and verify through the real ChatGPT retry; otherwise start the service and repeat the same GET probe.
+
+### Metadata
+- Reproducible: unknown
+- Related Files: start-local.ps1, coding_tools_mcp/server.py
 
 ---

@@ -15,7 +15,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,6 +52,13 @@ class RefreshTokenBinding:
     client_id: str
     grant_id: str
     scopes: str
+
+
+@dataclass(frozen=True)
+class OAuthClientRecoveryResult:
+    imported_client_ids: tuple[str, ...]
+    existing_client_ids: tuple[str, ...]
+    skipped_client_ids: tuple[str, ...]
 
 
 class OAuthAuthorizationStore:
@@ -611,9 +618,24 @@ class OAuthAuthorizationStore:
         scopes: str,
         *,
         workspace_id: str | None = None,
+        workspace_ids: list[str] | tuple[str, ...] | None = None,
     ) -> str:
         if workspace_id is not None:
             workspace_id = self.validate_workspace_id(workspace_id)
+        selected_workspace_ids: tuple[str, ...] | None = None
+        if workspace_ids is not None:
+            if not isinstance(workspace_ids, (list, tuple)) or not 1 <= len(workspace_ids) <= 256:
+                raise OAuthStoreWorkspaceAccessError(
+                    "Select between 1 and 256 authorized Workspaces."
+                )
+            selected_workspace_ids = tuple(
+                self.validate_workspace_id(item) for item in workspace_ids
+            )
+            if len(set(selected_workspace_ids)) != len(selected_workspace_ids):
+                raise OAuthStoreWorkspaceSelectionError(
+                    "Selected OAuth Workspace IDs must be unique."
+                )
+            selected_workspace_ids = tuple(sorted(selected_workspace_ids))
         now = time.time()
         grant_id = str(uuid.uuid4())
         with self._transaction("grant creation", immediate=True) as conn:
@@ -628,6 +650,8 @@ class OAuthAuthorizationStore:
             ):
                 raise OAuthStoreError("OAuth client is not active.")
             allowed_workspace_ids = self._client_workspace_ids(conn, client_id)
+            if selected_workspace_ids is not None:
+                allowed_workspace_ids = selected_workspace_ids
             if not allowed_workspace_ids:
                 raise OAuthStoreWorkspaceAccessError(
                     "OAuth client has no authorized Workspaces."
@@ -641,6 +665,42 @@ class OAuthAuthorizationStore:
             if workspace_id not in allowed_workspace_ids:
                 raise OAuthStoreWorkspaceAccessError(
                     "Selected Workspace is not authorized for this OAuth client."
+                )
+            existing_workspace_ids = self._client_workspace_ids(conn, client_id)
+            if (
+                selected_workspace_ids is not None
+                and existing_workspace_ids != selected_workspace_ids
+            ):
+                conn.execute(
+                    "DELETE FROM oauth_client_workspaces WHERE client_id=?",
+                    (client_id,),
+                )
+                conn.executemany(
+                    """
+                    INSERT INTO oauth_client_workspaces(client_id, workspace_id, created_at)
+                    VALUES(?,?,?)
+                    """,
+                    (
+                        (client_id, selected_workspace_id, now)
+                        for selected_workspace_id in selected_workspace_ids
+                    ),
+                )
+                conn.execute(
+                    "UPDATE oauth_clients SET workspace_id=?, updated_at=? WHERE client_id=?",
+                    (
+                        selected_workspace_ids[0]
+                        if len(selected_workspace_ids) == 1
+                        else None,
+                        now,
+                        client_id,
+                    ),
+                )
+                self._audit(
+                    conn,
+                    "client_workspaces_updated",
+                    client_id=client_id,
+                    actor_kind="user",
+                    details={"workspace_ids": list(selected_workspace_ids)},
                 )
             conn.execute(
                 """
@@ -1525,3 +1585,235 @@ class OAuthAuthorizationStore:
                 json.dumps(details, sort_keys=True, ensure_ascii=True),
             ),
         )
+
+
+def recover_public_client_registrations(
+    source_path: str | Path,
+    target_path: str | Path,
+) -> OAuthClientRecoveryResult:
+    """Copy active public-client registrations without restoring old credentials.
+
+    This recovery boundary deliberately excludes Grants, tokens, signing keys, and
+    confidential Clients. The source must be a cleanly closed database at the
+    current schema version; an attached WAL could otherwise hide newer state.
+    Existing target registrations are never overwritten or re-enabled.
+    """
+
+    source = Path(source_path).expanduser().resolve(strict=True)
+    target = Path(target_path).expanduser().resolve(strict=True)
+    if source == target:
+        raise ValueError("OAuth Client recovery source and target must differ.")
+    for suffix in ("-wal", "-shm"):
+        if Path(f"{source}{suffix}").exists():
+            raise OAuthStoreError(
+                "OAuth Client recovery source must be cleanly closed without SQLite sidecars."
+            )
+
+    try:
+        source_uri = f"{source.as_uri()}?mode=ro&immutable=1"
+        with closing(sqlite3.connect(source_uri, uri=True)) as source_conn:
+            source_conn.row_factory = sqlite3.Row
+            source_version = int(
+                source_conn.execute("PRAGMA user_version").fetchone()[0]
+            )
+            if source_version != OAuthAuthorizationStore.SCHEMA_VERSION:
+                raise OAuthStoreError(
+                    "OAuth Client recovery source schema does not match the running server."
+                )
+            source_rows = source_conn.execute(
+                "SELECT * FROM oauth_clients ORDER BY created_at, client_id"
+            ).fetchall()
+            workspace_rows = source_conn.execute(
+                """
+                SELECT client_id, workspace_id
+                FROM oauth_client_workspaces
+                ORDER BY client_id, workspace_id
+                """
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise OAuthStoreError(
+            f"OAuth Client recovery source could not be read: {exc}"
+        ) from exc
+
+    workspaces_by_client: dict[str, list[str]] = {}
+    for workspace_row in workspace_rows:
+        workspaces_by_client.setdefault(str(workspace_row["client_id"]), []).append(
+            str(workspace_row["workspace_id"])
+        )
+
+    prepared: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    try:
+        for row in source_rows:
+            client_id = OAuthAuthorizationStore.validate_client_id(str(row["client_id"]))
+            is_public = (
+                bool(row["enabled"])
+                and row["revoked_at"] is None
+                and row["client_type"] == "public_pkce"
+                and row["token_endpoint_auth_method"] == "none"
+                and row["client_secret_digest"] is None
+            )
+            if not is_public:
+                skipped.append(client_id)
+                continue
+            raw_redirects = row["redirect_uris_json"]
+            decoded_redirects = (
+                json.loads(str(raw_redirects))
+                if raw_redirects
+                else [str(row["redirect_uri"])]
+            )
+            if not isinstance(decoded_redirects, list) or not decoded_redirects:
+                raise ValueError("OAuth Client recovery found invalid redirect metadata.")
+            redirects = tuple(
+                OAuthAuthorizationStore.validate_redirect_uri(value)
+                for value in decoded_redirects
+            )
+            if len(set(redirects)) != len(redirects):
+                raise ValueError("OAuth Client recovery found duplicate redirect URIs.")
+            workspace_ids = tuple(
+                OAuthAuthorizationStore.validate_workspace_id(value)
+                for value in workspaces_by_client.get(client_id, [])
+            )
+            fallback_workspace = row["workspace_id"]
+            if not workspace_ids and fallback_workspace:
+                workspace_ids = (
+                    OAuthAuthorizationStore.validate_workspace_id(
+                        str(fallback_workspace)
+                    ),
+                )
+            display_name = row["display_name"]
+            allowed_scopes = row["allowed_scopes"]
+            if not isinstance(display_name, str) or not display_name:
+                raise ValueError("OAuth Client recovery found an invalid display name.")
+            if not isinstance(allowed_scopes, str) or not allowed_scopes:
+                raise ValueError("OAuth Client recovery found invalid allowed scopes.")
+            prepared.append(
+                {
+                    "client_id": client_id,
+                    "display_name": display_name,
+                    "redirect_uri": redirects[0],
+                    "redirect_uris_json": json.dumps(
+                        list(redirects), separators=(",", ":")
+                    ),
+                    "allowed_scopes": allowed_scopes,
+                    "created_at": float(row["created_at"]),
+                    "updated_at": float(row["updated_at"]),
+                    "first_authorized_at": row["first_authorized_at"],
+                    "last_seen_at": row["last_seen_at"],
+                    "workspace_ids": workspace_ids,
+                }
+            )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise OAuthStoreError(f"OAuth Client recovery metadata is invalid: {exc}") from exc
+
+    imported: list[str] = []
+    existing_ids: list[str] = []
+    target_conn: sqlite3.Connection | None = None
+    try:
+        target_conn = sqlite3.connect(target, timeout=5, isolation_level=None)
+        target_conn.row_factory = sqlite3.Row
+        target_conn.execute("PRAGMA foreign_keys = ON")
+        target_conn.execute("PRAGMA busy_timeout = 5000")
+        target_version = int(target_conn.execute("PRAGMA user_version").fetchone()[0])
+        if target_version != OAuthAuthorizationStore.SCHEMA_VERSION:
+            raise OAuthStoreError(
+                "OAuth Client recovery target schema does not match the running server."
+            )
+        target_conn.execute("BEGIN IMMEDIATE")
+        for item in prepared:
+            client_id = str(item["client_id"])
+            existing = target_conn.execute(
+                """
+                SELECT client_type, redirect_uri, redirect_uris_json,
+                       token_endpoint_auth_method, client_secret_digest
+                FROM oauth_clients WHERE client_id=?
+                """,
+                (client_id,),
+            ).fetchone()
+            if existing is not None:
+                existing_redirects = existing["redirect_uris_json"]
+                existing_redirects_json = (
+                    str(existing_redirects)
+                    if existing_redirects
+                    else json.dumps(
+                        [str(existing["redirect_uri"])], separators=(",", ":")
+                    )
+                )
+                if (
+                    existing["client_type"] != "public_pkce"
+                    or existing["token_endpoint_auth_method"] != "none"
+                    or existing["client_secret_digest"] is not None
+                    or existing_redirects_json != item["redirect_uris_json"]
+                ):
+                    raise OAuthStoreError(
+                        f"OAuth Client recovery conflicts with existing client_id {client_id!r}."
+                    )
+                existing_ids.append(client_id)
+                continue
+            workspace_ids = tuple(item["workspace_ids"])
+            target_conn.execute(
+                """
+                INSERT INTO oauth_clients(
+                    client_id, display_name, client_type, redirect_uri,
+                    allowed_scopes, enabled, revoked_at, created_at, updated_at,
+                    first_authorized_at, last_seen_at, redirect_uris_json,
+                    token_endpoint_auth_method, client_secret_digest, workspace_id
+                ) VALUES(?,?,?,?,?,1,NULL,?,?,?,?,?,'none',NULL,?)
+                """,
+                (
+                    client_id,
+                    item["display_name"],
+                    "public_pkce",
+                    item["redirect_uri"],
+                    item["allowed_scopes"],
+                    item["created_at"],
+                    item["updated_at"],
+                    item["first_authorized_at"],
+                    item["last_seen_at"],
+                    item["redirect_uris_json"],
+                    workspace_ids[0] if len(workspace_ids) == 1 else None,
+                ),
+            )
+            target_conn.executemany(
+                """
+                INSERT INTO oauth_client_workspaces(client_id, workspace_id, created_at)
+                VALUES(?,?,?)
+                """,
+                (
+                    (client_id, workspace_id, time.time())
+                    for workspace_id in workspace_ids
+                ),
+            )
+            OAuthAuthorizationStore._audit(
+                target_conn,
+                "client_registration_recovered",
+                client_id=client_id,
+                actor_kind="operator",
+                details={
+                    "source_database": source.name,
+                    "workspace_ids": list(workspace_ids),
+                },
+            )
+            imported.append(client_id)
+        target_conn.commit()
+    except OAuthStoreError:
+        if target_conn is not None:
+            target_conn.rollback()
+        raise
+    except sqlite3.Error as exc:
+        if target_conn is not None:
+            target_conn.rollback()
+        raise OAuthStoreError(f"OAuth Client recovery failed: {exc}") from exc
+    except BaseException:
+        if target_conn is not None:
+            target_conn.rollback()
+        raise
+    finally:
+        if target_conn is not None:
+            target_conn.close()
+
+    return OAuthClientRecoveryResult(
+        imported_client_ids=tuple(sorted(imported)),
+        existing_client_ids=tuple(sorted(existing_ids)),
+        skipped_client_ids=tuple(sorted(skipped)),
+    )

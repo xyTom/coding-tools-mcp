@@ -72,6 +72,7 @@ from .oauth import (
     MAX_PENDING_CODES,
     OAUTH_TOKEN_TTL_SECONDS,
     OAuthClientAuthenticationError,
+    OAuthClient,
     OAuthAuthorizationPassword,
     OAuthConfig,
     OAuthIdentity,
@@ -6607,29 +6608,40 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         state: str,
         resource: str,
         workspace_ids: tuple[str, ...] = (),
+        selected_workspace_ids: tuple[str, ...] = (),
         selected_workspace_id: str = "",
         error: str = "",
     ) -> str:
         def esc(v: str) -> str:
             return html.escape(v, quote=True)
         error_block = f'<p style="color:red">{html.escape(error)}</p>' if error else ""
-        if len(workspace_ids) == 1:
-            workspace_id = workspace_ids[0]
-            workspace_control = (
-                f"<p>Workspace: <strong>{esc(workspace_id)}</strong></p>"
-                f"<input type='hidden' name='workspace_id' value='{esc(workspace_id)}'>"
-            )
-        elif workspace_ids:
-            options = ["<option value=''>Select a Workspace</option>"]
+        if workspace_ids:
+            authorized_options: list[str] = []
+            initial_options = ["<option value=''>Select the initial Workspace</option>"]
             for workspace_id in workspace_ids:
-                selected = " selected" if workspace_id == selected_workspace_id else ""
-                options.append(
-                    f"<option value='{esc(workspace_id)}'{selected}>{esc(workspace_id)}</option>"
+                authorized_selected = (
+                    " selected" if workspace_id in selected_workspace_ids else ""
+                )
+                initial_selected = (
+                    " selected" if workspace_id == selected_workspace_id else ""
+                )
+                authorized_options.append(
+                    f"<option value='{esc(workspace_id)}'{authorized_selected}>{esc(workspace_id)}</option>"
+                )
+                initial_options.append(
+                    f"<option value='{esc(workspace_id)}'{initial_selected}>{esc(workspace_id)}</option>"
                 )
             workspace_control = (
-                "<label>Workspace<select name='workspace_id' required>"
-                + "".join(options)
+                "<input type='hidden' name='workspace_selection' value='1'>"
+                "<label>Authorized Workspaces"
+                f"<select name='workspace_ids' multiple required size='{min(len(workspace_ids), 8)}'>"
+                + "".join(authorized_options)
                 + "</select></label>"
+                "<p><small>Select one or more Workspaces. The OAuth Client keeps this allowlist.</small></p>"
+                "<label>Initial Workspace<select name='workspace_id' required>"
+                + "".join(initial_options)
+                + "</select></label>"
+                "<p><small>Each OAuth Grant and HTTP Session remains bound to one initial Workspace.</small></p>"
             )
         else:
             workspace_control = (
@@ -6660,6 +6672,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             f"<button type='submit'{disabled}>Authorize</button>"
             "</form></body></html>"
         )
+
+    def _oauth_workspace_ids(self, client: OAuthClient) -> tuple[str, ...]:
+        catalog = getattr(self.server, "workspace_catalog", None)
+        if isinstance(catalog, WorkspaceCatalog):
+            return tuple(entry.id for entry in catalog.enabled_entries())
+        return client.workspace_ids
 
     def _read_oauth_body(self) -> bytes | None:
         raw_len = self.headers.get("Content-Length")
@@ -6712,10 +6730,17 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self._send_html("<h2>Error</h2><p>resource must identify this MCP server</p>", status=400)
             return
 
+        workspace_ids = self._oauth_workspace_ids(client)
+        selected_workspace_id = (
+            client.workspace_ids[0] if len(client.workspace_ids) == 1 else ""
+        )
+
         self._send_html(self._oauth_login_page(
             client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
             code_challenge_method=code_challenge_method, state=state, resource=resource,
-            workspace_ids=client.workspace_ids,
+            workspace_ids=workspace_ids,
+            selected_workspace_ids=client.workspace_ids,
+            selected_workspace_id=selected_workspace_id,
         ))
 
     def handle_oauth_authorize_post(self) -> None:
@@ -6739,6 +6764,10 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         resource = _p("resource")
         password = _p("password")
         workspace_id = _p("workspace_id")
+        workspace_selection_submitted = _p("workspace_selection") == "1"
+        selected_workspace_ids = tuple(
+            item for item in params.get("workspace_ids", []) if item
+        )
         workspace_ids: tuple[str, ...] = ()
 
         def fail(error: str, status: int = 400) -> None:
@@ -6746,6 +6775,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 client_id=client_id, redirect_uri=redirect_uri, code_challenge=code_challenge,
                 code_challenge_method=code_challenge_method, state=state, resource=resource,
                 workspace_ids=workspace_ids,
+                selected_workspace_ids=selected_workspace_ids,
                 selected_workspace_id=workspace_id,
                 error=error,
             ), status=status)
@@ -6759,7 +6789,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if client is None or not redirect_allowed:
             fail("Invalid client or redirect URI")
             return
-        workspace_ids = client.workspace_ids
+        workspace_ids = self._oauth_workspace_ids(client)
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
             fail("Invalid PKCE parameters")
             return
@@ -6772,6 +6802,25 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         ):
             fail("Invalid password", status=401)
             return
+        if workspace_selection_submitted:
+            if not selected_workspace_ids:
+                fail("Select at least one authorized Workspace")
+                return
+            if len(set(selected_workspace_ids)) != len(selected_workspace_ids):
+                fail("Selected Workspace IDs must be unique")
+                return
+            if any(item not in workspace_ids for item in selected_workspace_ids):
+                fail("Selected Workspace is unavailable")
+                return
+            if not workspace_id:
+                if len(selected_workspace_ids) == 1:
+                    workspace_id = selected_workspace_ids[0]
+                else:
+                    fail("Select the initial Workspace")
+                    return
+            if workspace_id not in selected_workspace_ids:
+                fail("Initial Workspace must be in the authorized Workspace selection")
+                return
         try:
             grant_id = create_authorization_grant(
                 cfg,
@@ -6779,6 +6828,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 redirect_uri=redirect_uri,
                 scopes="mcp",
                 workspace_id=workspace_id or None,
+                workspace_ids=(selected_workspace_ids if workspace_selection_submitted else None),
             )
         except OAuthWorkspaceAccessRequiredError:
             fail(
@@ -7062,6 +7112,7 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         admin_service: AdminService | None = None,
         admin_token: str | None = None,
         operator_service: OperatorAPIService | None = None,
+        workspace_catalog: WorkspaceCatalog | None = None,
         session_limits: HTTPSessionLimits | None = None,
         runner_route_service: RemoteMcpRouteService | None = None,
         runner_credentials: RunnerCredentialStore | None = None,
@@ -7075,6 +7126,7 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         self.admin_token = admin_token or None
         self.admin_sessions = AdminSessionStore() if self.admin_token else None
         self.operator_service = operator_service
+        self.workspace_catalog = workspace_catalog
         self.runner_route_service = runner_route_service
         self.runner_credentials = runner_credentials
         self.runner_registry = runner_registry
@@ -8099,6 +8151,7 @@ def run_http(args: argparse.Namespace) -> int:
         admin_service=admin_service,
         admin_token=admin_token,
         operator_service=operator_service,
+        workspace_catalog=workspace_catalog,
         session_limits=session_limits,
         runner_route_service=runner_route_service,
         runner_credentials=runner_credentials,

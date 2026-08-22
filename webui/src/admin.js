@@ -351,6 +351,14 @@ function createApiClient(getCsrfToken, fetchImpl = globalThis.fetch, onActivity 
   return { request };
 }
 
+async function fetchOAuthCollection(api, overviewStatus, collection) {
+  if (overviewStatus?.oauth?.available === false) {
+    return { available: false, items: [] };
+  }
+  const payload = await api.request(`/oauth/${encodeURIComponent(collection)}`);
+  return { ...payload, available: true };
+}
+
 function createNode(documentRef, tag, options = {}) {
   const node = documentRef.createElement(tag);
   if (options.className) node.className = options.className;
@@ -596,6 +604,11 @@ function renderOAuthItems(
       configure.addEventListener('click', () => onClientPassword?.(clientId, 'configure', configure));
       actions.append(configure);
       if (clientMode) {
+        const view = createNode(documentRef, 'button', {
+          type: 'button', className: 'secondary', text: '查看专属密码',
+        });
+        view.addEventListener('click', () => onClientPassword?.(clientId, 'view', view));
+        actions.append(view);
         const reset = createNode(documentRef, 'button', {
           type: 'button', className: 'secondary', text: '改用全局密码',
         });
@@ -670,7 +683,7 @@ function initAdminApp(documentRef = document) {
     authenticated: false, csrfToken: '', settings: null, workspaces: [], workspaceRevision: '', gateway: null,
     gatewayRevision: '', editingGatewayAlias: '', conversationPage: 1, conversationTotal: 0,
     selectedConversation: null, messagePage: 1, contextPage: 1,
-    clientPasswordClientId: '', clientPasswordReturnFocus: null, section: 'overview',
+    clientPasswordClientId: '', clientPasswordMode: 'set', clientPasswordReturnFocus: null, section: 'overview',
     overviewStatus: null, conversations: [], oauthClients: [], secrets: [],
     activityLogs: [], selectedActivityLogId: null,
   };
@@ -709,7 +722,15 @@ function initAdminApp(documentRef = document) {
     );
     clientPasswordError();
     state.clientPasswordClientId = '';
+    state.clientPasswordMode = 'set';
     state.clientPasswordReturnFocus = null;
+    byId('clientPasswordTitle').textContent = '设置 Client 专属密码';
+    byId('clientPasswordHelp').textContent = '保存后立即生效，只影响这个 Client；未设置或重置后使用全局 OAuth Authorize 密码。';
+    byId('clientPasswordCancel').textContent = '取消';
+    byId('clientPasswordSubmit').hidden = false;
+    byId('clientPasswordSubmit').textContent = '保存并立即生效';
+    byId('clientPasswordValue').readOnly = false;
+    byId('clientPasswordValue').required = true;
     if (dialog?.open) dialog.close();
     if (restoreFocus && returnFocus && typeof returnFocus.focus === 'function') {
       returnFocus.focus();
@@ -717,6 +738,7 @@ function initAdminApp(documentRef = document) {
   }
 
   function openClientPasswordDialog(clientId, returnFocus) {
+    state.clientPasswordMode = 'set';
     state.clientPasswordClientId = clientId;
     state.clientPasswordReturnFocus = returnFocus;
     byId('clientPasswordClientId').textContent = clientId;
@@ -729,6 +751,36 @@ function initAdminApp(documentRef = document) {
     clientPasswordError();
     byId('clientPasswordDialog').showModal();
     byId('clientPasswordValue').focus();
+  }
+
+  async function openClientPasswordViewDialog(clientId, returnFocus) {
+    state.clientPasswordMode = 'view';
+    state.clientPasswordClientId = clientId;
+    state.clientPasswordReturnFocus = returnFocus;
+    byId('clientPasswordClientId').textContent = clientId;
+    byId('clientPasswordTitle').textContent = '查看 Client 专属密码';
+    byId('clientPasswordHelp').textContent = '这是该 Client 的专属 OAuth Authorize 密码，默认隐藏；点击“显示”可临时查看。';
+    byId('clientPasswordValue').value = '';
+    byId('clientPasswordValue').readOnly = true;
+    byId('clientPasswordValue').required = false;
+    byId('clientPasswordCancel').textContent = '关闭';
+    byId('clientPasswordSubmit').hidden = true;
+    setPasswordVisibility(
+      byId('clientPasswordValue'),
+      byId('clientPasswordToggle'),
+      false,
+    );
+    clientPasswordError();
+    byId('clientPasswordDialog').showModal();
+    byId('clientPasswordToggle').focus();
+    try {
+      const result = await api.request(`/oauth/clients/${encodeURIComponent(clientId)}/authorization-password`, { method: 'GET' });
+      if (state.clientPasswordClientId !== clientId || state.clientPasswordMode !== 'view') return;
+      byId('clientPasswordValue').value = String(result.value || '');
+    } catch (error) {
+      if (state.clientPasswordClientId !== clientId || state.clientPasswordMode !== 'view') return;
+      clientPasswordError(error.message);
+    }
   }
 
   function updateGatewayTransportFields() {
@@ -1242,8 +1294,21 @@ function initAdminApp(documentRef = document) {
   async function loadGateway() { const payload = await api.request('/gateway'); renderGateway(payload); return payload; }
 
   async function loadOAuth() {
-    const collection = byId('oauthCollection').value;
-    const payload = await api.request(`/oauth/${encodeURIComponent(collection)}`);
+    const collectionControl = byId('oauthCollection');
+    const reloadControl = byId('reloadOAuth');
+    const collection = collectionControl.value;
+    const payload = await fetchOAuthCollection(api, state.overviewStatus, collection);
+    const available = payload.available !== false;
+    collectionControl.disabled = !available;
+    reloadControl.disabled = !available;
+    if (!available) {
+      state.oauthClients = [];
+      byId('oauthList').replaceChildren(createNode(documentRef, 'p', {
+        className: 'muted',
+        text: translateUi('OAuth 模式未启用。当前服务使用静态 bearer token；其他 Admin 功能仍可正常使用。如需管理 OAuth 客户端，请使用 --oauth-mode 重启服务。'),
+      }));
+      return payload;
+    }
     if (collection === 'clients') state.oauthClients = payload.items || [];
     renderOAuthItems(byId('oauthList'), payload.items || [], collection, async (resource, id, action, button) => {
       const accepted = await confirmDestructive(documentRef, {
@@ -1258,6 +1323,10 @@ function initAdminApp(documentRef = document) {
     }, async (clientId, action, button) => {
       if (action === 'configure') {
         openClientPasswordDialog(clientId, button);
+        return;
+      }
+      if (action === 'view') {
+        await openClientPasswordViewDialog(clientId, button);
         return;
       }
       const accepted = await confirmDestructive(documentRef, {
@@ -1615,6 +1684,10 @@ function initAdminApp(documentRef = document) {
   byId('clientPasswordForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const clientId = state.clientPasswordClientId;
+    if (state.clientPasswordMode === 'view') {
+      closeClientPasswordDialog();
+      return;
+    }
     const value = byId('clientPasswordValue').value;
     try {
       await api.request(`/oauth/clients/${encodeURIComponent(clientId)}/authorization-password`, {
@@ -1670,6 +1743,7 @@ globalThis.McpAdminApp = {
   gatewayServerTemplate,
   gatewayExposurePreview,
   createApiClient,
+  fetchOAuthCollection,
   renderConversationItems,
   renderConversationDetail,
   renderOAuthItems,
@@ -1684,4 +1758,4 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => initAdminApp(document));
 }
 
-export { ApiError, sanitizeAdminValue, containsCredentialControl, restartImpactCount, createAdminSession, restoreAdminSession, revokeAdminSession, gatewayServerFromForm, gatewayServerTemplate, gatewayExposurePreview, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, setPasswordVisibility, setAuthenticationUi, initAdminApp };
+export { ApiError, sanitizeAdminValue, containsCredentialControl, restartImpactCount, createAdminSession, restoreAdminSession, revokeAdminSession, gatewayServerFromForm, gatewayServerTemplate, gatewayExposurePreview, createApiClient, fetchOAuthCollection, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, setPasswordVisibility, setAuthenticationUi, initAdminApp };

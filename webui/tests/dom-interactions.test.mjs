@@ -6,6 +6,7 @@ import {
   confirmDestructive,
   createAdminSession,
   createApiClient,
+  fetchOAuthCollection,
   handleSettingsSave,
   renderOAuthItems,
   renderConversationDetail,
@@ -177,6 +178,41 @@ test('Admin API client relies on HttpOnly session cookie and CSRF, not Authoriza
   assert.equal(captured.options.cache, 'no-store');
 });
 
+test('static bearer Admin mode treats OAuth as optional without requesting its unavailable backend', async () => {
+  const calls = [];
+  const api = {
+    async request(path) {
+      calls.push(path);
+      throw new Error('OAuth endpoint must not be requested when status marks it unavailable.');
+    },
+  };
+
+  const payload = await fetchOAuthCollection(api, {
+    oauth: { available: false },
+  }, 'clients');
+
+  assert.deepEqual(payload, { available: false, items: [] });
+  assert.deepEqual(calls, []);
+});
+
+test('OAuth-enabled Admin mode requests the selected collection', async () => {
+  const calls = [];
+  const api = {
+    async request(path) {
+      calls.push(path);
+      return { items: [{ client_id: 'client-a' }] };
+    },
+  };
+
+  const payload = await fetchOAuthCollection(api, {
+    oauth: { available: true },
+  }, 'clients');
+
+  assert.equal(payload.available, true);
+  assert.deepEqual(payload.items, [{ client_id: 'client-a' }]);
+  assert.deepEqual(calls, ['/oauth/clients']);
+});
+
 test('successful authentication hides and clears the password field until sign-out', () => {
   const documentRef = new FakeDocument();
   const form = documentRef.register('authForm', new FakeNode(documentRef, 'form'));
@@ -231,11 +267,13 @@ test('OAuth client cards expose dedicated-password rotate and global-fallback ac
 
   assert.match(root.textContent, /专属密码/);
   assert.match(root.textContent, /轮换专属密码/);
+  assert.match(root.textContent, /查看专属密码/);
   assert.match(root.textContent, /改用全局密码/);
   const buttons = descendants(root).filter((node) => node.tagName === 'BUTTON');
   buttons.find((node) => node.textContent === '轮换专属密码').click();
+  buttons.find((node) => node.textContent === '查看专属密码').click();
   buttons.find((node) => node.textContent === '改用全局密码').click();
-  assert.deepEqual(calls, [['client-a', 'configure'], ['client-a', 'reset']]);
+  assert.deepEqual(calls, [['client-a', 'configure'], ['client-a', 'view'], ['client-a', 'reset']]);
 });
 
 test('OAuth client cards edit multiple allowed Workspaces immediately', () => {

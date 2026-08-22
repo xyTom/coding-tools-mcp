@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import copy
 import json
+import locale
 import os
 import queue
 import re
@@ -1214,6 +1215,12 @@ class StdioUpstreamClient(BaseUpstreamClient):
         if process is None or process.poll() is not None:
             return
         try:
+            stdin = getattr(process, "stdin", None)
+            if stdin is not None:
+                try:
+                    stdin.close()
+                except (OSError, ValueError):
+                    pass
             if os.name == "nt":
                 process.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
             else:
@@ -1222,6 +1229,7 @@ class StdioUpstreamClient(BaseUpstreamClient):
         except Exception:  # noqa: BLE001
             try:
                 process.kill()
+                process.wait(timeout=2)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1375,10 +1383,41 @@ class StdioUpstreamClient(BaseUpstreamClient):
     def _read_stderr(self) -> None:
         if self.process.stderr is None:
             return
-        for line in self.process.stderr:
-            item = line.rstrip("\r\n")[:500]
-            with self._stderr_lock:
-                self._stderr_lines.append(item)
+        binary_stderr = getattr(self.process.stderr, "buffer", None)
+        if binary_stderr is not None:
+            self._read_stderr_binary(binary_stderr)
+            return
+        try:
+            for line in self.process.stderr:
+                self._append_stderr_line(line)
+        except (UnicodeError, OSError, ValueError):
+            # stderr is diagnostic only. A decoder failure must never stop the
+            # drain path in a way that can fill the child's pipe and deadlock
+            # an otherwise healthy MCP stdout response.
+            self._append_stderr_line("[upstream stderr decoding failed]")
+
+    def _read_stderr_binary(self, stream: Any) -> None:
+        try:
+            while True:
+                raw_line = stream.readline(65_536)
+                if not raw_line:
+                    return
+                try:
+                    line = raw_line.decode("utf-8")
+                except UnicodeDecodeError:
+                    preferred = locale.getpreferredencoding(False) or "utf-8"
+                    try:
+                        line = raw_line.decode(preferred)
+                    except (LookupError, UnicodeDecodeError):
+                        line = raw_line.decode("utf-8", errors="replace")
+                self._append_stderr_line(line)
+        except (OSError, ValueError):
+            return
+
+    def _append_stderr_line(self, line: str) -> None:
+        item = line.rstrip("\r\n")[:500]
+        with self._stderr_lock:
+            self._stderr_lines.append(item)
 
     def _process_exited_error(self) -> UpstreamError:
         with self._stderr_lock:
@@ -1583,6 +1622,7 @@ class UpstreamManager:
                 category="validation",
             )
         alias, _separator, _remote = name.partition("__")
+        client: BaseUpstreamClient | None = None
         try:
             client = self._get_or_create_client(alias)
             raw_result = client.call_tool_raw(tool.remote_name, arguments or {})
@@ -1615,6 +1655,16 @@ class UpstreamManager:
                 )
             return budgeted
         except UpstreamError as exc:
+            if (
+                isinstance(client, StdioUpstreamClient)
+                and exc.code
+                in {
+                    "UPSTREAM_TIMEOUT",
+                    "UPSTREAM_DISCONNECTED",
+                    "UPSTREAM_PROCESS_EXITED",
+                }
+            ):
+                self._discard_client(alias, client)
             return budget_tool_result(
                 upstream_error_result(
                     exc.code,
@@ -1627,6 +1677,8 @@ class UpstreamManager:
                 )
             )
         except OSError:
+            if isinstance(client, StdioUpstreamClient):
+                self._discard_client(alias, client)
             return budget_tool_result(
                 upstream_error_result(
                     "UPSTREAM_DISCONNECTED",
@@ -1646,6 +1698,21 @@ class UpstreamManager:
                     tool_name=name,
                 )
             )
+
+    def _discard_client(self, alias: str, client: BaseUpstreamClient) -> None:
+        """Evict and reap one failed live client without changing the snapshot."""
+        lock = self._client_locks.get(alias)
+        if lock is None:
+            client.close()
+            return
+        removed = False
+        with lock:
+            with self._lifecycle_condition:
+                if self._clients.get(alias) is client:
+                    self._clients.pop(alias, None)
+                    removed = True
+        if removed:
+            client.close()
 
     def status_payload(self) -> dict[str, Any]:
         state = self._state

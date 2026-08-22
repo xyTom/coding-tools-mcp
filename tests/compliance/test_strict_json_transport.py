@@ -27,6 +27,7 @@ from coding_tools_mcp.upstream import (
     MAX_RESPONSE_BYTES,
     StdioUpstreamClient,
     UpstreamError,
+    UpstreamManager,
     decode_http_rpc_response,
 )
 
@@ -532,6 +533,44 @@ class StrictJSONTransportTests(unittest.TestCase):
         self.assertIsInstance(second, dict)
         self.assertEqual(cast(dict[str, Any], second)["id"], 2)
         text_pipe.close()
+
+    def test_upstream_stdio_stderr_drain_survives_non_utf8_windows_bytes(self) -> None:
+        text_pipe = io.TextIOWrapper(
+            io.BytesIO(b"\xa8\nFastMCP diagnostic\r\n"),
+            encoding="utf-8",
+            errors="strict",
+            newline="",
+        )
+        client = cast(StdioUpstreamClient, object.__new__(StdioUpstreamClient))
+        fabricated = cast(Any, client)
+        fabricated.process = SimpleNamespace(stderr=text_pipe)
+        fabricated._stderr_lines = []
+        fabricated._stderr_lock = threading.Lock()
+
+        client._read_stderr()
+
+        self.assertGreaterEqual(len(client._stderr_lines), 2)
+        self.assertIn("FastMCP diagnostic", client._stderr_lines[-1])
+        text_pipe.close()
+
+    def test_upstream_manager_discards_and_closes_failed_stdio_client(self) -> None:
+        class _Client:
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        manager = cast(UpstreamManager, object.__new__(UpstreamManager))
+        fabricated = cast(Any, manager)
+        failed = _Client()
+        fabricated._clients = {"origin": failed}
+        fabricated._client_locks = {"origin": threading.Lock()}
+        fabricated._lifecycle_condition = threading.Condition(threading.Lock())
+
+        manager._discard_client("origin", cast(Any, failed))
+
+        self.assertNotIn("origin", manager._clients)
+        self.assertTrue(failed.closed)
 
     def test_upstream_stdio_writer_uses_binary_utf8_with_surrogate_fallback(self) -> None:
         raw_pipe = io.BytesIO()

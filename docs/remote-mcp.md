@@ -58,6 +58,16 @@ minutes. Dynamic Client records persist. Registration requests are narrowed to
 the supported grant types (`authorization_code`, `refresh_token`) and response
 type (`code`) instead of being widened silently.
 
+Normal ChatGPT onboarding uses dynamic client registration. Do not configure
+`CODING_TOOLS_MCP_OAUTH_CLIENT_ID`,
+`CODING_TOOLS_MCP_OAUTH_REDIRECT_URIS`, or
+`CODING_TOOLS_MCP_OAUTH_WORKSPACE_ID` for that flow: ChatGPT sends its callback
+metadata to `/oauth/register`, and the server generates and persists the Client
+ID. During authorization, the consent page lists the enabled Workspaces and
+requires the user to select one or more of them. The selected set becomes the
+Client Workspace allowlist. The user also chooses one initial Workspace because
+each OAuth Grant and HTTP Session remains bound to exactly one Workspace.
+
 ### Persistent files
 
 The stable configuration directory is selected by
@@ -77,11 +87,32 @@ Relevant files are:
 
 `oauth.sqlite3` stores identifiers, status, fingerprints, client-secret digests,
 and peppered refresh-token hashes—not plaintext bearer or refresh tokens.
+
+Dynamic Client registrations are durable state. Reopening the same stable
+configuration directory preserves the Client IDs issued to ChatGPT, so ordinary
+server upgrades and reauthorization do not require deleting and recreating the
+ChatGPT app instance. Keep `oauth.sqlite3`, `oauth-secrets.json`, and the matching
+`CODING_TOOLS_MCP_SECRETS_KEY` together during upgrades.
+
+If the token database was intentionally rebuilt but a clean, current-schema
+backup of the previous database remains, active public PKCE Client registrations
+can be recovered without restoring old Grants, tokens, or signing keys:
+
+```powershell
+python -m coding_tools_mcp.oauth_recovery `
+  --source "C:\path\to\backup\oauth.sqlite3" `
+  --apply
+```
+
+The recovery command never overwrites an existing Client ID, never imports a
+confidential or revoked Client, and requires the source database to have been
+cleanly closed without SQLite `-wal`/`-shm` sidecars. After recovery, an existing
+ChatGPT app can retry authorization with its original Client ID.
 Signing material and the authorization-page password are resolved through the
 Secret Vault. If the Store, Vault, master key, or referenced secret is missing or
 corrupt, OAuth startup/request processing fails closed.
 
-### Optional pre-registered client
+### Optional compatibility-only pre-registered client
 
 ```bash
 export CODING_TOOLS_MCP_OAUTH_CLIENT_ID='<client-id>'
@@ -94,6 +125,9 @@ Public clients omit the secret and must use PKCE. Confidential clients must use
 the authentication method recorded at registration. Client secrets are returned
 only at creation and stored only as digests.
 
+Pre-registration is for fixed legacy clients and recovery workflows. It is not
+required for ChatGPT DCR onboarding.
+
 ## Workspace mapping
 
 OAuth bearer validation produces `client_id`, `grant_id`, `workspace_id`, and
@@ -103,8 +137,11 @@ path resolution all use that Workspace.
 
 - With exactly one enabled Workspace, old unbound Clients are migrated to that
   sole default.
-- With multiple enabled Workspaces, a Client must have an explicit mapping in
-  `oauth_client_workspace_bindings` or `CODING_TOOLS_MCP_OAUTH_WORKSPACE_ID`.
+- With multiple enabled Workspaces, a DCR Client chooses one or more enabled
+  Workspaces on the OAuth consent page. Admin-managed
+  `oauth_client_workspace_bindings` and
+  `CODING_TOOLS_MCP_OAUTH_WORKSPACE_ID` remain compatibility controls for
+  pre-registered clients.
 - A Grant copies and freezes the Client's Workspace at authorization time.
 - Missing, disabled, or unauthorized mappings reject authorization or Session
   creation.

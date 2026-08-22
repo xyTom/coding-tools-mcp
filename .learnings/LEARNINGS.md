@@ -31,6 +31,38 @@ At the start of a dirty-worktree review, record SHA-256 hashes for every relevan
 
 ---
 
+## [LRN-20260815-001] correction
+
+**Logged**: 2026-08-15T08:17:22+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: infra
+
+### Summary
+
+Do not infer that WSL is uninstalled from garbled redirected `wsl.exe` output or from an empty distribution list.
+
+### Details
+
+The user correctly pointed out that WSL and Ubuntu were installed. Redirected `wsl.exe` output was UTF-16 and had previously been misread. Explicit Unicode capture showed WSL 2.7.8.0 with kernel 6.18.33.1 and default version 2. A later identity check showed that commands run as the isolated `ying-mechrev\codexsandboxoffline` account, not the user's interactive `YING` account. WSL distributions are registered per Windows user, so an empty list and Lxss key under the sandbox identity do not prove that Ubuntu is absent from the host or the interactive user's account. WSL platform availability, execution identity, and per-user Linux distribution visibility must be reported separately.
+
+### Suggested Action
+
+Capture redirected WSL output with explicit Unicode decoding, run `whoami`/inspect the process SID, then run `wsl.exe --version` and independently inspect `--list --quiet`, the matching user's Lxss registry key, and installed distribution AppX packages. Never generalize a sandbox account's empty per-user WSL list to the host or interactive user.
+
+### Metadata
+
+- Source: user_feedback
+- Related Files: docs/v0.3-integration-handoffs/phase-16.md, docs/v0.3-integration-handoffs/STATUS.md
+- Tags: wsl, windows, encoding, environment-detection
+
+### Resolution
+
+- **Resolved**: 2026-08-15T08:17:22+08:00
+- **Notes**: Rechecked encoding and execution identity; the sandbox account cannot see the user-confirmed Ubuntu registration owned by the interactive account.
+
+---
+
 ## [LRN-20260810-002] correction
 
 **Logged**: 2026-08-10T00:00:00+08:00
@@ -154,5 +186,41 @@ Before writing observed text or attributes, compare the current and desired valu
 - Recurrence-Count: 1
 - First-Seen: 2026-08-06
 - Last-Seen: 2026-08-06
+
+---
+
+## [LRN-20260815-002] correction
+
+**Logged**: 2026-08-15T18:10:01+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+
+Normal ChatGPT OAuth onboarding must use DCR-generated Client IDs and select one or more authorized Workspaces during consent, without operator-filled OAuth client environment variables.
+
+### Details
+
+The recovery advice incorrectly promoted `CODING_TOOLS_MCP_OAUTH_CLIENT_ID`, `CODING_TOOLS_MCP_OAUTH_REDIRECT_URIS`, and `CODING_TOOLS_MCP_OAUTH_WORKSPACE_ID` as the primary path. Those variables are optional compatibility/pre-registration controls. The intended product flow is DCR registration, followed by an authorization page that presents enabled Workspaces and supports multi-selection before the Grant freezes the selected Workspace authorization context.
+
+### Suggested Action
+
+Keep pre-registration as an explicit compatibility feature only. Add an end-to-end regression for DCR with multiple enabled Workspaces, consent-page multi-selection, persisted Client bindings, and immutable Grant workspace selection semantics.
+
+### Metadata
+
+- Source: user_feedback
+- Related Files: coding_tools_mcp/oauth.py, coding_tools_mcp/server.py, coding_tools_mcp/oauth_store.py, tests/test_oauth_integration.py
+- Tags: oauth, dcr, workspace, consent, multiselect
+- Pattern-Key: oauth.dcr_workspace_selection_during_consent
+- Recurrence-Count: 1
+- First-Seen: 2026-08-15
+- Last-Seen: 2026-08-15
+
+### Resolution
+
+- **Resolved**: 2026-08-15T18:21:59+08:00
+- **Notes**: Implemented and tested DCR-first multi-Workspace consent while preserving one immutable initial Workspace per Grant and HTTP Session.
 
 ---

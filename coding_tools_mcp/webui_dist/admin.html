@@ -192,7 +192,7 @@ dialog{width:min(620px,calc(100% - 2rem));max-height:min(90dvh,860px);padding:0;
   <dialog id="authDialog" aria-labelledby="authDialogTitle"><form id="authForm" class="dialog-card" autocomplete="off"><header><div><h2 id="authDialogTitle">连接真实 Admin API</h2><p>使用专用 Admin token 换取服务器端 Admin Session；交换完成后输入立即清空。</p></div><button class="icon-button" type="button" data-close-auth aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></header><div class="dialog-body"><label for="adminToken">一次性交换使用的 Admin token</label><div class="password-input-row"><input id="adminToken" name="adminToken" type="password" autocomplete="off" aria-describedby="adminTokenHelp" required><button id="adminTokenToggle" type="button" class="icon-button password-toggle" data-password-toggle data-password-target="adminToken" aria-controls="adminToken" aria-pressed="false" aria-label="显示密码"><svg class="icon"><use href="#i-eye"></use></svg><span>显示</span></button></div><p id="adminTokenHelp" class="help">不会写入 URL、Web Storage、可读 Cookie、日志或服务器设置；成功后仅保留 HttpOnly Session cookie。</p></div><footer><button class="button secondary" type="button" data-close-auth>取消</button><button class="button primary" type="submit">创建安全会话</button></footer></form></dialog>
   <dialog id="activityLogDialog" aria-labelledby="activityLogDialogTitle"><div class="dialog-card log-dialog-card"><header><div><h2 id="activityLogDialogTitle">运行日志查看器</h2><p>按时间、级别、组件和关键词筛选本页面的管理接口活动。</p></div><button class="icon-button" type="button" data-close-activity-logs aria-label="关闭"><svg class="icon"><use href="#i-close"></use></svg></button></header><div class="dialog-body"><div class="log-filter-bar"><label>时间范围<select id="activityLogTime"><option value="15m">最近 15 分钟</option><option value="1h">最近 1 小时</option><option value="24h" selected>最近 24 小时</option><option value="all">全部</option></select></label><label>级别<select id="activityLogLevel"><option value="all">全部级别</option><option value="error">Error</option><option value="info">Info</option></select></label><label>组件<select id="activityLogComponent"><option value="all">全部组件</option><option value="status">Status</option><option value="settings">Settings</option><option value="gateway">Gateway</option><option value="workspaces">Workspaces</option><option value="oauth">OAuth</option><option value="secrets">Secret Vault</option><option value="chat">Conversations</option></select></label><label>关键词<input id="activityLogSearch" type="search" placeholder="搜索路径、状态或错误"></label></div><div class="log-result-toolbar"><strong id="activityLogResultCount">0 条结果</strong><button id="clearActivityLogs" type="button" class="button secondary compact">清空当前页面日志</button></div><div class="log-viewer"><div id="activityLogList" class="log-list"></div><aside id="activityLogDetail" class="log-detail"><div class="empty-state"><span><svg class="icon"><use href="#i-file-text"></use></svg></span><h3>选择一条日志</h3><p>点击记录查看请求方法、路径、HTTP 状态和耗时。</p></div></aside></div></div><footer><span class="log-footer-note">不记录 Admin token、请求体或 Secret 值。</span><button class="button secondary" type="button" data-close-activity-logs>关闭</button></footer></div></dialog>
   <dialog id="confirmDialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage"><form method="dialog" class="dialog-card"><header><div><h2 id="confirmTitle">确认操作</h2><p id="confirmMessage"></p></div></header><footer><button value="cancel" class="button secondary">取消</button><button id="confirmAccept" value="confirm" class="button danger">确认</button></footer></form></dialog>
-  <dialog id="clientPasswordDialog" aria-labelledby="clientPasswordTitle" aria-describedby="clientPasswordHelp"><form id="clientPasswordForm" class="dialog-card" autocomplete="off"><header><div><h2 id="clientPasswordTitle">设置 Client 专属密码</h2><p>Client ID：<code id="clientPasswordClientId">—</code></p></div></header><div class="dialog-body"><p id="clientPasswordHelp" class="help">保存后立即生效，只影响这个 Client；未设置或重置后使用全局 OAuth Authorize 密码。</p><label for="clientPasswordValue">Client 专属密码</label><div class="password-input-row"><input id="clientPasswordValue" type="password" autocomplete="new-password" required><button id="clientPasswordToggle" type="button" class="icon-button password-toggle" data-password-toggle data-password-target="clientPasswordValue" aria-controls="clientPasswordValue" aria-pressed="false" aria-label="显示密码"><svg class="icon"><use href="#i-eye"></use></svg><span>显示</span></button></div><p id="clientPasswordError" class="alert danger" role="alert" hidden></p></div><footer><button id="clientPasswordCancel" type="button" class="button secondary">取消</button><button type="submit" class="button primary">保存并立即生效</button></footer></form></dialog>
+  <dialog id="clientPasswordDialog" aria-labelledby="clientPasswordTitle" aria-describedby="clientPasswordHelp"><form id="clientPasswordForm" class="dialog-card" autocomplete="off"><header><div><h2 id="clientPasswordTitle">设置 Client 专属密码</h2><p>Client ID：<code id="clientPasswordClientId">—</code></p></div></header><div class="dialog-body"><p id="clientPasswordHelp" class="help">保存后立即生效，只影响这个 Client；未设置或重置后使用全局 OAuth Authorize 密码。</p><label for="clientPasswordValue">Client 专属密码</label><div class="password-input-row"><input id="clientPasswordValue" type="password" autocomplete="new-password" required><button id="clientPasswordToggle" type="button" class="icon-button password-toggle" data-password-toggle data-password-target="clientPasswordValue" aria-controls="clientPasswordValue" aria-pressed="false" aria-label="显示密码"><svg class="icon"><use href="#i-eye"></use></svg><span>显示</span></button></div><p id="clientPasswordError" class="alert danger" role="alert" hidden></p></div><footer><button id="clientPasswordCancel" type="button" class="button secondary">取消</button><button id="clientPasswordSubmit" type="submit" class="button primary">保存并立即生效</button></footer></form></dialog>
 
   <script type="module" data-build-source="settings-copy.js">
 const PERMISSION_COPY = Object.freeze({
@@ -2037,6 +2037,14 @@ function createApiClient(getCsrfToken, fetchImpl = globalThis.fetch, onActivity 
   return { request };
 }
 
+async function fetchOAuthCollection(api, overviewStatus, collection) {
+  if (overviewStatus?.oauth?.available === false) {
+    return { available: false, items: [] };
+  }
+  const payload = await api.request(`/oauth/${encodeURIComponent(collection)}`);
+  return { ...payload, available: true };
+}
+
 function createNode(documentRef, tag, options = {}) {
   const node = documentRef.createElement(tag);
   if (options.className) node.className = options.className;
@@ -2282,6 +2290,11 @@ function renderOAuthItems(
       configure.addEventListener('click', () => onClientPassword?.(clientId, 'configure', configure));
       actions.append(configure);
       if (clientMode) {
+        const view = createNode(documentRef, 'button', {
+          type: 'button', className: 'secondary', text: '查看专属密码',
+        });
+        view.addEventListener('click', () => onClientPassword?.(clientId, 'view', view));
+        actions.append(view);
         const reset = createNode(documentRef, 'button', {
           type: 'button', className: 'secondary', text: '改用全局密码',
         });
@@ -2356,7 +2369,7 @@ function initAdminApp(documentRef = document) {
     authenticated: false, csrfToken: '', settings: null, workspaces: [], workspaceRevision: '', gateway: null,
     gatewayRevision: '', editingGatewayAlias: '', conversationPage: 1, conversationTotal: 0,
     selectedConversation: null, messagePage: 1, contextPage: 1,
-    clientPasswordClientId: '', clientPasswordReturnFocus: null, section: 'overview',
+    clientPasswordClientId: '', clientPasswordMode: 'set', clientPasswordReturnFocus: null, section: 'overview',
     overviewStatus: null, conversations: [], oauthClients: [], secrets: [],
     activityLogs: [], selectedActivityLogId: null,
   };
@@ -2395,7 +2408,15 @@ function initAdminApp(documentRef = document) {
     );
     clientPasswordError();
     state.clientPasswordClientId = '';
+    state.clientPasswordMode = 'set';
     state.clientPasswordReturnFocus = null;
+    byId('clientPasswordTitle').textContent = '设置 Client 专属密码';
+    byId('clientPasswordHelp').textContent = '保存后立即生效，只影响这个 Client；未设置或重置后使用全局 OAuth Authorize 密码。';
+    byId('clientPasswordCancel').textContent = '取消';
+    byId('clientPasswordSubmit').hidden = false;
+    byId('clientPasswordSubmit').textContent = '保存并立即生效';
+    byId('clientPasswordValue').readOnly = false;
+    byId('clientPasswordValue').required = true;
     if (dialog?.open) dialog.close();
     if (restoreFocus && returnFocus && typeof returnFocus.focus === 'function') {
       returnFocus.focus();
@@ -2403,6 +2424,7 @@ function initAdminApp(documentRef = document) {
   }
 
   function openClientPasswordDialog(clientId, returnFocus) {
+    state.clientPasswordMode = 'set';
     state.clientPasswordClientId = clientId;
     state.clientPasswordReturnFocus = returnFocus;
     byId('clientPasswordClientId').textContent = clientId;
@@ -2415,6 +2437,36 @@ function initAdminApp(documentRef = document) {
     clientPasswordError();
     byId('clientPasswordDialog').showModal();
     byId('clientPasswordValue').focus();
+  }
+
+  async function openClientPasswordViewDialog(clientId, returnFocus) {
+    state.clientPasswordMode = 'view';
+    state.clientPasswordClientId = clientId;
+    state.clientPasswordReturnFocus = returnFocus;
+    byId('clientPasswordClientId').textContent = clientId;
+    byId('clientPasswordTitle').textContent = '查看 Client 专属密码';
+    byId('clientPasswordHelp').textContent = '这是该 Client 的专属 OAuth Authorize 密码，默认隐藏；点击“显示”可临时查看。';
+    byId('clientPasswordValue').value = '';
+    byId('clientPasswordValue').readOnly = true;
+    byId('clientPasswordValue').required = false;
+    byId('clientPasswordCancel').textContent = '关闭';
+    byId('clientPasswordSubmit').hidden = true;
+    setPasswordVisibility(
+      byId('clientPasswordValue'),
+      byId('clientPasswordToggle'),
+      false,
+    );
+    clientPasswordError();
+    byId('clientPasswordDialog').showModal();
+    byId('clientPasswordToggle').focus();
+    try {
+      const result = await api.request(`/oauth/clients/${encodeURIComponent(clientId)}/authorization-password`, { method: 'GET' });
+      if (state.clientPasswordClientId !== clientId || state.clientPasswordMode !== 'view') return;
+      byId('clientPasswordValue').value = String(result.value || '');
+    } catch (error) {
+      if (state.clientPasswordClientId !== clientId || state.clientPasswordMode !== 'view') return;
+      clientPasswordError(error.message);
+    }
   }
 
   function updateGatewayTransportFields() {
@@ -2928,8 +2980,21 @@ function initAdminApp(documentRef = document) {
   async function loadGateway() { const payload = await api.request('/gateway'); renderGateway(payload); return payload; }
 
   async function loadOAuth() {
-    const collection = byId('oauthCollection').value;
-    const payload = await api.request(`/oauth/${encodeURIComponent(collection)}`);
+    const collectionControl = byId('oauthCollection');
+    const reloadControl = byId('reloadOAuth');
+    const collection = collectionControl.value;
+    const payload = await fetchOAuthCollection(api, state.overviewStatus, collection);
+    const available = payload.available !== false;
+    collectionControl.disabled = !available;
+    reloadControl.disabled = !available;
+    if (!available) {
+      state.oauthClients = [];
+      byId('oauthList').replaceChildren(createNode(documentRef, 'p', {
+        className: 'muted',
+        text: translateUi('OAuth 模式未启用。当前服务使用静态 bearer token；其他 Admin 功能仍可正常使用。如需管理 OAuth 客户端，请使用 --oauth-mode 重启服务。'),
+      }));
+      return payload;
+    }
     if (collection === 'clients') state.oauthClients = payload.items || [];
     renderOAuthItems(byId('oauthList'), payload.items || [], collection, async (resource, id, action, button) => {
       const accepted = await confirmDestructive(documentRef, {
@@ -2944,6 +3009,10 @@ function initAdminApp(documentRef = document) {
     }, async (clientId, action, button) => {
       if (action === 'configure') {
         openClientPasswordDialog(clientId, button);
+        return;
+      }
+      if (action === 'view') {
+        await openClientPasswordViewDialog(clientId, button);
         return;
       }
       const accepted = await confirmDestructive(documentRef, {
@@ -3301,6 +3370,10 @@ function initAdminApp(documentRef = document) {
   byId('clientPasswordForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const clientId = state.clientPasswordClientId;
+    if (state.clientPasswordMode === 'view') {
+      closeClientPasswordDialog();
+      return;
+    }
     const value = byId('clientPasswordValue').value;
     try {
       await api.request(`/oauth/clients/${encodeURIComponent(clientId)}/authorization-password`, {
@@ -3356,6 +3429,7 @@ globalThis.McpAdminApp = {
   gatewayServerTemplate,
   gatewayExposurePreview,
   createApiClient,
+  fetchOAuthCollection,
   renderConversationItems,
   renderConversationDetail,
   renderOAuthItems,
@@ -3370,7 +3444,7 @@ if (typeof document !== 'undefined') {
   document.addEventListener('DOMContentLoaded', () => initAdminApp(document));
 }
 
-export { ApiError, sanitizeAdminValue, containsCredentialControl, restartImpactCount, createAdminSession, restoreAdminSession, revokeAdminSession, gatewayServerFromForm, gatewayServerTemplate, gatewayExposurePreview, createApiClient, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, setPasswordVisibility, setAuthenticationUi, initAdminApp };
+export { ApiError, sanitizeAdminValue, containsCredentialControl, restartImpactCount, createAdminSession, restoreAdminSession, revokeAdminSession, gatewayServerFromForm, gatewayServerTemplate, gatewayExposurePreview, createApiClient, fetchOAuthCollection, renderConversationItems, renderConversationDetail, renderOAuthItems, confirmDestructive, handleSettingsSave, setPasswordVisibility, setAuthenticationUi, initAdminApp };
 </script>
 </body>
 </html>

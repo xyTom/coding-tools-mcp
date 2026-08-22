@@ -340,22 +340,29 @@ def create_authorization_grant(
     redirect_uri: str,
     scopes: str,
     workspace_id: str | None = None,
+    workspace_ids: tuple[str, ...] | None = None,
 ) -> str:
     if config.store is None:
         raise OAuthServiceError("OAuth authorization store is not configured.")
     client = config.registry.get(client_id)
     if client is None or not client.accepts_redirect(redirect_uri):
         raise OAuthServiceError("OAuth client or redirect URI is not active.")
-    workspace_ids = client.workspace_ids
-    if not workspace_ids:
+    authorized_workspace_ids = client.workspace_ids
+    if workspace_ids is not None:
+        if not workspace_ids:
+            raise OAuthWorkspaceAccessRequiredError("Select at least one Workspace.")
+        if len(set(workspace_ids)) != len(workspace_ids):
+            raise OAuthWorkspaceSelectionError("Selected Workspace IDs must be unique.")
+        authorized_workspace_ids = workspace_ids
+    if not authorized_workspace_ids:
         raise OAuthWorkspaceAccessRequiredError(
             "OAuth client has no authorized Workspaces."
         )
     if workspace_id is None:
-        if len(workspace_ids) != 1:
+        if len(authorized_workspace_ids) != 1:
             raise OAuthWorkspaceSelectionError("Select a Workspace for this authorization.")
-        workspace_id = workspace_ids[0]
-    if workspace_id not in workspace_ids:
+        workspace_id = authorized_workspace_ids[0]
+    if workspace_id not in authorized_workspace_ids:
         raise OAuthWorkspaceSelectionError(
             "Selected Workspace is not authorized for this OAuth client."
         )
@@ -364,6 +371,7 @@ def create_authorization_grant(
             client_id,
             scopes,
             workspace_id=workspace_id,
+            workspace_ids=workspace_ids,
         )
     except OAuthStoreWorkspaceAccessError as exc:
         raise OAuthWorkspaceSelectionError(str(exc)) from exc
