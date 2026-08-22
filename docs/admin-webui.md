@@ -6,17 +6,14 @@ The Admin WebUI login shell is served at `/admin` without credentials and consum
 
 - `webui/src/**` is the only editable frontend source.
 - `npm --prefix webui run build` removes and recreates `coding_tools_mcp/webui_dist/**`.
-- The generated `admin.html` and `app.html` are self-contained and are never edited directly.
-- `coding_tools_mcp.webui.admin_console_html()` and `operator_app_html()` read the generated artifacts.
+- The generated `admin.html` is self-contained and is never edited directly.
+- `coding_tools_mcp.webui.admin_console_html()` reads the generated artifact.
 
-## Agent workbench entry
+## Conversation Center entry
 
-The Admin Console navigation links to `/app`, the Operator Agent workbench built
-from `webui/src/app/**` by the same WebUI pipeline. The workbench is not an Admin
-page: its browser client calls only `/api/app`, never `/admin/api`, and an Admin
-token is not treated as an Agent Session owner identity. Backend authorization
-remains the security boundary even though both surfaces share the existing visual
-system and packaged WebUI codebase.
+The Admin Console contains one Conversation Center under `/admin`. It reuses the
+Admin authentication boundary and projects Transcript and Agent execution state
+through authorized service APIs. There is no separate `/app` or Operator login.
 
 ## Authentication
 

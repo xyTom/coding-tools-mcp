@@ -12,20 +12,17 @@ start with the [Quickstart](quickstart.md).
 
 | Endpoint | Purpose | Credential |
 | --- | --- | --- |
-| `/mcp` | The stable 25-tool MCP interface | Ordinary bearer or OAuth token |
-| `/app` | Browser Agent workbench for sessions, approvals, validation, and handoff | The same ordinary user identity as `/mcp` |
-| `/admin` | Workspace, OAuth, Gateway, Secret, and Runner administration | A dedicated Admin token |
+| `/mcp` | MCP interface for ChatGPT, Codex, Claude, Cursor, and other clients | Ordinary bearer or OAuth token |
+| `/admin` | Conversation Center, Workspace, OAuth, Gateway, Secret, and Runner administration | A dedicated Admin token |
 
-An Admin token cannot sign in to `/app`, and an ordinary bearer/OAuth token
-cannot call the Admin API. Always use different tokens for these roles.
+An ordinary bearer/OAuth token cannot call the Admin API. Always use different
+tokens for these roles.
 
-### `/app` product boundary
+### Conversation Center boundary
 
-- `/app` is an optional Codex Agent workbench, not a GPT/ChatGPT webpage.
+- `/admin` is the only WebUI management entry.
 - The execution host must have Codex CLI installed and signed in; for a Runner
   Workspace, that prerequisite applies to its Runner host.
-- App bearer, Admin token, and Codex sign-in credentials are three separate
-  credential sets and are not interchangeable.
 - Coding Tools MCP SQLite stores Agent Session metadata, while the Codex thread
   store keeps model-thread and conversation continuity; recovery depends on both.
 
@@ -45,7 +42,6 @@ real tokens in the repository, URLs, QR codes, screenshots, or chat messages.
 
 After startup, open or configure:
 
-- Agent workbench: `http://127.0.0.1:8765/app`
 - Admin WebUI: `http://127.0.0.1:8765/admin`
 - MCP endpoint: `http://127.0.0.1:8765/mcp`
 
@@ -53,23 +49,21 @@ Keep local-only deployments bound to loopback. For access from a phone or
 another computer, publish the service through an authenticated HTTPS tunnel.
 Never expose a `noauth` service publicly.
 
-## Use the Agent workbench
+## Use the Conversation Center
 
-1. Open `/app`, choose **Connect identity**, and enter an ordinary bearer or
-   OAuth token. The browser keeps it only in the current page memory.
-2. Select a Workspace available to that identity.
-3. Create an Agent Session, enter the task instructions, and send the first turn.
+1. Open `/admin` and authenticate with the dedicated Admin token.
+2. Select a Workspace and open **Conversation Center**.
+3. Create a Conversation, start an Agent execution, and send a turn.
 4. When the Agent requests approval, review the exact command and impact before
    approving or declining it.
-5. Run structured Validation when you need repository evidence. Validation uses
-   fixed recipes and never installs dependencies automatically.
-6. Before transferring the task, inspect Handoff for the branch, repository
-   fingerprint, active task, Runner jobs, and latest validation evidence.
+5. Run structured Validation when you need repository evidence.
+6. Inspect continuation or handoff evidence before transferring the task.
 
-Agent Sessions are durable. Refreshing or closing the browser does not delete a
-Session. Reopening it attempts to resume the backend and continues from the
-event cursor. After a connection loss, do not blindly resubmit a previous turn
-that may already have changed state.
+Conversations and execution metadata are durable. Refreshing or closing the
+browser does not delete them. Reopening an execution attempts to resume the
+backend. After MCP identity loss, use explicit `conversation_list` and
+`conversation_resume`; never blindly resubmit a previous turn that may already
+have changed state.
 
 ## Configure Workspaces
 

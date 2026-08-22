@@ -97,18 +97,7 @@ from .oauth import (
     verify_pkce,
 )
 from .oauth_store import OAuthAuthorizationStore, OAuthStoreError
-from .operator_api import (
-    OPERATOR_API_PREFIX,
-    OperatorAPIError,
-    OperatorAPIService,
-    OperatorPrincipal,
-    operator_error_status,
-)
-from .operator_sessions import (
-    OPERATOR_SESSION_ABSOLUTE_LIFETIME_SECONDS,
-    OPERATOR_SESSION_COOKIE,
-    OperatorSessionStore,
-)
+from .operator_api import OperatorAPIService, OperatorPrincipal
 from .secret_vault import SecretVault, SecretVaultError
 from .settings_definition import (
     SettingsValidationError,
@@ -5497,425 +5486,9 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         service = getattr(self.server, "operator_service", None)  # type: ignore[attr-defined]
         return service if isinstance(service, OperatorAPIService) else None
 
-    def _operator_principal(self) -> OperatorPrincipal | None:
-        browser_principal = getattr(self, "_operator_browser_principal", None)
-        if isinstance(browser_principal, OperatorPrincipal):
-            return browser_principal
-        context = getattr(self, "_authorization_context", None)
-        service = self._operator_service()
-        if not isinstance(context, AuthorizationContext) or service is None:
-            return None
-        authorization = self.headers.get("Authorization", "").strip()
-        bearer = authorization[len("Bearer ") :].strip() if authorization.startswith("Bearer ") else ""
-        admin_token = getattr(self.server, "admin_token", None)  # type: ignore[attr-defined]
-        if (
-            isinstance(admin_token, str)
-            and admin_token
-            and bearer
-            and secrets.compare_digest(bearer, admin_token)
-        ):
-            return None
-        if context.method == "oauth" and context.oauth_identity is not None:
-            identity = context.oauth_identity
-            return OperatorPrincipal(
-                context.principal_id() or "",
-                (identity.workspace_id,),
-            )
-        if context.method == "bearer":
-            return OperatorPrincipal(context.principal_id() or "", (service.workspace_catalog.default_id,))
-        if context.method == "noauth":
-            return OperatorPrincipal(context.principal_id() or "", (service.workspace_catalog.default_id,))
-        return None
-
-    def _send_operator_unauthorized(self, *, head_only: bool = False) -> None:
-        self.send_json(
-            {
-                "error": {
-                    "code": "operator_auth_required",
-                    "message": "Operator authentication is required.",
-                }
-            },
-            status=401,
-            extra_headers={"WWW-Authenticate": 'Bearer realm="coding-tools-mcp-operator"'},
-            head_only=head_only,
-        )
-
-    def _read_operator_json(self) -> dict[str, Any] | None:
-        if self.command in {"GET", "HEAD"}:
-            return {}
-        if self.headers.get_content_type().lower() != "application/json":
-            self.send_json(
-                {
-                    "error": {
-                        "code": "operator_invalid_content_type",
-                        "message": "Content-Type must be application/json.",
-                    }
-                },
-                status=415,
-            )
-            return None
-        raw_length = self.headers.get("Content-Length")
-        if raw_length is None:
-            self.send_json(
-                {
-                    "error": {
-                        "code": "operator_invalid_request",
-                        "message": "Content-Length is required.",
-                    }
-                },
-                status=411,
-            )
-            return None
-        try:
-            length = int(raw_length)
-        except ValueError:
-            length = -1
-        if length < 0 or length > MAX_HTTP_REQUEST_BYTES:
-            self.send_json(
-                {
-                    "error": {
-                        "code": "operator_invalid_request",
-                        "message": "Operator request body size is invalid.",
-                    }
-                },
-                status=413,
-            )
-            return None
-        try:
-            value = strict_json_loads(self.rfile.read(length))
-        except (UnicodeDecodeError, ValueError):
-            self.send_json(
-                {"error": {"code": "operator_invalid_json", "message": "Body must be valid JSON."}},
-                status=400,
-            )
-            return None
-        if not isinstance(value, dict):
-            self.send_json(
-                {"error": {"code": "operator_invalid_request", "message": "Body must be a JSON object."}},
-                status=400,
-            )
-            return None
-        return value
-
-    def handle_operator_request(self, method: str, *, head_only: bool = False) -> None:
-        service = self._operator_service()
-        if service is None:
-            self.send_json(
-                {"error": {"code": "operator_unavailable", "message": "Operator API is unavailable."}},
-                status=503,
-                head_only=head_only,
-            )
-            return
-        origin = self.headers.get("Origin")
-        if origin and not is_allowed_origin(origin):
-            self.send_json(
-                {"error": {"code": "origin_denied", "message": "Origin denied"}},
-                status=403,
-                head_only=head_only,
-            )
-            return
-        normalized_request_path = posixpath.normpath(urllib.parse.urlsplit(self.path).path)
-        authorized = self.is_authorized()
-        if (
-            not authorized
-            and method == "GET"
-            and normalized_request_path == f"{OPERATOR_API_PREFIX}/session"
-        ):
-            self.send_json(
-                {
-                    "ok": True,
-                    "authenticated": False,
-                    "persistent": False,
-                    "csrf_token": None,
-                },
-                head_only=head_only,
-            )
-            return
-        if not authorized:
-            self._send_operator_unauthorized(head_only=head_only)
-            return
-        principal = self._operator_principal()
-        if principal is None:
-            self._send_operator_unauthorized(head_only=head_only)
-            return
-
-        parsed = urllib.parse.urlsplit(self.path)
-        normalized = posixpath.normpath(parsed.path)
-        relative = normalized.removeprefix(OPERATOR_API_PREFIX).strip("/")
-        segments = [urllib.parse.unquote(segment) for segment in relative.split("/") if segment]
-        query = {
-            key: values[-1]
-            for key, values in urllib.parse.parse_qs(parsed.query, keep_blank_values=True).items()
-            if values
-        }
-        store = self._operator_session_store()
-        browser_principal = getattr(self, "_operator_browser_principal", None)
-        if method == "GET" and segments == ["session"]:
-            csrf_token = (
-                store.issue_csrf(self._operator_session_id())
-                if store is not None and isinstance(browser_principal, OperatorPrincipal)
-                else None
-            )
-            self.send_json(
-                {
-                    "ok": True,
-                    "authenticated": True,
-                    "persistent": csrf_token is not None,
-                    "csrf_token": csrf_token,
-                },
-                head_only=head_only,
-            )
-            return
-        if method == "POST" and segments == ["session"]:
-            context = getattr(self, "_authorization_context", None)
-            if isinstance(context, AuthorizationContext) and context.method == "noauth":
-                self.send_json(
-                    {"ok": True, "authenticated": True, "persistent": False, "csrf_token": None},
-                    status=201,
-                    head_only=head_only,
-                )
-                return
-            if store is None or not isinstance(context, AuthorizationContext):
-                self._send_operator_unauthorized(head_only=head_only)
-                return
-            session_id, csrf_token = store.create(principal.principal_id, principal.workspace_ids)
-            self.send_json(
-                {
-                    "ok": True,
-                    "authenticated": True,
-                    "persistent": True,
-                    "csrf_token": csrf_token,
-                },
-                status=201,
-                extra_headers={"Set-Cookie": self._operator_session_cookie_header(session_id)},
-                head_only=head_only,
-            )
-            return
-        if method in {"POST", "DELETE"} and isinstance(browser_principal, OperatorPrincipal):
-            csrf_token = self.headers.get("X-Operator-CSRF", "").strip()
-            if (
-                store is None
-                or store.authorize(
-                    self._operator_session_id(),
-                    csrf_token=csrf_token,
-                    require_csrf=True,
-                )
-                is None
-            ):
-                self.send_json(
-                    {
-                        "error": {
-                            "code": "operator_csrf_required",
-                            "message": "A valid Operator CSRF token is required.",
-                        }
-                    },
-                    status=403,
-                    head_only=head_only,
-                )
-                return
-        if method == "DELETE" and segments == ["session"]:
-            if store is not None:
-                store.revoke(self._operator_session_id())
-            self.send_json(
-                {"ok": True, "revoked": True},
-                extra_headers={"Set-Cookie": self._operator_session_cookie_header("", clear=True)},
-                head_only=head_only,
-            )
-            return
-        if method == "GET" and segments == ["workspaces"]:
-            self.send_json(service.list_workspaces(principal), head_only=head_only)
-            return
-        if method == "GET" and segments == ["sessions"]:
-            workspace_id = query.get("workspace_id") or (
-                principal.workspace_ids[0] if len(principal.workspace_ids) == 1 else ""
-            )
-            try:
-                limit = int(query.get("limit", "100"))
-            except ValueError:
-                limit = 0
-            try:
-                payload = service.list_sessions(principal, workspace_id, limit=limit)
-            except (OperatorAPIError, AgentSessionServiceError) as exc:
-                self._send_operator_error(exc, head_only=head_only)
-                return
-            self.send_json(payload, head_only=head_only)
-            return
-        if method == "GET" and len(segments) == 2 and segments[0] == "sessions":
-            try:
-                payload = service.get_session(principal, segments[1])
-            except (OperatorAPIError, AgentSessionServiceError) as exc:
-                self._send_operator_error(exc, head_only=head_only)
-                return
-            self.send_json(payload, head_only=head_only)
-            return
-        if (
-            method == "GET"
-            and len(segments) == 3
-            and segments[0] == "sessions"
-            and segments[2] == "handoff"
-        ):
-            try:
-                payload = service.handoff(principal, segments[1])
-            except (OperatorAPIError, AgentSessionServiceError) as exc:
-                self._send_operator_error(exc, head_only=head_only)
-                return
-            self.send_json(payload, head_only=head_only)
-            return
-        if (
-            method == "GET"
-            and len(segments) == 3
-            and segments[0] == "sessions"
-            and segments[2] == "events"
-        ):
-            try:
-                after = max(0, int(query.get("after", "0")))
-            except ValueError:
-                after = 0
-            self._handle_operator_event_stream(service, principal, segments[1], after)
-            return
-
-        body = self._read_operator_json() if method == "POST" else {}
-        if body is None:
-            return
-        try:
-            if method == "POST" and segments == ["sessions"]:
-                payload = service.create_session(principal, body)
-                self.send_json(payload, status=201)
-                return
-            if (
-                method == "POST"
-                and len(segments) == 3
-                and segments[0] == "sessions"
-                and segments[2] == "turns"
-            ):
-                self.send_json(service.send_turn(principal, segments[1], body))
-                return
-            if (
-                method == "POST"
-                and len(segments) == 3
-                and segments[0] == "sessions"
-                and segments[2] == "validation"
-            ):
-                self.send_json(service.run_validation(principal, segments[1], body))
-                return
-            if (
-                method == "POST"
-                and len(segments) == 3
-                and segments[0] == "sessions"
-                and segments[2] == "interrupt"
-            ):
-                self.send_json(service.interrupt(principal, segments[1]))
-                return
-            if (
-                method == "POST"
-                and len(segments) == 4
-                and segments[0] == "sessions"
-                and segments[2] == "approvals"
-            ):
-                self.send_json(service.approve(principal, segments[1], segments[3], body))
-                return
-        except (OperatorAPIError, AgentSessionServiceError) as exc:
-            self._send_operator_error(exc)
-            return
-        self.send_json(
-            {"error": {"code": "operator_not_found", "message": "Unknown Operator endpoint."}},
-            status=404,
-            head_only=head_only,
-        )
-
-    def _send_operator_error(
-        self,
-        exc: OperatorAPIError | AgentSessionServiceError,
-        *,
-        head_only: bool = False,
-    ) -> None:
-        if isinstance(exc, OperatorAPIError):
-            status = exc.status
-            code = exc.code
-            retryable = exc.retryable
-        else:
-            status = operator_error_status(exc)
-            code = exc.code
-            retryable = exc.retryable
-        self.send_json(
-            {
-                "error": {
-                    "code": code,
-                    "message": str(exc),
-                    "retryable": retryable,
-                }
-            },
-            status=status,
-            head_only=head_only,
-        )
-
-    def _handle_operator_event_stream(
-        self,
-        service: OperatorAPIService,
-        principal: OperatorPrincipal,
-        session_id: str,
-        after: int,
-    ) -> None:
-        try:
-            initial = service.events(principal, session_id, after=after, pull_backend=False)
-        except (OperatorAPIError, AgentSessionServiceError) as exc:
-            self._send_operator_error(exc)
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_cors_headers()
-        self.end_headers()
-        cursor = after
-        last_keepalive = time.monotonic()
-
-        def emit(event: dict[str, Any]) -> None:
-            nonlocal cursor
-            cursor = max(cursor, int(event.get("sequence", cursor)))
-            data = strict_json_bytes(event)
-            self.wfile.write(f"id: {cursor}\n".encode("ascii"))
-            self.wfile.write(b"data: " + data + b"\n\n")
-            self.wfile.flush()
-
-        try:
-            for event in initial["events"]:
-                emit(event)
-            while True:
-                try:
-                    payload = service.events(principal, session_id, after=cursor, pull_backend=True)
-                except (OperatorAPIError, AgentSessionServiceError) as exc:
-                    error_payload = {
-                        "sequence": cursor + 1,
-                        "kind": "error",
-                        "method": "session/error",
-                        "params": {
-                            "code": exc.code,
-                            "message": str(exc),
-                            "retryable": bool(getattr(exc, "retryable", False)),
-                        },
-                    }
-                    emit(error_payload)
-                    return
-                if payload["events"]:
-                    for event in payload["events"]:
-                        emit(event)
-                    last_keepalive = time.monotonic()
-                elif time.monotonic() - last_keepalive >= 10.0:
-                    self.wfile.write(b": keepalive\n\n")
-                    self.wfile.flush()
-                    last_keepalive = time.monotonic()
-                time.sleep(0.25)
-        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
-            return
-
     def _admin_session_store(self) -> AdminSessionStore | None:
         store = getattr(self.server, "admin_sessions", None)  # type: ignore[attr-defined]
         return store if isinstance(store, AdminSessionStore) else None
-
-    def _operator_session_store(self) -> OperatorSessionStore | None:
-        store = getattr(self.server, "operator_sessions", None)  # type: ignore[attr-defined]
-        return store if isinstance(store, OperatorSessionStore) else None
 
     def _cookie_value(self, name: str) -> str:
         raw_cookie = self.headers.get("Cookie", "")
@@ -5931,9 +5504,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def _admin_session_id(self) -> str:
         return self._cookie_value(ADMIN_SESSION_COOKIE)
-
-    def _operator_session_id(self) -> str:
-        return self._cookie_value(OPERATOR_SESSION_COOKIE)
 
     def _request_is_secure(self) -> bool:
         if isinstance(self.connection, ssl.SSLSocket):
@@ -5951,20 +5521,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         parts = [
             f"{ADMIN_SESSION_COOKIE}={value}",
             "Path=/admin/api",
-            "HttpOnly",
-            "SameSite=Strict",
-            f"Max-Age={max_age}",
-        ]
-        if self._request_is_secure():
-            parts.append("Secure")
-        return "; ".join(parts)
-
-    def _operator_session_cookie_header(self, session_id: str, *, clear: bool = False) -> str:
-        value = "" if clear else session_id
-        max_age = 0 if clear else OPERATOR_SESSION_ABSOLUTE_LIFETIME_SECONDS
-        parts = [
-            f"{OPERATOR_SESSION_COOKIE}={value}",
-            "Path=/api/app",
             "HttpOnly",
             "SameSite=Strict",
             f"Max-Age={max_age}",
@@ -6409,7 +5965,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         normalized = posixpath.normpath(request_path)
         if (
             not normalized.startswith(ADMIN_API_PREFIX)
-            and not normalized.startswith(OPERATOR_API_PREFIX)
             and normalized not in {
             "/admin",
             "/wiki",
@@ -6666,7 +6221,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def is_authorized(self) -> bool:
         self._authorization_context = None
-        self._operator_browser_principal = None
         if not self.runtime.auth_enabled():
             self._authorization_context = AuthorizationContext("noauth")
             return True
@@ -7300,7 +6854,6 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         self.admin_token = admin_token or None
         self.admin_sessions = AdminSessionStore() if self.admin_token else None
         self.operator_service = operator_service
-        self.operator_sessions = OperatorSessionStore() if operator_service is not None else None
         self.workspace_catalog = workspace_catalog
         self.runner_route_service = runner_route_service
         self.runner_credentials = runner_credentials
@@ -7318,8 +6871,6 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
     def server_close(self) -> None:
         if self.admin_sessions is not None:
             self.admin_sessions.revoke_all()
-        if self.operator_sessions is not None:
-            self.operator_sessions.revoke_all()
         if self.runner_route_service is not None:
             self.runner_route_service.close_transports_sync()
         self.sessions.close()

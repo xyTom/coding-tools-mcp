@@ -9,17 +9,15 @@
 
 | 入口 | 用途 | 使用哪种凭据 |
 | --- | --- | --- |
-| `/mcp` | MCP 客户端调用固定的 25 个核心工具 | 普通 bearer 或 OAuth token |
-| `/app` | 浏览器中的 Agent 工作台：会话、审批、验证与交接 | 与 `/mcp` 相同的普通用户身份 |
-| `/admin` | Workspace、OAuth、Gateway、Secret 和 Runner 管理 | 独立的 Admin token |
+| `/mcp` | ChatGPT、Codex、Claude、Cursor 等 MCP 客户端入口 | 普通 bearer 或 OAuth token |
+| `/admin` | 会话中心以及 Workspace、OAuth、Gateway、Secret 和 Runner 管理 | 独立的 Admin token |
 
-Admin token 不能登录 `/app`，普通 bearer/OAuth token 也不能调用 Admin API。请为两种角色使用不同的 token。
+普通 bearer/OAuth token 不能调用 Admin API。请为两种角色使用不同的 token。
 
-### `/app` 的产品边界
+### 会话中心边界
 
-- `/app` 是可选的 Codex Agent 工作台，不是 GPT/ChatGPT 网页。
+- `/admin` 是唯一 WebUI 管理入口。
 - 执行主机必须安装 Codex CLI，并已完成 Codex 登录；Runner Workspace 要在对应 Runner 主机完成。
-- App bearer、Admin token、Codex 登录凭据是三套不同凭据，不能互换。
 - Agent Session 元数据由 Coding Tools MCP SQLite 保存；模型 thread 与对话连续性由 Codex thread store 保存，两者共同提供恢复能力。
 
 ## 本地启动
@@ -36,22 +34,21 @@ coding-tools-mcp --workspace "G:\path\to\repo" --host 127.0.0.1 --port 8765
 
 启动后可打开：
 
-- Agent 工作台：`http://127.0.0.1:8765/app`
 - Admin WebUI：`http://127.0.0.1:8765/admin`
 - MCP endpoint：`http://127.0.0.1:8765/mcp`
 
 如果只在本机使用，保持 loopback 绑定即可。需要从手机或另一台电脑访问时，请通过有认证的 HTTPS tunnel 发布；不要把 `noauth` 服务直接暴露到公网。
 
-## 使用 Agent 工作台
+## 使用会话中心
 
-1. 打开 `/app`，选择“连接身份”，输入普通 bearer/OAuth token。token 只保存在当前页面内存中。
-2. 选择当前身份有权访问的 Workspace。
-3. 创建 Agent Session，填写任务说明并发送第一轮消息。
+1. 打开 `/admin`，使用专用 Admin token 认证。
+2. 选择 Workspace，进入 **会话中心**。
+3. 创建 Conversation，启动 Agent execution 并发送 turn。
 4. Agent 请求权限时，检查具体命令和影响范围，再批准或拒绝。
-5. 需要确认仓库状态时运行结构化 Validation；它只执行已有 recipe，不会自动安装依赖。
-6. 交接给另一位操作者或 Agent 前，打开 Handoff，确认分支、仓库指纹、当前任务、Runner job 和最近一次验证证据。
+5. 需要确认仓库状态时运行结构化 Validation。
+6. 交接前查看 continuation 或 handoff 证据。
 
-Agent Session 是持久化对象。刷新或关闭浏览器不会自动删除它；重新打开同一 Session 会尝试恢复后端并从事件 cursor 继续。连接中断时不要因为页面刷新而重复提交上一条可能产生写入的消息。
+Conversation 和执行元数据都是持久化对象。刷新或关闭浏览器不会自动删除它们；重新打开 execution 会尝试恢复后端。MCP 身份丢失时使用显式 `conversation_list` 和 `conversation_resume`，不要重复提交上一条可能产生写入的消息。
 
 ## 管理 Workspace
 

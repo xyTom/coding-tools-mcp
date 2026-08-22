@@ -25,7 +25,6 @@ from .validation import ValidationBackend
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError, WorkspaceEntry
 
 
-OPERATOR_API_PREFIX = "/api/app"
 MAX_OPERATOR_EVENTS = 500
 MAX_OPERATOR_EVENT_PULL = 100
 
@@ -915,7 +914,6 @@ ConversationService = OperatorAPIService
 
 __all__ = [
     "MAX_OPERATOR_EVENTS",
-    "OPERATOR_API_PREFIX",
     "OperatorAPIError",
     "OperatorAPIService",
     "OperatorPrincipal",

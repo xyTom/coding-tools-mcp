@@ -71,8 +71,8 @@ For Streamable HTTP, omit `--stdio`. The default endpoint is
 explicit `2025-06-18` compatibility.
 
 After the HTTP server starts, open `http://127.0.0.1:8765/wiki` for the
-clickable bilingual User Wiki. It includes exact PowerShell startup commands
-and explains which token `/app` expects.
+clickable bilingual User Wiki. It includes exact PowerShell startup commands and
+explains the separate Admin and MCP credential boundaries.
 
 ## Integrated v0.2.2 architecture
 

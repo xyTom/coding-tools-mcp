@@ -110,5 +110,5 @@ coding-tools-mcp --permission-mode dangerous --workspace /path/to/repo
 
 Use this only with trusted workspaces and trusted clients in an externally hardened environment. `--dangerously-skip-all-permissions` remains as a compatibility alias.
 
-The runtime Wiki explains the complete CLI startup flow and that `/app` uses
-the server's `CODING_TOOLS_MCP_AUTH_TOKEN`, not a separate WebUI password.
+The runtime Wiki explains the complete CLI startup flow and the separate ordinary
+MCP and dedicated Admin credential boundaries.

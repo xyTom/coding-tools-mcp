@@ -10,8 +10,6 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -48,7 +46,7 @@ class RuntimeManager:
     ) -> None:
         self._sessions: dict[str, ManagedSession] = {}
         self._tunnel_providers = TunnelProviderRegistry()
-        self._runner_status_resolver = runner_status_resolver or self._resolve_runner_status_from_operator
+        self._runner_status_resolver = runner_status_resolver
 
     def start(self, profile: WorkspaceProfile) -> RuntimeStatus:
         try:
@@ -282,54 +280,6 @@ class RuntimeManager:
         except Exception:  # noqa: BLE001 - status source must not break the desktop runtime
             return "unknown"
         return status if status in {"connected", "disconnected", "unknown"} else "unknown"
-
-    def _resolve_runner_status_from_operator(self, profile: WorkspaceProfile) -> str:
-        # OAuth profiles do not hold an access token. Do not substitute the
-        # authorization password, token-signing secret, or an Admin credential.
-        if profile.auth.type == "oauth":
-            return "unknown"
-        if profile.auth.type not in {"bearer", "noauth"}:
-            return "unknown"
-        if not self._port_is_listening(profile.runtime.local_port):
-            return "unknown"
-        headers = {"Accept": "application/json"}
-        if profile.auth.type == "bearer":
-            token = profile.auth.bearer_token.strip()
-            if not token:
-                return "unknown"
-            headers["Authorization"] = f"Bearer {token}"
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{profile.runtime.local_port}/api/app/workspaces",
-            headers=headers,
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=self.RUNNER_STATUS_TIMEOUT_SECONDS,
-            ) as response:
-                raw = response.read(self.RUNNER_STATUS_MAX_BYTES + 1)
-        except (OSError, urllib.error.URLError, ValueError):
-            return "unknown"
-        if len(raw) > self.RUNNER_STATUS_MAX_BYTES:
-            return "unknown"
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
-            return "unknown"
-        workspaces = payload.get("workspaces") if isinstance(payload, dict) else None
-        if not isinstance(workspaces, list):
-            return "unknown"
-        runner_states = [
-            item.get("runner_status")
-            for item in workspaces
-            if isinstance(item, dict) and item.get("target") == "runner"
-        ]
-        if "connected" in runner_states:
-            return "connected"
-        if any(state in {"disconnected", "unavailable"} for state in runner_states):
-            return "disconnected"
-        return "unknown"
 
     def mobile_onboarding(
         self,

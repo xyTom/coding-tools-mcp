@@ -9,7 +9,6 @@ from .i18n import tr
 from .models import MCP_ENDPOINT_PATH, WorkspaceProfile
 
 
-OPERATOR_APP_PATH = "/app"
 ADMIN_APP_PATH = "/admin"
 
 HOSTNAME_RE = re.compile(
@@ -277,7 +276,6 @@ class MobileOnboarding:
     auth_required: bool
     externally_managed: bool
     public_base_url: str
-    operator_app_url: str
     mcp_url: str
     admin_url: str
 
@@ -306,7 +304,6 @@ def build_mobile_onboarding(
         auth_required=profile.auth.type != "noauth",
         externally_managed=provider.externally_managed,
         public_base_url=base_url,
-        operator_app_url=f"{base_url}{OPERATOR_APP_PATH}" if base_url else "",
         mcp_url=f"{base_url}{MCP_ENDPOINT_PATH}" if base_url else "",
         admin_url=f"{base_url}{ADMIN_APP_PATH}" if base_url else "",
     )

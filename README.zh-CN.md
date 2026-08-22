@@ -62,7 +62,7 @@ npx coding-tools-mcp --stdio --workspace /path/to/repo
 `2025-06-18`。
 
 HTTP 服务启动后，打开 `http://127.0.0.1:8765/wiki` 即可使用可点击跳转的
-中英文 Wiki，其中包含完整 PowerShell 启动命令和 `/app` 凭据说明。
+中英文 Wiki，其中包含完整 PowerShell 启动命令和 Admin/MCP 凭据边界说明。
 
 ## 集成后的 v0.2.2 架构
 

@@ -916,6 +916,12 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                         timeout=5,
                     )
                 self.assertEqual(app_removed.exception.code, 404)
+                with self.assertRaises(urllib.error.HTTPError) as api_removed:
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{server.server_address[1]}/api/app/workspaces",
+                        timeout=5,
+                    )
+                self.assertEqual(api_removed.exception.code, 404)
                 self.assertIn("Coding Tools MCP 使用 Wiki", wiki_page)
                 self.assertIn("CODING_TOOLS_MCP_AUTH_TOKEN", wiki_page)
                 self.assertNotIn('href="/app"', wiki_page)
