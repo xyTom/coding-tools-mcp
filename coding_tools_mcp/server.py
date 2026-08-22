@@ -58,6 +58,11 @@ from .admin_sessions import (
 from .envutils import ENV_PREFIX, truthy_env
 from .execution import ExecutionBackend, LocalExecutionBackend
 from .codex_sessions import CodexSessionScanner
+from .conversation_continuity import (
+    ConversationBindingStore,
+    ConversationBindingStoreError,
+    ConversationContinuityService,
+)
 from .errors import JsonRpcError, ToolFailure
 from .json_utils import strict_json_bytes, strict_json_loads
 from .landlock_exec import libc_syscall
@@ -705,6 +710,23 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Return server, workspace, project-context, auth, policy, and fixed-tool metadata.",
         read_only=True,
         idempotent=True,
+    ),
+    "conversation_start": ToolSpec(
+        title="Start or resume conversation",
+        description="Start a Conversation or resume the exact durable client-window binding.",
+        read_only=False,
+        idempotent=True,
+    ),
+    "conversation_list": ToolSpec(
+        title="List conversations",
+        description="List authorized Conversation summaries for explicit recovery.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "conversation_resume": ToolSpec(
+        title="Resume conversation",
+        description="Bind the current client window to an authorized existing Conversation.",
+        read_only=False,
     ),
     "upstream_tool_search": ToolSpec(
         title="Search upstream tools",
@@ -1638,6 +1660,45 @@ class Runtime:
                 if part
             ),
         }
+
+    def _conversation_continuity(self) -> ConversationContinuityService:
+        service = getattr(self, "conversation_continuity", None)
+        if not isinstance(service, ConversationContinuityService):
+            raise ToolFailure(
+                "CONVERSATION_CONTINUITY_UNAVAILABLE",
+                "Conversation continuity is unavailable for this transport.",
+                category="configuration",
+                retryable=True,
+            )
+        return service
+
+    def conversation_start(self, args: dict[str, Any]) -> dict[str, Any]:
+        del args
+        return {"ok": True, **self._conversation_continuity().start_or_resume_exact(runtime=self)}
+
+    def conversation_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        limit = args.get("limit", 20)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "limit must be an integer between 1 and 100.",
+                category="validation",
+            )
+        return {"ok": True, **self._conversation_continuity().list_for_runtime(self, limit=limit)}
+
+    def conversation_resume(self, args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            payload = self._conversation_continuity().resume_explicit(
+                self,
+                args.get("conversation_id", ""),
+            )
+        except ConversationBindingStoreError as exc:
+            raise ToolFailure(
+                "CONVERSATION_NOT_FOUND",
+                str(exc),
+                category="validation",
+            ) from exc
+        return {"ok": True, **payload}
 
     def list_tools(self) -> dict[str, Any]:
         local_definitions = [
@@ -5106,6 +5167,18 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     string_array = {"type": "array", "items": {"type": "string"}}
     return {
         "server_info": object_schema(),
+        "conversation_start": object_schema(),
+        "conversation_list": object_schema(
+            {
+                "limit": {**integer, "minimum": 1, "maximum": 100, "default": 20},
+            }
+        ),
+        "conversation_resume": object_schema(
+            {
+                "conversation_id": {**string, "minLength": 1},
+            },
+            ["conversation_id"],
+        ),
         "upstream_tool_search": object_schema(
             {
                 "query": {**string, "minLength": 1},
@@ -6553,9 +6626,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                             "MCP-Protocol-Version does not match the initialized session",
                             request_id=request.get("id"),
                             data={"expected": runtime.protocol_version, "received": protocol_version},
-                        )
+                )
                         return
                 self._runtime = runtime
+                continuity = self.server.conversation_continuity()  # type: ignore[attr-defined]
+                if continuity is not None:
+                    runtime.conversation_continuity = continuity
                 self._send_session_header = True
                 response = self.handle_rpc(request)
         else:
@@ -7215,6 +7291,7 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         runner_credentials: RunnerCredentialStore | None = None,
         runner_registry: RunnerRegistry | None = None,
         runner_job_reconciler: RunnerJobReconciler | None = None,
+        conversation_binding_store: ConversationBindingStore | None = None,
     ) -> None:
         super().__init__(address, handler)
         self.control_runtime = control_runtime
@@ -7229,6 +7306,14 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         self.runner_credentials = runner_credentials
         self.runner_registry = runner_registry
         self.runner_job_reconciler = runner_job_reconciler
+        self.conversation_binding_store = conversation_binding_store
+
+    def conversation_continuity(self) -> ConversationContinuityService | None:
+        store = self.conversation_binding_store
+        transcripts = getattr(self.operator_service, "transcript_store", None)
+        if store is None or transcripts is None:
+            return None
+        return ConversationContinuityService(store, transcripts)
 
     def server_close(self) -> None:
         if self.admin_sessions is not None:
@@ -7444,6 +7529,7 @@ SERVER_SETTINGS_FILENAME = "server-settings.json"
 UPSTREAM_CONFIG_FILENAME = "mcp-servers.json"
 TRANSCRIPT_DB_FILENAME = "transcripts.sqlite3"
 AGENT_SESSION_DB_FILENAME = "agent-sessions.sqlite3"
+CONVERSATION_BINDING_DB_FILENAME = "conversation-bindings.sqlite3"
 
 
 def load_workspace_startup(
@@ -8093,6 +8179,14 @@ def run_http(args: argparse.Namespace) -> int:
         runtime.close()
         print(f"ERROR: Transcript persistence is unavailable: {exc}", file=sys.stderr)
         return 2
+    try:
+        conversation_binding_store = ConversationBindingStore(
+            config_dir / CONVERSATION_BINDING_DB_FILENAME
+        )
+    except (ConversationBindingStoreError, OSError) as exc:
+        runtime.close()
+        print(f"ERROR: Conversation binding persistence is unavailable: {exc}", file=sys.stderr)
+        return 2
 
     admin_service: AdminService | None = None
     if admin_token:
@@ -8270,6 +8364,7 @@ def run_http(args: argparse.Namespace) -> int:
         runner_credentials=runner_credentials,
         runner_registry=runner_registry,
         runner_job_reconciler=runner_job_reconciler,
+        conversation_binding_store=conversation_binding_store,
     )
     if admin_service is not None:
         admin_service.bind_http_session_status(server.sessions.snapshot)

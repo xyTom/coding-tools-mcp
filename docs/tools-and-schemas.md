@@ -6,10 +6,13 @@ properties, annotations, and error codes with the contract.
 
 ## Fixed inventory
 
-The default catalog contains exactly 25 tools:
+The default catalog contains exactly 28 tools:
 
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
+- `conversation_start`: start a Conversation or resume the exact durable client-window binding.
+- `conversation_list`: list authorized Conversation summaries for explicit recovery.
+- `conversation_resume`: bind the current client window to an existing authorized Conversation.
 - `upstream_tool_search`: search the fixed upstream catalog using compact sanitized metadata.
 - `upstream_tool_describe`: inspect one sanitized upstream definition and public schema digest.
 - `upstream_tool_call`: validate and call a catalog tool classified as read-only.
@@ -37,7 +40,7 @@ The default catalog contains exactly 25 tools:
 - `view_image`: one MCP image content block plus structured metadata.
 
 `view_image` may be disabled when an installation cannot accept binary image
-content. That capability gate is not a tool profile. The other 24 local tools
+content. That capability gate is not a tool profile. The other non-Broker tools
 are always advertised.
 
 Upstream tools are discovered only during Runtime initialization and use

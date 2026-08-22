@@ -128,7 +128,7 @@ Tool failures keep the same envelope with `isError: true`, a readable error in
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UPSTREAM_TOOL_COLLISION", "UPSTREAM_TOOL_NOT_FOUND", "UPSTREAM_RESULT_NOT_FOUND"]
+["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "CONVERSATION_CONTINUITY_UNAVAILABLE", "CONVERSATION_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SESSION_CLOSED", "SESSION_LIMIT_REACHED", "SESSION_NOT_FOUND", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING", "UPSTREAM_TOOL_COLLISION", "UPSTREAM_TOOL_NOT_FOUND", "UPSTREAM_RESULT_NOT_FOUND"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -220,6 +220,34 @@ Annotations: `{"title":"Server info","readOnlyHint":true,"destructiveHint":false
 
 Returns server version, protocol, workspace, cwd, fixed tool count, auth state,
 permission mode, runtime directories, project-context metadata, and exec policy.
+
+### conversation_start
+
+Inputs: none.
+
+Annotations: `{"title":"Start or resume conversation","readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Resumes only an exact durable principal/client-window/workspace/repo binding;
+otherwise creates a Conversation shell. It never chooses the most recent
+Conversation from credential or workspace proximity.
+
+### conversation_list
+
+Inputs: `"limit"`.
+
+Annotations: `{"title":"List conversations","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
+
+Returns bounded authorized summaries for explicit recovery.
+
+### conversation_resume
+
+Inputs: `"conversation_id"`.
+
+Annotations: `{"title":"Resume conversation","readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
+
+Binds the current transport window to an existing Conversation after ownership
+and Workspace checks. Unauthorized IDs are reported unavailable without an
+ownership oracle.
 
 ### check_exec_environment
 

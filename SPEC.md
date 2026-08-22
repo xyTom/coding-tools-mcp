@@ -17,10 +17,12 @@ no dynamic `tools/list_changed`, and no required `open_workspace` call.
 `apply_patch` is the only direct file-write tool. `safe`, `trusted`, and
 `dangerous` are command permission policies and never alter `tools/list`.
 
-The default catalog contains 25 tools:
+The default catalog contains 28 tools:
 
 - runtime/context: `server_info`, `check_exec_environment`, `get_default_cwd`,
   `set_default_cwd`
+- conversation continuity: `conversation_start`, `conversation_list`,
+  `conversation_resume`
 - workspace inspection: `read_file`, `list_dir`, `list_files`, `search_text`
 - mutation: `apply_patch`
 - processes: `exec_command`, `write_stdin`, `read_output`, `kill_session`
