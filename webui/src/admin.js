@@ -426,7 +426,15 @@ function renderConversationItems(container, items, onSelect) {
     const title = createNode(documentRef, 'h3', { text: item.title || item.conversation_id || 'Untitled conversation' });
     const identity = createNode(documentRef, 'p', { className: 'muted', text: `${item.workspace_id || '—'} / ${item.conversation_id || '—'}` });
     const preview = createNode(documentRef, 'p', { text: item.preview || '无摘要正文。' });
-    const counts = createNode(documentRef, 'p', { className: 'muted', text: `Messages: ${item.message_count || 0} · Context: ${item.context_count || 0}` });
+    const execution = item.execution;
+    const counts = createNode(
+      documentRef,
+      'p',
+      {
+        className: 'muted',
+        text: `Messages: ${item.message_count || 0} · Context: ${item.context_count || 0} · Execution: ${execution ? execution.status : 'none'}`,
+      },
+    );
     button.append(title, identity, preview, counts);
     button.addEventListener('click', () => onSelect?.(item, button));
     card.append(button);
@@ -448,6 +456,21 @@ function renderConversationDetail(container, payload, handlers = {}) {
   deleteConversation.addEventListener('click', () => handlers.onDeleteConversation?.(conversation, deleteConversation));
   heading.append(titleWrap, deleteConversation);
   container.append(heading);
+
+  const executions = payload.executions || [];
+  if (executions.length) {
+    const executionHeading = createNode(documentRef, 'h4', { text: `Agent Execution (${executions.length})` });
+    const executionList = createNode(documentRef, 'div', { className: 'compact-list' });
+    for (const execution of executions) {
+      const card = createNode(documentRef, 'section', { className: 'context-entry' });
+      card.append(
+        createNode(documentRef, 'p', { className: 'muted', text: `${execution.session_id} · ${execution.status} · ${execution.backend_kind}` }),
+        createNode(documentRef, 'pre', { text: `last turn: ${execution.last_turn_id || '—'}` }),
+      );
+      executionList.append(card);
+    }
+    container.append(executionHeading, executionList);
+  }
 
   const messagesHeading = createNode(documentRef, 'h4', { text: `Messages (${payload.messages_total || 0})` });
   container.append(messagesHeading);
@@ -1401,7 +1424,7 @@ function initAdminApp(documentRef = document) {
     const query = new URLSearchParams({ workspace_id: workspaceId, page: String(state.conversationPage), page_size: '20' });
     const search = byId('chatQuery').value.trim();
     if (search) query.set('query', search);
-    const payload = await api.request(`/chat/conversations?${query}`);
+    const payload = await api.request(`/conversations?${query}`);
     state.conversationTotal = payload.total || 0;
     state.conversations = payload.items || [];
     byId('conversationPage').textContent = `第 ${payload.page || 1} 页`;
@@ -1431,8 +1454,8 @@ function initAdminApp(documentRef = document) {
     const selected = state.selectedConversation;
     if (!selected) return;
     const query = new URLSearchParams({ message_page: String(state.messagePage), message_page_size: '50', context_page: String(state.contextPage), context_page_size: '50' });
-    const payload = await api.request(`/chat/conversations/${encodeURIComponent(selected.workspaceId)}/${encodeURIComponent(selected.conversationId)}?${query}`);
-    renderConversationDetail(byId('conversationDetail'), payload, {
+    const payload = await api.request(`/conversations/${encodeURIComponent(selected.workspaceId)}/${encodeURIComponent(selected.conversationId)}`);
+    renderConversationDetail(byId('conversationDetail'), { ...payload, ...payload.conversation }, {
       onDeleteMessage: async (message, button) => {
         if (await deleteChatResource('messages', selected.workspaceId, message.message_id, button, '最多删除 1 条 message。')) await loadConversationDetail();
       },

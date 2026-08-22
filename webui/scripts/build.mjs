@@ -14,8 +14,6 @@ const adminScripts = [
   'admin.js',
 ];
 
-const appScripts = ['app/model.js', 'app/api-client.js', 'app/app.js'];
-
 async function buildPage(htmlName, styles, scripts) {
   let built = await readFile(path.join(srcDir, htmlName), 'utf8');
   for (const name of styles) {
@@ -38,16 +36,14 @@ async function buildPage(htmlName, styles, scripts) {
   return `${built.trim()}\n`;
 }
 
-const [adminBuilt, appBuilt, wikiBuilt] = await Promise.all([
+const [adminBuilt, wikiBuilt] = await Promise.all([
   buildPage('admin.html', ['admin.css'], adminScripts),
-  buildPage('app.html', ['admin.css', 'app/app.css'], appScripts),
   buildPage('wiki.html', ['wiki.css'], ['wiki.js']),
 ]);
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 await Promise.all([
   writeFile(path.join(outDir, 'admin.html'), adminBuilt, 'utf8'),
-  writeFile(path.join(outDir, 'app.html'), appBuilt, 'utf8'),
   writeFile(path.join(outDir, 'wiki.html'), wikiBuilt, 'utf8'),
 ]);
-console.log('Built coding_tools_mcp/webui_dist/{admin,app,wiki}.html from webui/src/**');
+console.log('Built coding_tools_mcp/webui_dist/{admin,wiki}.html from webui/src/**');

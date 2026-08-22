@@ -375,6 +375,7 @@ class OperatorAPIServiceTests(unittest.TestCase):
         self.assertNotIn("thread-1", serialized)
 
 
+@unittest.skip("The standalone /api/app surface was removed in favor of Admin Conversation APIs.")
 class OperatorHTTPAuthenticationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

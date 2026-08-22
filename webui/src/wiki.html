@@ -3,171 +3,69 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <meta name="referrer" content="no-referrer">
   <title>Coding Tools MCP 使用 Wiki</title>
   <link rel="stylesheet" href="./wiki.css">
 </head>
 <body>
-  <a class="skip-link" href="#content">跳到正文 / Skip to content</a>
   <header class="wiki-header">
     <div>
       <a class="brand" href="/wiki">Coding Tools MCP</a>
-      <p data-lang="zh">使用 Wiki：启动、登录、Agent 工作台与远程 Runner</p>
-      <p data-lang="en" hidden>User Wiki: startup, sign-in, Agent workbench, and remote Runner</p>
+      <p data-lang="zh">启动、登录、会话连续性与远程 Runner</p>
+      <p data-lang="en" hidden>Startup, sign-in, conversation continuity, and remote Runner</p>
     </div>
     <div class="header-actions">
-      <div class="language-switch" aria-label="Language">
+      <div class="language-switch">
         <button type="button" data-set-locale="zh" aria-pressed="true">中文</button>
         <button type="button" data-set-locale="en" aria-pressed="false">English</button>
       </div>
-      <a href="/app">/app</a>
       <a href="/admin">/admin</a>
     </div>
   </header>
-
-  <div class="wiki-layout">
-    <nav class="wiki-nav" aria-label="Wiki contents">
-      <strong data-lang="zh">目录</strong><strong data-lang="en" hidden>Contents</strong>
-      <a href="#quick-start"><span data-lang="zh">1. 从命令行启动</span><span data-lang="en" hidden>1. Start from the CLI</span></a>
-      <a href="#app-token"><span data-lang="zh">2. /app 密码是什么</span><span data-lang="en" hidden>2. What /app expects</span></a>
-      <a href="#endpoints"><span data-lang="zh">3. 三个入口</span><span data-lang="en" hidden>3. Three endpoints</span></a>
-      <a href="#agent-flow"><span data-lang="zh">4. Agent 工作流</span><span data-lang="en" hidden>4. Agent workflow</span></a>
-      <a href="#runner"><span data-lang="zh">5. 远程 Runner</span><span data-lang="en" hidden>5. Remote Runner</span></a>
-      <a href="#troubleshooting"><span data-lang="zh">6. 常见问题</span><span data-lang="en" hidden>6. Troubleshooting</span></a>
-      <a href="#security"><span data-lang="zh">7. 安全清单</span><span data-lang="en" hidden>7. Security checklist</span></a>
-    </nav>
-
-    <main id="content" class="wiki-content">
-      <section class="hero">
-        <div data-lang="zh">
-          <span class="eyebrow">先看这里</span>
-          <h1>五分钟启动 Coding Tools MCP</h1>
-          <p><code>/app</code> 是可选的 Codex Agent 工作台，不是 GPT/ChatGPT 网页。它没有独立密码，并要求执行主机已安装、登录 Codex CLI。</p>
-        </div>
-        <div data-lang="en" hidden>
-          <span class="eyebrow">Start here</span>
-          <h1>Start Coding Tools MCP in five minutes</h1>
-          <p><code>/app</code> is an optional Codex Agent workbench, not a GPT/ChatGPT webpage. It has no separate password and requires Codex CLI to be installed and signed in on the execution host.</p>
-        </div>
-        <div class="hero-links">
-          <a class="primary-link" href="#quick-start" data-lang="zh">查看启动命令</a>
-          <a class="primary-link" href="#quick-start" data-lang="en" hidden>Show startup commands</a>
-          <a href="/app" data-lang="zh">打开 Agent 工作台</a>
-          <a href="/app" data-lang="en" hidden>Open Agent workbench</a>
-        </div>
-      </section>
-
-      <section id="quick-start">
-        <h2><span data-lang="zh">1. 从命令行启动</span><span data-lang="en" hidden>1. Start from the command line</span></h2>
-        <div data-lang="zh">
-          <p>在 PowerShell 中进入仓库、安装当前代码，然后设置两个不同的 token。token 的内容由你自己决定；可以先运行下面的生成命令两次。</p>
-        </div>
-        <div data-lang="en" hidden>
-          <p>In PowerShell, enter the repository, install the checkout, and configure two different tokens. You choose their values; run the generator below twice if needed.</p>
-        </div>
-        <div class="code-card">
-          <div class="code-head"><span data-lang="zh">生成随机 token（运行两次）</span><span data-lang="en" hidden>Generate a random token (run twice)</span><button type="button" data-copy-target="tokenCommand">复制 / Copy</button></div>
-          <pre><code id="tokenCommand">python -c "import secrets; print(secrets.token_urlsafe(32))"</code></pre>
-        </div>
-        <div class="code-card">
-          <div class="code-head"><span data-lang="zh">安装并启动</span><span data-lang="en" hidden>Install and start</span><button type="button" data-copy-target="startCommand">复制 / Copy</button></div>
-          <pre><code id="startCommand">cd C:\path\to\coding-tools-mcp
+  <main id="content" class="wiki-content">
+    <section class="hero">
+      <div data-lang="zh">
+        <span class="eyebrow">快速开始</span>
+        <h1>五分钟启动 Coding Tools MCP</h1>
+        <p><code>/admin</code> 是唯一 WebUI 管理入口；ChatGPT/MCP 客户端连接 <code>/mcp</code>。会话连续性使用精确的 client-window 绑定，不会按凭据猜测最近会话。</p>
+      </div>
+      <div data-lang="en" hidden>
+        <span class="eyebrow">Quick start</span>
+        <h1>Start Coding Tools MCP in five minutes</h1>
+        <p><code>/admin</code> is the only WebUI management entry; ChatGPT/MCP clients connect to <code>/mcp</code>. Conversation continuity uses exact client-window bindings and never guesses the latest conversation from a credential.</p>
+      </div>
+      <div class="hero-links"><a class="primary-link" href="#quick-start" data-lang="zh">查看启动命令</a><a class="primary-link" href="#quick-start" data-lang="en" hidden>Show startup commands</a></div>
+    </section>
+    <section id="quick-start">
+      <h2 data-lang="zh">1. 从命令行启动</h2><h2 data-lang="en" hidden>1. Start from the command line</h2>
+      <div class="code-card"><pre><code id="tokenCommand">python -c "import secrets; print(secrets.token_urlsafe(32))"</code></pre></div>
+      <div class="code-card"><pre><code id="startCommand">cd C:\path\to\coding-tools-mcp
 python -m pip install -e .
-$env:CODING_TOOLS_MCP_AUTH_TOKEN = "&lt;普通用户 token&gt;"
-$env:CODING_TOOLS_MCP_ADMIN_TOKEN = "&lt;另一个 Admin token&gt;"
-coding-tools-mcp --workspace "G:\path\to\your\project" --host 127.0.0.1 --port 8765</code></pre>
-        </div>
-        <div class="note" data-lang="zh">
-          <strong>命令找不到？</strong>
-          <p>把最后一行换成：<code>python -m coding_tools_mcp.server --workspace "G:\path\to\your\project" --host 127.0.0.1 --port 8765</code>。</p>
-        </div>
-        <div class="note" data-lang="en" hidden>
-          <strong>Command not found?</strong>
-          <p>Replace the final line with <code>python -m coding_tools_mcp.server --workspace "G:\path\to\your\project" --host 127.0.0.1 --port 8765</code>.</p>
-        </div>
-        <p data-lang="zh">看到终端输出 <code>coding-tools-mcp listening on http://127.0.0.1:8765/mcp</code> 后，保持这个窗口运行。用 <kbd>Ctrl</kbd>+<kbd>C</kbd> 停止服务。</p>
-        <p data-lang="en" hidden>Keep the terminal open after it reports <code>coding-tools-mcp listening on http://127.0.0.1:8765/mcp</code>. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> to stop it.</p>
-      </section>
-
-      <section id="app-token">
-        <h2><span data-lang="zh">2. /app 处的“密码”在哪里设置？</span><span data-lang="en" hidden>2. Where is the /app “password” configured?</span></h2>
-        <div class="answer-grid">
-          <article>
-            <h3 data-lang="zh">最简单的答案</h3><h3 data-lang="en" hidden>Short answer</h3>
-            <p data-lang="zh"><code>/app</code> 输入的是上面 PowerShell 中的 <code>CODING_TOOLS_MCP_AUTH_TOKEN</code> 值，不是一个单独的 App 密码。</p>
-            <p data-lang="en" hidden><code>/app</code> expects the value of <code>CODING_TOOLS_MCP_AUTH_TOKEN</code> from the startup shell. It is not a separate App password.</p>
-          </article>
-          <article>
-            <h3 data-lang="zh">为什么 WebUI 中没有设置项？</h3><h3 data-lang="en" hidden>Why is it absent from the WebUI?</h3>
-            <p data-lang="zh">这是服务启动时的认证边界。Admin WebUI 必须先通过认证才能管理服务，因此不能用它来创建当前进程自己的登录 token。修改环境变量后需要重启服务。</p>
-            <p data-lang="en" hidden>This is a startup authentication boundary. The Admin WebUI must already be authenticated before managing the service, so it cannot bootstrap the current process's own login token. Restart after changing the environment variable.</p>
-          </article>
-        </div>
-        <ol data-lang="zh">
-          <li>启动前设置 <code>$env:CODING_TOOLS_MCP_AUTH_TOKEN = "你的随机 token"</code>。</li>
-          <li>打开 <a href="/app">/app</a>，点击“连接身份”。</li>
-          <li>把同一个 token 粘贴到输入框。</li>
-        </ol>
-        <ol data-lang="en" hidden>
-          <li>Before startup, set <code>$env:CODING_TOOLS_MCP_AUTH_TOKEN = "your random token"</code>.</li>
-          <li>Open <a href="/app">/app</a> and choose **Connect identity**.</li>
-          <li>Paste the same token into the field.</li>
-        </ol>
-        <div class="warning" data-lang="zh"><strong>不要填 Admin token。</strong> <code>CODING_TOOLS_MCP_ADMIN_TOKEN</code> 只用于 <code>/admin</code>，故意不能登录 <code>/app</code>。</div>
-        <div class="warning" data-lang="en" hidden><strong>Do not enter the Admin token.</strong> <code>CODING_TOOLS_MCP_ADMIN_TOKEN</code> is for <code>/admin</code> only and intentionally cannot sign in to <code>/app</code>.</div>
-        <p data-lang="zh">高级部署也可以在 OAuth 模式下输入 OAuth access token。本机 loopback 若完全未配置认证，服务会显示 <code>no auth configured</code>；这只适合受信任的本机环境，不要公开暴露。</p>
-        <p data-lang="en" hidden>Advanced deployments may enter an OAuth access token instead. A loopback server started without credentials reports <code>no auth configured</code>; use that only in a trusted local environment and never expose it publicly.</p>
-      </section>
-
-      <section id="endpoints">
-        <h2><span data-lang="zh">3. 三个入口不要混用</span><span data-lang="en" hidden>3. Do not mix the three endpoints</span></h2>
-        <div class="endpoint-grid">
-          <article><code>/app</code><h3 data-lang="zh">Agent 工作台</h3><h3 data-lang="en" hidden>Agent workbench</h3><p data-lang="zh">使用普通 bearer/OAuth token。</p><p data-lang="en" hidden>Uses an ordinary bearer/OAuth token.</p></article>
-          <article><code>/admin</code><h3 data-lang="zh">管理控制台</h3><h3 data-lang="en" hidden>Admin console</h3><p data-lang="zh">独立 Admin token 只用于一次性交换服务器端 Admin Session；后续使用 HttpOnly cookie + CSRF。</p><p data-lang="en" hidden>The separate Admin token is used only for a one-time server-side Admin Session exchange; subsequent requests use an HttpOnly cookie plus CSRF.</p></article>
-          <article><code>/mcp</code><h3 data-lang="zh">MCP 客户端</h3><h3 data-lang="en" hidden>MCP clients</h3><p data-lang="zh">使用与 /app 相同的普通身份。</p><p data-lang="en" hidden>Uses the same ordinary identity as /app.</p></article>
-        </div>
-      </section>
-
-      <section id="agent-flow">
-        <h2><span data-lang="zh">4. Agent 工作台基本流程</span><span data-lang="en" hidden>4. Agent workbench workflow</span></h2>
-        <div class="answer-grid">
-          <article><h3 data-lang="zh">可选工作台，不是 GPT 网页</h3><h3 data-lang="en" hidden>Optional workbench, not a GPT webpage</h3><p data-lang="zh">它通过 Codex App Server 驱动 Codex Agent；不提供 ChatGPT/GPT 网页聊天服务。</p><p data-lang="en" hidden>It drives a Codex Agent through Codex App Server; it does not provide a ChatGPT/GPT web chat service.</p></article>
-          <article><h3 data-lang="zh">执行主机前提</h3><h3 data-lang="en" hidden>Execution-host prerequisite</h3><p data-lang="zh">执行主机必须安装 Codex CLI，并已完成登录（例如先运行 <code>codex login</code>）。Runner Workspace 必须在对应 Runner 主机完成。</p><p data-lang="en" hidden>The execution host must have Codex CLI installed and signed in (for example, run <code>codex login</code>). A Runner Workspace requires this on its Runner host.</p></article>
-          <article><h3 data-lang="zh">三套不同凭据</h3><h3 data-lang="en" hidden>Three credential sets</h3><p data-lang="zh">App bearer/OAuth access token 用于 /app；Admin token 只在 /admin 创建服务器端 Session 时使用；Codex 登录凭据由执行主机上的 Codex CLI 管理。三者不能互换。</p><p data-lang="en" hidden>The App bearer/OAuth access token is for /app; the Admin token is used only to create a server-side Session for /admin; Codex CLI credentials are managed on the execution host. They are not interchangeable.</p></article>
-          <article><h3 data-lang="zh">两部分持久化</h3><h3 data-lang="en" hidden>Two-part persistence</h3><p data-lang="zh">Coding Tools MCP SQLite 保存 Agent Session 元数据，Codex thread store 保存模型 thread 与对话连续性；两者共同完成恢复。</p><p data-lang="en" hidden>Coding Tools MCP SQLite stores Agent Session metadata, while the Codex thread store keeps model-thread and conversation continuity; recovery depends on both.</p></article>
-        </div>
-        <ol data-lang="zh"><li>连接身份并选择 Workspace。</li><li>创建 Agent Session，填写任务说明。</li><li>发送 Turn；遇到审批请求时检查命令再决定。</li><li>运行 Validation 获取结构化证据。</li><li>交接前查看 Handoff 中的分支、指纹、job 和验证结果。</li></ol>
-        <ol data-lang="en" hidden><li>Connect the identity and select a Workspace.</li><li>Create an Agent Session and enter task instructions.</li><li>Send a turn; inspect commands before deciding approval requests.</li><li>Run Validation for structured evidence.</li><li>Before handoff, inspect the branch, fingerprint, jobs, and validation result.</li></ol>
-        <p data-lang="zh">Session 会持久化。页面刷新或断线后重新选择原 Session，不要盲目重复提交可能已经执行的写操作。</p>
-        <p data-lang="en" hidden>Sessions are durable. After refresh or disconnect, reselect the original Session instead of blindly resubmitting a write that may already have run.</p>
-      </section>
-
-      <section id="runner">
-        <h2><span data-lang="zh">5. 连接远程 Runner</span><span data-lang="en" hidden>5. Connect a remote Runner</span></h2>
-        <p data-lang="zh">Runner credential 由 Admin API 签发，与 App token、Admin token 都不同。生产连接必须使用 <code>wss://</code>。</p>
-        <p data-lang="en" hidden>A Runner credential is issued by the Admin API and is separate from both App and Admin tokens. Production connections must use <code>wss://</code>.</p>
-        <div class="code-card"><div class="code-head"><span>Runner</span><button type="button" data-copy-target="runnerCommand">复制 / Copy</button></div><pre><code id="runnerCommand">$env:CODING_TOOLS_MCP_RUNNER_CREDENTIAL = "&lt;Runner credential&gt;"
-coding-tools-mcp-runner `
-  --server "wss://control.example/runner/ws" `
-  --runner-id "lab-win-01" `
-  --workspace "chem-project=G:\Research\chem-project"</code></pre></div>
-      </section>
-
-      <section id="troubleshooting">
-        <h2><span data-lang="zh">6. 常见问题</span><span data-lang="en" hidden>6. Troubleshooting</span></h2>
-        <details><summary data-lang="zh">/app 显示 401</summary><summary data-lang="en" hidden>/app returns 401</summary><p data-lang="zh">确认输入的是当前服务进程启动时读取的 <code>CODING_TOOLS_MCP_AUTH_TOKEN</code>，不是 Admin token。修改环境变量后重启服务。</p><p data-lang="en" hidden>Enter the <code>CODING_TOOLS_MCP_AUTH_TOKEN</code> read by the current server process, not the Admin token. Restart after changing it.</p></details>
-        <details><summary data-lang="zh">端口打不开</summary><summary data-lang="en" hidden>The port does not open</summary><p data-lang="zh">确认启动终端仍在运行，并以终端实际输出的地址为准。本文命令显式使用 8765。</p><p data-lang="en" hidden>Keep the startup terminal running and use the address it reports. This Wiki explicitly uses port 8765.</p></details>
-        <details><summary data-lang="zh">Runner unavailable</summary><summary data-lang="en" hidden>Runner unavailable</summary><p data-lang="zh">恢复原 Runner 及其 credential。系统不会把远程 Workspace 偷偷切换成本地路径。</p><p data-lang="en" hidden>Reconnect the original Runner with its credential. A remote Workspace never silently falls back to a local path.</p></details>
-      </section>
-
-      <section id="security">
-        <h2><span data-lang="zh">7. 安全清单</span><span data-lang="en" hidden>7. Security checklist</span></h2>
-        <ul data-lang="zh"><li>普通 bearer/OAuth、Admin token、Runner credential、Codex CLI 登录凭据彼此分开。</li><li>Admin token 只用于 <code>POST /admin/api/session</code> 一次性交换；不要保存到 Web Storage、URL 或可读 Cookie。</li><li>不要把 token 放进 URL、二维码、Git、截图或聊天记录。</li><li>公网只使用 HTTPS/WSS 和认证 tunnel。</li><li>不要公开暴露 noauth 服务。</li></ul>
-        <ul data-lang="en" hidden><li>Keep ordinary bearer/OAuth, Admin token, Runner credentials, and Codex CLI credentials separate.</li><li>Use the Admin token only for the one-time <code>POST /admin/api/session</code> exchange; never store it in Web Storage, URLs, or script-readable cookies.</li><li>Keep tokens out of URLs, QR codes, Git, screenshots, and chats.</li><li>Use HTTPS/WSS and an authenticated tunnel for public access.</li><li>Never expose a no-auth service publicly.</li></ul>
-      </section>
-    </main>
-  </div>
+$env:CODING_TOOLS_MCP_AUTH_TOKEN = "&lt;ordinary user token&gt;"
+$env:CODING_TOOLS_MCP_ADMIN_TOKEN = "&lt;separate Admin token&gt;"
+coding-tools-mcp --workspace "G:\path\to\your\project" --host 127.0.0.1 --port 8765</code></pre></div>
+      <p data-lang="zh">Admin token 只用于一次性 <code>POST /admin/api/session</code> 交换；之后使用 HttpOnly + SameSite=Strict 的服务器端 Admin Session。原始 Admin token 不写入 Web Storage、URL 或可读 Cookie。</p>
+      <p data-lang="en" hidden>The Admin token is used only for a one-time <code>POST /admin/api/session</code> exchange; afterwards requests use a server-side Admin Session with an HttpOnly, SameSite=Strict cookie. The raw Admin token is never written to Web Storage, URLs, or script-readable cookies.</p>
+    </section>
+    <section id="endpoints">
+      <h2 data-lang="zh">2. 不要混用入口</h2><h2 data-lang="en" hidden>2. Do not mix entry points</h2>
+      <div class="endpoint-grid">
+        <article><code>/admin</code><h3 data-lang="zh">管理控制台</h3><h3 data-lang="en" hidden>Admin console</h3><p data-lang="zh">Conversation Center 和运维管理入口。</p><p data-lang="en" hidden>Conversation Center and operations management.</p></article>
+        <article><code>/mcp</code><h3 data-lang="zh">MCP 客户端</h3><h3 data-lang="en" hidden>MCP clients</h3><p data-lang="zh">使用普通 bearer/OAuth 身份。</p><p data-lang="en" hidden>Uses the ordinary bearer/OAuth identity.</p></article>
+        <article><code>/runner/ws</code><h3 data-lang="zh">远程 Runner</h3><h3 data-lang="en" hidden>Remote Runner</h3><p data-lang="zh">使用独立 Runner credential。</p><p data-lang="en" hidden>Uses a separate Runner credential.</p></article>
+      </div>
+    </section>
+    <section id="continuity">
+      <h2 data-lang="zh">3. 会话连续性</h2><h2 data-lang="en" hidden>3. Conversation continuity</h2>
+      <p data-lang="zh">Conversation 是统一产品对象。Transcript、上下文证据和 Agent execution 分层存储；MCP transport session 只是短期传输身份。精确匹配 principal、client window 和 workspace/repo scope 才能自动恢复；身份缺失或变化时必须显式 resume。continuation 和 handoff 只读取有界结构化事实，不重建隐藏模型上下文。</p>
+      <p data-lang="zh">Codex CLI 登录凭据由执行主机单独管理；Agent 恢复依赖 Coding Tools MCP SQLite 和 Codex thread store。</p>
+      <p data-lang="en" hidden>A Conversation is the unified product object. Transcript, context evidence, and Agent execution remain separate layers; the MCP transport session is short-lived. Exact principal, client-window, and workspace/repo scope must match for automatic recovery; missing or changed identity requires explicit resume. Continuation and handoff read bounded structured facts and do not recreate hidden model context.</p>
+    </section>
+    <section id="security">
+      <h2 data-lang="zh">4. 安全清单</h2><h2 data-lang="en" hidden>4. Security checklist</h2>
+      <ul data-lang="zh"><li>普通 bearer/OAuth、Admin token、Runner credential 和 Codex CLI 登录彼此分开。</li><li>不要把 token 放进 URL、二维码、Git、截图或聊天。</li><li>公网部署使用 HTTPS/WSS 和已认证隧道，不要暴露 no-auth 服务。</li></ul>
+      <ul data-lang="en" hidden><li>Keep ordinary bearer/OAuth, Admin token, Runner credentials, and Codex CLI sign-in separate.</li><li>Keep tokens out of URLs, QR codes, Git, screenshots, and chats.</li><li>Use HTTPS/WSS and an authenticated tunnel for public access; never expose a no-auth service.</li></ul>
+    </section>
+  </main>
   <script type="module" src="./wiki.js"></script>
 </body>
 </html>

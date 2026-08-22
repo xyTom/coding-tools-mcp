@@ -173,7 +173,7 @@ from .workspace_binding import (
     WorkspaceBindingError,
     WorkspaceBindingResolver,
 )
-from .webui import admin_console_html, operator_app_html, user_guide_html
+from .webui import admin_console_html, user_guide_html
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError, WorkspaceEntry
 from .workspace_host import RemoteMcpHttpRuntimeProxy, WorkspaceHostError, WorkspaceHostFactory
 
@@ -6235,23 +6235,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized == "/runner/ws":
             self.handle_runner_websocket()
             return
-        if normalized == "/app":
-            origin = self.headers.get("Origin")
-            if origin and not is_allowed_origin(origin):
-                self.send_json(
-                    {"error": {"code": "origin_denied", "message": "Origin denied"}},
-                    status=403,
-                )
-                return
-            body = operator_app_html().encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_cors_headers()
-            self.end_headers()
-            self.wfile.write(body)
-            return
         if normalized == "/wiki":
             origin = self.headers.get("Origin")
             if origin and not is_allowed_origin(origin):
@@ -6292,18 +6275,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if normalized.startswith(ADMIN_API_PREFIX):
             self.handle_admin_request("GET")
             return
-        if normalized.startswith(OPERATOR_API_PREFIX):
-            self.handle_operator_request("GET")
-            return
         self.handle_metadata_request(head_only=False)
 
     def do_HEAD(self) -> None:
         normalized = posixpath.normpath(self.path.split("?", 1)[0])
         if normalized.startswith(ADMIN_API_PREFIX):
             self.handle_admin_request("GET", head_only=True)
-            return
-        if normalized.startswith(OPERATOR_API_PREFIX):
-            self.handle_operator_request("GET", head_only=True)
             return
         self.handle_metadata_request(head_only=True)
 
@@ -6319,9 +6296,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         normalized = posixpath.normpath(request_path)
         if normalized.startswith(ADMIN_API_PREFIX):
             self.handle_admin_request("DELETE")
-            return
-        if normalized.startswith(OPERATOR_API_PREFIX):
-            self.handle_operator_request("DELETE")
             return
         if normalized != MCP_ENDPOINT_PATH:
             self.send_json({"error": "Unknown endpoint"}, status=404)
@@ -6364,7 +6338,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             not normalized.startswith(ADMIN_API_PREFIX)
             and not normalized.startswith(OPERATOR_API_PREFIX)
             and normalized not in {
-            "/app",
             "/admin",
             "/wiki",
             MCP_ENDPOINT_PATH,
@@ -6426,9 +6399,6 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         normalized = posixpath.normpath(request_path)
         if normalized.startswith(ADMIN_API_PREFIX):
             self.handle_admin_request("POST")
-            return
-        if normalized.startswith(OPERATOR_API_PREFIX):
-            self.handle_operator_request("POST")
             return
         if normalized == "/oauth/authorize":
             self.handle_oauth_authorize_post()
@@ -6624,18 +6594,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not self.runtime.auth_enabled():
             self._authorization_context = AuthorizationContext("noauth")
             return True
-        request_path = posixpath.normpath(self.path.split("?", 1)[0])
         header = self.headers.get("Authorization", "").strip()
-        if request_path.startswith(OPERATOR_API_PREFIX) and not header:
-            store = self._operator_session_store()
-            if store is not None:
-                identity = store.authorize(self._operator_session_id())
-                if identity is not None:
-                    self._operator_browser_principal = OperatorPrincipal(
-                        identity.principal_id,
-                        identity.workspace_ids,
-                    )
-                    return True
         if self.runtime.auth_token is not None:
             if secrets.compare_digest(header, f"Bearer {self.runtime.auth_token}"):
                 self._authorization_context = AuthorizationContext("bearer")

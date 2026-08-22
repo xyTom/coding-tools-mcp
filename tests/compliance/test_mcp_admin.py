@@ -904,27 +904,21 @@ class AdminHTTPAuthenticationTests(unittest.TestCase):
                 ) as response:
                     page = response.read().decode("utf-8")
                 with urllib.request.urlopen(
-                    f"http://127.0.0.1:{server.server_address[1]}/app",
-                    timeout=5,
-                ) as response:
-                    operator_page = response.read().decode("utf-8")
-                with urllib.request.urlopen(
                     f"http://127.0.0.1:{server.server_address[1]}/wiki",
                     timeout=5,
                 ) as response:
                     wiki_page = response.read().decode("utf-8")
                 self.assertIn('data-build-source="i18n.js"', page)
                 self.assertIn('data-build-source="admin.js"', page)
-                self.assertIn('data-build-source="app/model.js"', operator_page)
-                self.assertIn('data-build-source="app/api-client.js"', operator_page)
-                self.assertIn('data-build-source="app/app.js"', operator_page)
-                self.assertIn("/api/app", operator_page)
-                self.assertNotIn("/admin/api", operator_page)
-                self.assertIn("不是 GPT/ChatGPT 网页", operator_page)
-                self.assertIn("Coding Tools MCP SQLite 与 Codex thread store", operator_page)
+                with self.assertRaises(urllib.error.HTTPError) as app_removed:
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{server.server_address[1]}/app",
+                        timeout=5,
+                    )
+                self.assertEqual(app_removed.exception.code, 404)
                 self.assertIn("Coding Tools MCP 使用 Wiki", wiki_page)
                 self.assertIn("CODING_TOOLS_MCP_AUTH_TOKEN", wiki_page)
-                self.assertIn('href="/app"', wiki_page)
+                self.assertNotIn('href="/app"', wiki_page)
                 before = service.settings_payload()["persisted_revision"]
                 with self.assertRaises(urllib.error.HTTPError) as write_denied:
                     urllib.request.urlopen(

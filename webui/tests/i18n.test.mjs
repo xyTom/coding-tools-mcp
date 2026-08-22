@@ -68,18 +68,6 @@ test('Admin HTML and critical dynamic Gateway copy have complete English coverag
   assert.deepEqual(missing, []);
 });
 
-test('Operator onboarding boundaries have explicit English translations', () => {
-  const onboardingCopy = [
-    '这是可选的 Codex Agent 工作台，不是 GPT/ChatGPT 网页。它在执行主机上调用已经登录的 Codex CLI。',
-    '执行主机必须安装 Codex CLI，并已完成 Codex 登录（例如先运行 codex login）。本地 Workspace 使用本机；Runner Workspace 使用对应 Runner 主机。',
-    'App bearer、Admin token、Codex 登录凭据是三套不同凭据。App bearer 登录 /app，Admin token 登录 /admin，Codex 登录凭据由 Codex CLI 自己管理。',
-    '持久化由 Coding Tools MCP SQLite 与 Codex thread store 共同完成。前者保存 Agent Session 元数据，后者保存模型 thread 与对话连续性。',
-  ];
-  for (const source of onboardingCopy) {
-    assert.doesNotMatch(translateText(source, 'en'), /[\u3400-\u9fff]/);
-  }
-});
-
 test('language-toggle mutations settle instead of retriggering the observer forever', () => {
   const pending = [];
   let observerCallback;
