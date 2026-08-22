@@ -1475,6 +1475,16 @@ class AdminService:
             body,
         )
 
+    def conversation_continuation(self, workspace_id: str, conversation_id: str) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        return service.continuation(OperatorPrincipal("admin", (workspace_id,)), workspace_id, conversation_id)
+
+    def conversation_handoff(self, workspace_id: str, conversation_id: str) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        return service.conversation_handoff(OperatorPrincipal("admin", (workspace_id,)), workspace_id, conversation_id)
+
     @staticmethod
     def _conversation_principal(query: dict[str, str]) -> OperatorPrincipal:
         workspace_id = query.get("workspace_id") or ""
@@ -1667,6 +1677,11 @@ class AdminService:
                 return self.conversation_resume(parts[1], parts[2], body)
             if parts[3] == "close":
                 return self.conversation_close(parts[1], parts[2], body)
+        if len(parts) == 4 and parts[:2] == ["conversations"] and method == "GET":
+            if parts[3] == "continuation":
+                return self.conversation_continuation(parts[1], parts[2])
+            if parts[3] == "handoff":
+                return self.conversation_handoff(parts[1], parts[2])
         if len(parts) == 4 and parts[:2] == ["chat", "conversations"] and method == "GET":
             return self.chat_conversation_detail(parts[2], parts[3], query)
         if len(parts) == 5 and parts[:2] == ["chat", "conversations"] and method == "POST":

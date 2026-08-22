@@ -19,6 +19,7 @@ from .agent_backends.base import AgentBackendEvent
 from .agent_session_store import AgentSessionRecord
 from .agent_sessions import AgentSessionService, AgentSessionServiceError
 from .handoff import build_session_handoff
+from .conversation_evidence import continuation_feedback, evidence_entry, handoff_brief
 from .transcript import TranscriptStore, TranscriptStoreError
 from .validation import ValidationBackend
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError, WorkspaceEntry
@@ -389,6 +390,10 @@ class OperatorAPIService:
             ],
             title=self._message_title(message) if first_turn else None,
         )
+        self._record_context(
+            record,
+            [evidence_entry("task_instruction", message) or {}],
+        )
         return {"session": self._session_summary_payload(record)}
 
     def interrupt(
@@ -499,7 +504,36 @@ class OperatorAPIService:
         payload = result.payload()
         with self._event_lock:
             self._validation_results[session_id] = dict(payload)
+        self._record_context(
+            record,
+            [
+                evidence_entry(
+                    "validation",
+                    payload.get("status"),
+                    {"recipe": recipe, "status": payload.get("status")},
+                )
+                or {}
+            ],
+        )
         return {"validation": payload}
+
+    def continuation(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+    ) -> dict[str, Any]:
+        detail, executions = self._conversation_projection(principal, workspace_id, conversation_id)
+        return {"continuation": continuation_feedback(detail, executions)}
+
+    def conversation_handoff(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+    ) -> dict[str, Any]:
+        detail, executions = self._conversation_projection(principal, workspace_id, conversation_id)
+        return {"handoff": handoff_brief(detail, executions)}
 
     def handoff(
         self,
@@ -743,6 +777,34 @@ class OperatorAPIService:
         except (TranscriptStoreError, OSError):
             return False
         return True
+
+    def _record_context(
+        self,
+        record: AgentSessionRecord,
+        entries: list[dict[str, Any]],
+    ) -> bool:
+        store = self.transcript_store
+        if store is None or not record.conversation_id:
+            return False
+        try:
+            store.record_context(
+                record.workspace_id,
+                record.conversation_id,
+                [entry for entry in entries if entry],
+                source="conversation-evidence",
+            )
+        except (TranscriptStoreError, OSError):
+            return False
+        return True
+
+    def _conversation_projection(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        detail = self.get_conversation(principal, workspace_id, conversation_id)
+        return detail, detail.get("executions", [])
 
     def _assistant_transcript_message(
         self,
