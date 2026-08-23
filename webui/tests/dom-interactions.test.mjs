@@ -110,10 +110,18 @@ test('conversation summary and detail render untrusted text without creating mar
     messages_total: 1, message_page: 1, message_page_size: 50,
     contexts: [{ context_id: 'c1', kind: 'note', content: '<img onerror=evil()>' }],
     contexts_total: 1, context_page: 1, context_page_size: 50,
+    continuation: { status: '<script>alert("continuation")</script>' },
+    handoff: { note: '<img src=x onerror=alert("handoff")>' },
   });
   assert.equal(tags(detail).includes('IFRAME'), false);
   assert.equal(tags(detail).includes('SVG'), false);
+  assert.equal(tags(detail).includes('SCRIPT'), false);
+  assert.equal(tags(detail).includes('IMG'), false);
   assert.match(detail.textContent, /<iframe src=evil>/);
+  assert.match(detail.textContent, /Continuation/);
+  assert.match(detail.textContent, /<script>alert\(\\"continuation\\"\)<\/script>/);
+  assert.match(detail.textContent, /Handoff/);
+  assert.match(detail.textContent, /<img src=x onerror=alert\(\\"handoff\\"\)>/);
 });
 
 test('workspace renderer keeps identifiers as text and wires exact actions', () => {

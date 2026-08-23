@@ -2143,6 +2143,20 @@ function renderConversationDetail(container, payload, handlers = {}) {
     container.append(executionHeading, executionList);
   }
 
+  if (payload.continuation) {
+    container.append(
+      createNode(documentRef, 'h4', { text: 'Continuation' }),
+      createNode(documentRef, 'pre', { text: JSON.stringify(payload.continuation, null, 2) }),
+    );
+  }
+
+  if (payload.handoff) {
+    container.append(
+      createNode(documentRef, 'h4', { text: 'Handoff' }),
+      createNode(documentRef, 'pre', { text: JSON.stringify(payload.handoff, null, 2) }),
+    );
+  }
+
   const messagesHeading = createNode(documentRef, 'h4', { text: `Messages (${payload.messages_total || 0})` });
   container.append(messagesHeading);
   for (const message of payload.messages || []) {
@@ -3125,8 +3139,18 @@ function initAdminApp(documentRef = document) {
     const selected = state.selectedConversation;
     if (!selected) return;
     const query = new URLSearchParams({ message_page: String(state.messagePage), message_page_size: '50', context_page: String(state.contextPage), context_page_size: '50' });
-    const payload = await api.request(`/conversations/${encodeURIComponent(selected.workspaceId)}/${encodeURIComponent(selected.conversationId)}`);
-    renderConversationDetail(byId('conversationDetail'), { ...payload, ...payload.conversation }, {
+    const conversationPath = `/conversations/${encodeURIComponent(selected.workspaceId)}/${encodeURIComponent(selected.conversationId)}`;
+    const payload = await api.request(conversationPath);
+    const [continuationResult, handoffResult] = await Promise.allSettled([
+      api.request(`${conversationPath}/continuation`),
+      api.request(`${conversationPath}/handoff`),
+    ]);
+    renderConversationDetail(byId('conversationDetail'), {
+      ...payload,
+      ...payload.conversation,
+      continuation: continuationResult.status === 'fulfilled' ? continuationResult.value.continuation : null,
+      handoff: handoffResult.status === 'fulfilled' ? handoffResult.value.handoff : null,
+    }, {
       onDeleteMessage: async (message, button) => {
         if (await deleteChatResource('messages', selected.workspaceId, message.message_id, button, '最多删除 1 条 message。')) await loadConversationDetail();
       },

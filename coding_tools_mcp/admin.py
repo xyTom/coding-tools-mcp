@@ -1666,18 +1666,18 @@ class AdminService:
             return self.conversation_list(query)
         if method == "POST" and parts == ["conversations"]:
             return self.conversation_create(body)
-        if len(parts) == 3 and parts[:2] == ["conversations"] and method == "GET":
+        if len(parts) == 3 and parts[:1] == ["conversations"] and method == "GET":
             return self.conversation_detail(parts[1], parts[2])
-        if len(parts) == 4 and parts[:2] == ["conversations"] and parts[3] == "executions" and method == "POST":
+        if len(parts) == 4 and parts[:1] == ["conversations"] and parts[3] == "executions" and method == "POST":
             return self.conversation_execution_create(parts[1], parts[2], body)
-        if len(parts) == 4 and parts[:2] == ["conversations"] and method == "POST":
+        if len(parts) == 4 and parts[:1] == ["conversations"] and method == "POST":
             if parts[3] == "turns":
                 return self.conversation_turn(parts[1], parts[2], body)
             if parts[3] == "resume":
                 return self.conversation_resume(parts[1], parts[2], body)
             if parts[3] == "close":
                 return self.conversation_close(parts[1], parts[2], body)
-        if len(parts) == 4 and parts[:2] == ["conversations"] and method == "GET":
+        if len(parts) == 4 and parts[:1] == ["conversations"] and method == "GET":
             if parts[3] == "continuation":
                 return self.conversation_continuation(parts[1], parts[2])
             if parts[3] == "handoff":

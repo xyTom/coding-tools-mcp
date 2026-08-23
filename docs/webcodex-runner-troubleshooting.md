@@ -83,14 +83,17 @@ If a credential is revoked, new Runner enrollment fails closed. Rotate the crede
 
 Use an external sandbox when OS-level enforcement is unavailable.
 
-## Operator App disconnected state
+## Conversation Center disconnected state
 
-The browser uses authenticated fetch-based SSE and a durable Agent Session id.
+The browser uses the authenticated Admin session and durable Conversation and
+AgentSession records.
 
-- Stream loss does not mean the durable Agent Session or Runner job was deleted.
-- Reopen/reselect the Session to attach from the last bounded cursor.
+- A page, stream, or request failure does not mean the durable Conversation,
+  AgentSession, or Runner job was deleted.
+- Reload or reopen/reselect the Conversation to load its current summary and
+  detail again.
 - Do not resubmit the previous turn merely because the page refreshed.
-- Admin credentials are not a fallback Operator credential.
+- Ordinary MCP credentials do not become Admin credentials after a disconnect.
 
 ## Diagnostic distinctions
 

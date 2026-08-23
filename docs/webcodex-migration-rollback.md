@@ -47,13 +47,14 @@ Remote Runner is opt-in:
 
 The Runner credential is stored separately from MCP OAuth/static bearer and the Admin token. Preserve the SecretVault when upgrading; revoke rather than exposing a credential during troubleshooting.
 
-## Operator App enable/disable
+## Conversation Center and MCP boundaries
 
-The Operator App is an additional `/app` surface backed by `/api/app/*`. It does not alter the Core MCP 25-tool catalog.
-
-- An MCP-only client can continue using `/mcp` without opening `/app`.
-- Not provisioning Agent/Runner backends leaves those product capabilities unavailable without changing the local MCP tool namespace.
-- Admin remains on its separate credential boundary.
+`/admin` is the single WebUI management entry and hosts the Conversation Center.
+There is no separate `/app`, `/api/app/*`, or Operator login. ChatGPT/MCP clients
+continue to use `/mcp`; opening `/admin` is not required for MCP operation.
+Not provisioning Agent/Runner backends leaves those execution capabilities
+unavailable without changing the local MCP tool namespace. Admin remains on its
+separate credential boundary.
 
 ## Local MCP-only rollback/safe mode
 
@@ -84,7 +85,7 @@ OS behavior is not portable: Linux Landlock enforcement and Windows capability r
 
 ## Rollback checklist
 
-1. Stop accepting new MCP/Operator/Runner traffic.
+1. Stop accepting new MCP/Admin/Runner traffic.
 2. Close active MCP Sessions and allow bounded upstream/Runner close reconciliation where available.
 3. Back up current DB/settings/vault files.
 4. If downgrading to a version without Runner catalog fields, restore a local-only settings backup.

@@ -73,20 +73,26 @@ offline Runner returns retryable unavailable and never causes local execution.
 
 ## Authentication boundaries
 
-- Admin token authorizes `/admin/api/*` only.
-- Operator APIs `/api/app/*` use ordinary MCP bearer/OAuth/noauth authority as
-  configured and principal-scoped Workspace access.
+- The dedicated Admin token authorizes `/admin/api/*` only. Conversation
+  management is part of this authenticated Admin surface.
+- MCP bearer/OAuth/noauth authority authenticates `/mcp` as configured and does
+  not grant Admin authority.
 - Runner credentials authenticate Runner transport only.
 - Secrets are never embedded in onboarding URLs, SSE URLs, handoff projections or
   Workspace summaries.
 
 ## Agent continuity and handoff
 
-AgentSession persists explicit instructions and a bounded repository fingerprint.
-Resume refreshes local repository context; detected drift remains visible across
-windows. `/api/app/sessions/{id}/handoff` is deterministic runtime evidence, not a
-new model-generated summary, and excludes Workspace roots, backend thread IDs,
-credentials and full transcripts.
+Conversation is the user-visible durable product object; AgentSession remains its
+durable execution projection and persists explicit instructions and a bounded
+repository fingerprint. MCP continuity uses an exact, privacy-preserving
+client-window binding scoped to principal, transport, Workspace/repository, and
+never falls back to the most recent Conversation for a credential. Explicit list
+and resume tools are the recovery path when exact window identity is lost.
+Continuation feedback and handoff output are deterministic projections of
+durable evidence, not new model-generated summaries or hidden-context replay;
+they exclude Workspace roots, backend thread IDs, credentials and full
+transcripts.
 
 ## Validation and inspect execution
 
