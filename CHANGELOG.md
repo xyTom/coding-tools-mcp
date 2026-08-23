@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Windows string commands now prefer a trusted PowerShell 7 launcher and
+  automatically retain `cmd.exe` compatibility when `pwsh` is unavailable.
+  The selected shell is visible to agents, and safe mode conservatively gates
+  dynamic syntax for both interpreters.
+
 ## 0.3.0 - 2026-08-13
 
 ### Changed

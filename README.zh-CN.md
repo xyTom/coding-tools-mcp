@@ -68,6 +68,13 @@ Gemini CLI 或 Cline——各家的 JSON 配置完全相同（偏好 Node 的话
 [docs/quickstart.md](docs/quickstart.md) 与
 [docs/mcp-client-config.md](docs/mcp-client-config.md)。
 
+在 Windows 上，字符串命令优先使用 PowerShell 7（`pwsh`）；未安装时会自动回退到
+可信系统路径中的 `cmd.exe`，不会让 agent 因缺少额外 shell 而失去命令执行能力。
+`server_info`、`check_exec_environment` 和每次 `exec_command` 都会说明实际使用的
+shell，便于 agent 选择正确语法。运维方也可以通过
+`CODING_TOOLS_MCP_PWSH_PATH` 固定一个绝对的 `pwsh.exe` 路径；显式路径配置错误时
+会直接报错，不会掩盖配置问题。
+
 ## 七个值得一试的玩法
 
 **1. 让 Claude Desktop 成为你的编程 agent。**

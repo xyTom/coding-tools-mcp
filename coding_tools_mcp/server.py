@@ -62,6 +62,8 @@ from .processes import (
     COMMAND_BUFFER_BYTES,
     COMMAND_HEAD_BUFFER_DIVISOR,
     CommandRun,
+    WindowsCommandShell,
+    selected_windows_command_shell,
     spawn_process,
     start_reader_threads,
     start_command_watchdog,
@@ -187,9 +189,62 @@ NETWORK_RE = re.compile(
     r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
     re.I,
 )
+POWERSHELL_NETWORK_RE = re.compile(
+    r"(?:^|[;&|{}\r\n])\s*(?:[\w.]+[\\/])?(?:Invoke-WebRequest|Invoke-RestMethod|Start-BitsTransfer|"
+    r"Test-NetConnection|Test-Connection|Resolve-DnsName|iwr|irm|tnc|ping(?:\.exe)?|"
+    r"nslookup(?:\.exe)?|tracert(?:\.exe)?)\b|\b(?:System\.)?Net\.",
+    re.I,
+)
 SHELL_EXPANSION_RE = re.compile(r"(`|\$\(|\$\{)")
 DESTRUCTIVE_RE = re.compile(
     r"(^|\s)(sudo|su|chmod\s+-R|chown\s+-R|mkfs|mount|umount|find\b[^;&|]*\s-delete\b|git\b[^;&|]*\breset\s+--hard\b|git\b[^;&|]*\bclean\s+-[^\s]*[fx][^\s]*|rm\s+-[^\s]*r[^\s]*f|rm\s+-[^\s]*f[^\s]*r)\b",
+    re.I,
+)
+# A module-qualified spelling (Microsoft.PowerShell.Management\Remove-Item)
+# invokes the same cmdlet, so the command-position match accepts an optional
+# Module\ prefix in both PowerShell scans above and below.
+POWERSHELL_DESTRUCTIVE_RE = re.compile(
+    r"(?:^|[;&|{}\r\n])\s*(?:[\w.]+[\\/])?(?:Remove-Item|rm|ri|del|erase|rmdir|rd)\b"
+    r"(?=[^;&|{}\r\n]*\s-(?:r|re|rec|recu|recur|recurs|recurse)\b)",
+    re.I,
+)
+# Single-quoted PowerShell strings are inert text ('' is the only escape), so
+# the dynamic-syntax scan drops them before matching; a literal '$5' or 'a::b'
+# argument is not expansion. Backticks never reach this far in safe mode
+# because SHELL_EXPANSION_RE already gates them.
+POWERSHELL_SINGLE_QUOTED_RE = re.compile(r"'[^']*(?:''[^']*)*'")
+# PowerShell resolves commands at runtime, so scanning for cmdlet names cannot
+# see through a variable, a splatted parameter set, a redefined alias, or a
+# .NET member call. Any of those constructs makes the destructive and network
+# scans above unsound, so they require the same explicit permission that POSIX
+# command substitution already requires instead of being scanned for keywords.
+POWERSHELL_DYNAMIC_RE = re.compile(
+    r"(?P<expansion>\$)"
+    r"|(?P<splatting>(?:^|[\s;&|(){},=])@)"
+    r"|(?P<static_member>::)"
+    r"|(?P<call_operator>(?:^|[;|(){}\r\n]|&&|\|\|)\s*(?:&(?!&)|\.)\s)"
+    r"|(?P<dynamic_eval>\b(?:Invoke-Expression|iex|Invoke-Command|icm|New-Object|"
+    r"Add-Type|Set-Alias|New-Alias|sal|nal)\b)",
+    re.I,
+)
+# cmd.exe also resolves command text at runtime. Paired %...% expansion,
+# CALL/FOR double evaluation, and caret escaping can hide the literal command
+# from the scans above, so safe mode treats those constructs like shell
+# expansion. A lone % cannot expand on a command line (echo 100%,
+# git log --format=%h), and CALL/FOR only evaluate at command position
+# (echo call for help stays literal), so neither is gated.
+CMD_DYNAMIC_RE = re.compile(
+    r"(?P<expansion>%[^%\r\n]+%)"
+    r"|(?P<escape>\^)"
+    r"|(?P<dynamic_eval>(?:^|[&|()\r\n])\s*(?:call|for)\b)",
+    re.I,
+)
+CMD_DESTRUCTIVE_RE = re.compile(
+    r"(?:^|[&|()\r\n])\s*(?:(?:del|erase|rd|rmdir)\b"
+    r"(?=[^&|()\r\n]*\s/(?:s|s[q]?|q[s]))"
+    # format.com and diskpart are real executables, so a path spelling such as
+    # C:\Windows\System32\format.com invokes them just as well as the bare name.
+    r"|(?:[^\s&|()\r\n]*[\\/])?(?:format(?:\.com)?|diskpart)(?:\.exe)?(?=$|[\s&|()<>\r\n]))",
     re.I,
 )
 MAX_HTTP_REQUEST_BYTES = 1_048_576
@@ -1545,8 +1600,8 @@ class Runtime:
             return "."
         return self.resolve_for_write(raw_path).display
 
-    def _exec_environment_summary(self) -> dict[str, Any]:
-        return {
+    def _exec_environment_summary(self, *, refresh_command_shell: bool = False) -> dict[str, Any]:
+        summary: dict[str, Any] = {
             "workspace": str(self.workspace.root),
             "permission_mode": self.permission_mode,
             "network_allowed": self.allow_network,
@@ -1555,6 +1610,18 @@ class Runtime:
             "tmpdir": str(self.command_tmp_dir()),
             "cache_dir": str(self.cache_dir),
         }
+        if os.name == "nt":
+            try:
+                summary["command_shell"] = windows_command_shell_payload(
+                    selected_windows_command_shell(refresh=refresh_command_shell)
+                )
+            except ToolFailure as exc:
+                summary["command_shell"] = {
+                    "available": False,
+                    "error_code": exc.code,
+                    "message": exc.message,
+                }
+        return summary
 
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
         return bool(landlock.get("available")) and self.landlock_enabled()
@@ -1668,6 +1735,10 @@ class Runtime:
 
     def check_exec_environment(self, args: dict[str, Any]) -> dict[str, Any]:
         landlock = landlock_status_payload()
+        # The explicit diagnostic re-resolves the pinned Windows shell so an
+        # operator who just installed pwsh sees (and activates) it here without
+        # restarting the server.
+        summary = self._exec_environment_summary(refresh_command_shell=True)
         warnings: list[str] = []
         if not landlock.get("available"):
             warnings.append("Linux Landlock filesystem confinement is unavailable")
@@ -1677,9 +1748,16 @@ class Runtime:
             warnings.append(
                 "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
             )
+        command_shell = summary.get("command_shell")
+        if isinstance(command_shell, dict):
+            shell_warning = command_shell.get("warning")
+            if isinstance(shell_warning, str):
+                warnings.append(shell_warning)
+            elif command_shell.get("available") is False:
+                warnings.append(str(command_shell.get("message") or "Windows command shell is unavailable"))
         return {
             "ok": True,
-            **self._exec_environment_summary(),
+            **summary,
             "landlock_enabled": self._landlock_enforced(landlock),
             "landlock_abi": landlock.get("abi_version"),
             "global_tmp_write": self.global_tmp_write_policy(),
@@ -2357,11 +2435,12 @@ class Runtime:
         workdir = self.resolve_existing(str(workdir_arg))
         if not workdir.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
-        self._check_command_policy(cmd, args)
+        tty = bool(args.get("tty", False))
+        windows_shell = selected_windows_command_shell() if os.name == "nt" and not tty else None
+        self._check_command_policy(cmd, args, windows_shell=windows_shell)
         timeout_ms = int(args.get("timeout_ms", 30000))
         yield_ms = int(args.get("yield_time_ms", 10000))
         max_output_bytes = int(args.get("max_output_bytes", 65536))
-        tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
         env = self._command_env(args.get("env", {}))
         start = time.time()
@@ -2413,11 +2492,20 @@ class Runtime:
                 env=env,
                 tty=tty,
                 popen_kwargs=popen_extra,
+                windows_shell=windows_shell,
             )
+            command_warnings = [
+                warning
+                for warning in (
+                    landlock_warning,
+                    windows_shell.warning if windows_shell is not None else None,
+                )
+                if warning
+            ]
             command = self._make_command(
                 process,
                 timeout_at=deadline,
-                warnings=[landlock_warning] if landlock_warning else None,
+                warnings=command_warnings,
                 pty_master_fd=pty_master_fd,
             )
             with self.commands_lock:
@@ -2460,6 +2548,8 @@ class Runtime:
             # terminated/timeout) so exec, polling, and kill paths agree.
             payload = command.snapshot_since_cursor(max_output_bytes)
             payload["elapsed_ms"] = int((time.time() - start) * 1000)
+            if windows_shell is not None:
+                payload["command_shell"] = windows_command_shell_payload(windows_shell)
             self._add_exec_diagnostics(payload)
             return self._format_command_output(command, payload, args)
 
@@ -2484,10 +2574,30 @@ class Runtime:
                 return finish()
             time.sleep(0.02)
 
-    def _check_command_policy(self, cmd: str, args: dict[str, Any]) -> None:
+    def _check_command_policy(
+        self,
+        cmd: str,
+        args: dict[str, Any],
+        *,
+        windows_shell: WindowsCommandShell | None = None,
+    ) -> None:
         if self.dangerously_skip_all_permissions:
             return
-        self._check_command_paths(cmd)
+        compact = " ".join(cmd.split()).lower()
+        # POSIX shlex treats backslash as an escape and silently eats it, which
+        # blinds every token-based check to unquoted Windows paths such as
+        # C:\Windows\System32\...\powershell.exe. Backslash is a path separator
+        # on both Windows shells (their escapes are backtick and caret), so the
+        # token scans run on a slash-normalized copy there.
+        scan_cmd = cmd.replace("\\", "/") if windows_shell is not None else cmd
+        if windows_shell is not None and windows_shell.kind == "cmd" and CMD_DESTRUCTIVE_RE.search(cmd):
+            raise ToolFailure(
+                "PERMISSION_REQUIRED",
+                "Destructive commands are blocked without explicit permission.",
+                category="permission",
+                details={"permission": "destructive_command", "command": compact},
+            )
+        self._check_command_paths(scan_cmd)
         env = args.get("env", {})
         if isinstance(env, dict) and any(
             is_filtered_env_var(str(key), str(value)) for key, value in env.items()
@@ -2499,7 +2609,7 @@ class Runtime:
                 details={"permission": "sensitive_env", "env_keys": sorted(str(key) for key in env)},
             )
         if not self.capabilities.inline_script:
-            inline_script = inline_script_command(cmd)
+            inline_script = inline_script_command(scan_cmd)
             if inline_script is not None:
                 raise ToolFailure(
                     "PERMISSION_REQUIRED",
@@ -2507,7 +2617,12 @@ class Runtime:
                     category="permission",
                     details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
                 )
-        compact = " ".join(cmd.split()).lower()
+        uses_powershell = powershell_executes_string_commands(windows_shell)
+        uses_cmd = windows_shell is not None and windows_shell.kind == "cmd"
+        # The PowerShell scans model PowerShell semantics; running them against
+        # a POSIX shell or cmd.exe command would gate rm -r and ping on hosts
+        # where those regexes were never the contract.
+        scan_powershell = uses_powershell
         if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
@@ -2522,20 +2637,58 @@ class Runtime:
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
             )
-        if DESTRUCTIVE_RE.search(cmd):
+        if (
+            DESTRUCTIVE_RE.search(cmd)
+            or (scan_powershell and POWERSHELL_DESTRUCTIVE_RE.search(cmd))
+        ):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Destructive commands are blocked without explicit permission.",
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
             )
-        if not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd):
+        network_command = NETWORK_RE.search(cmd) or (
+            scan_powershell and POWERSHELL_NETWORK_RE.search(cmd)
+        )
+        if not self.allow_network and network_command and not is_literal_network_reference_command(scan_cmd):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Network access is denied by default.",
                 category="permission",
                 details={"permission": "network", "command": compact},
             )
+        # Runs last so a command the scans above already recognized keeps its
+        # precise permission label; this is the catch-all for the PowerShell
+        # syntax that makes those scans unsound in the first place.
+        if not self.capabilities.shell_expansion and uses_powershell:
+            construct = powershell_dynamic_construct(cmd)
+            if construct is not None:
+                raise ToolFailure(
+                    "PERMISSION_REQUIRED",
+                    "PowerShell dynamic syntax requires explicit permission because the command "
+                    "a variable, splat, alias, or .NET member resolves to cannot be verified "
+                    "statically.",
+                    category="permission",
+                    details={
+                        "permission": "shell_expansion",
+                        "construct": construct,
+                        "command": compact,
+                    },
+                )
+        if not self.capabilities.shell_expansion and uses_cmd:
+            construct = cmd_dynamic_construct(cmd)
+            if construct is not None:
+                raise ToolFailure(
+                    "PERMISSION_REQUIRED",
+                    "cmd.exe dynamic syntax requires explicit permission because expansion, "
+                    "double evaluation, and escaping can hide the command from policy scans.",
+                    category="permission",
+                    details={
+                        "permission": "shell_expansion",
+                        "construct": construct,
+                        "command": compact,
+                    },
+                )
 
     def _add_exec_diagnostics(self, payload: dict[str, Any]) -> None:
         diagnostics = exec_output_diagnostics(payload)
@@ -3766,6 +3919,20 @@ def inline_script_segment(command: str | None, args: list[str]) -> dict[str, str
                 return {"command": name, "option": option}
     if name in {"ruby", "perl"} and "-e" in args:
         return {"command": name, "option": "-e"}
+    if name in {"pwsh", "pwsh.exe", "powershell", "powershell.exe"}:
+        for arg in args:
+            if not arg.startswith("-"):
+                continue
+            option = arg.lstrip("-").lower()
+            # PowerShell accepts any unambiguous prefix, so -e, -enc, and
+            # -EncodedCommand all smuggle a base64 script past text scanning.
+            if option and ("command".startswith(option) or "encodedcommand".startswith(option)):
+                return {"command": name, "option": arg}
+        return None
+    if name in {"cmd", "cmd.exe"}:
+        for arg in args:
+            if arg.lstrip("-/").lower() in {"c", "k"}:
+                return {"command": name, "option": arg}
     return None
 
 
@@ -3918,6 +4085,50 @@ def is_inspectable_path_argument(token: str) -> bool:
     if "/" in normalized:
         return True
     return "." in PurePosixPath(normalized).name
+
+
+def windows_command_shell_payload(shell: WindowsCommandShell) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "available": True,
+        "kind": shell.kind,
+        "executable": shell.executable,
+        "fallback": shell.fallback,
+    }
+    if shell.fallback_reason is not None:
+        payload["fallback_reason"] = shell.fallback_reason
+    if shell.warning is not None:
+        payload["warning"] = shell.warning
+    return payload
+
+
+def powershell_executes_string_commands(
+    windows_shell: WindowsCommandShell | None = None,
+) -> bool:
+    """True when the selected Windows string-command shell is PowerShell 7.
+
+    Command policy has to mirror the selection passed to processes.spawn_process:
+    PowerShell syntax is only worth gating where PowerShell is the interpreter.
+    The host fallback keeps direct policy-helper tests backward compatible.
+    """
+
+    if windows_shell is not None:
+        return windows_shell.kind == "pwsh"
+    return os.name == "nt"
+
+
+def powershell_dynamic_construct(command: str) -> str | None:
+    scannable = POWERSHELL_SINGLE_QUOTED_RE.sub("''", command)
+    match = POWERSHELL_DYNAMIC_RE.search(scannable)
+    if match is None:
+        return None
+    return match.lastgroup
+
+
+def cmd_dynamic_construct(command: str) -> str | None:
+    match = CMD_DYNAMIC_RE.search(command)
+    if match is None:
+        return None
+    return match.lastgroup
 
 
 def is_literal_network_reference_command(command: str) -> bool:

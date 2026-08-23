@@ -293,7 +293,7 @@ Retry: This command_id has expired or never existed; …
 Known tool error codes include:
 
 ```json
-["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
+["ABSOLUTE_PATH_DENIED", "BINARY_FILE", "COMMAND_CLOSED", "COMMAND_LIMIT_REACHED", "COMMAND_NOT_FOUND", "ELICITATION_UNSUPPORTED", "GIT_ERROR", "INTERNAL_ERROR", "INVALID_ARGUMENT", "IS_DIRECTORY", "NOT_A_DIRECTORY", "NOT_FOUND", "OUTPUT_TOO_LARGE", "PATCH_CONFLICT", "PATCH_CONTEXT_AMBIGUOUS", "PATCH_CONTEXT_NOT_FOUND", "PATCH_FAILED", "PATCH_HUNKS_OVERLAP", "PATCH_ROLLBACK_FAILED", "PATH_OUTSIDE_WORKSPACE", "PERMISSION_REQUIRED", "RUNTIME_DIR_UNWRITABLE", "SANDBOX_UNAVAILABLE", "SHELL_NOT_FOUND", "SHELL_VERSION_UNSUPPORTED", "SYMLINK_ESCAPE", "TTY_UNSUPPORTED", "UNSUPPORTED_ENCODING"]
 ```
 
 Error categories are `validation`, `security`, `permission`, `runtime`,
@@ -336,6 +336,13 @@ bounded, all of them per workspace rather than per client. Completed commands
 have a TTL. POSIX `tty=true` uses a real pseudo-terminal; Windows reports
 `TTY_UNSUPPORTED` in this build instead of pretending pipes are a TTY.
 
+Windows string commands prefer a server-resolved PowerShell 7 (`pwsh`) and
+automatically use a trusted `cmd.exe` compatibility fallback when no usable
+unpinned PowerShell is available. An invalid
+`CODING_TOOLS_MCP_PWSH_PATH` remains an error. Windows `exec_command` results
+include a structured `command_shell`; fallback results also include a warning
+so an agent can use cmd syntax rather than retrying PowerShell syntax.
+
 ## HTTP authentication
 
 Non-loopback deployment requires bearer or OAuth authentication unless the
@@ -375,7 +382,8 @@ Annotations: `{"title":"Server info","readOnlyHint":true,"destructiveHint":false
 
 Returns server version, `supported_protocol_versions`, workspace, fixed tool
 count, auth state, permission mode, runtime directories, project-context
-metadata, exec policy, and the static retained-output budget. It reports no
+metadata, exec policy, the selected Windows `command_shell` when applicable,
+and the static retained-output budget. It reports no
 per-session value and no runtime counter: there is no session, and how often a
 budget was hit is a property of the process rather than an answer to whichever
 client asked. Those counters travel with telemetry.
@@ -386,7 +394,8 @@ Inputs: none.
 
 Annotations: `{"title":"Check exec environment","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}`.
 
-Returns lightweight policy and Landlock status without running active probes.
+Returns lightweight policy, Landlock status, and the selected Windows command
+shell. A `cmd.exe` fallback is repeated in `warnings`.
 
 ### read_file
 
