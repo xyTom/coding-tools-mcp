@@ -41,3 +41,16 @@ docs/project-context.md
 docs/project-context/
 docs/specs/
 /docs/webcodex-agent-integration-remediation-execution-book.md
+
+# Internal agent task artifacts; keep product and operator documentation tracked.
+/.learnings/
+/design-system/**/MASTER.md
+/docs/**/*taskbook*.md
+/docs/**/*execution-plan*.md
+/docs/integration-handoffs/
+/docs/upstream-broker-handoffs/
+/docs/webcodex-integration-handoffs/
+/docs/archive/upstream-tool-broker-v6-appendix-a-historical.md
+/docs/upstream-broker-traceability.md
+/docs/**/*benchmark-report*.md
+/reports/*final-verification*.md
