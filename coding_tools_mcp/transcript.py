@@ -11,9 +11,11 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Iterator
 
 from .settings_store import ensure_private_directory
+from .conversation_evidence import ACTIVE_JOB_STATUSES, PENDING_APPROVAL_STATUSES
 
 
 class TranscriptStoreError(RuntimeError):
@@ -334,6 +336,7 @@ class TranscriptStore:
         *,
         title: str | None = None,
         source: str | None = None,
+        upsert_context_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         workspace_id = _require_id(workspace_id, "workspace_id")
         conversation_id = _require_id(conversation_id, "conversation_id")
@@ -371,15 +374,33 @@ class TranscriptStore:
                         metadata = json.loads(metadata)
                     except json.JSONDecodeError:
                         metadata = {"raw": _text(metadata, limit=20_000)}
-                cursor = conn.execute(
-                    """
-                    INSERT OR IGNORE INTO chat_context_entries(
-                      workspace_id, context_id, conversation_id, kind, timestamp,
-                      content, source, metadata_json, created_at, updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (workspace_id, context_id, conversation_id, kind, timestamp, content, item_source, _json(metadata), now + index / 1_000_000, now),
-                )
+                if upsert_context_ids and context_id in upsert_context_ids:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO chat_context_entries(
+                          workspace_id, context_id, conversation_id, kind, timestamp,
+                          content, source, metadata_json, created_at, updated_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(workspace_id, context_id) DO UPDATE SET
+                          kind=excluded.kind,
+                          timestamp=excluded.timestamp,
+                          content=excluded.content,
+                          source=excluded.source,
+                          metadata_json=excluded.metadata_json,
+                          updated_at=excluded.updated_at
+                        """,
+                        (workspace_id, context_id, conversation_id, kind, timestamp, content, item_source, _json(metadata), now + index / 1_000_000, now),
+                    )
+                else:
+                    cursor = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO chat_context_entries(
+                          workspace_id, context_id, conversation_id, kind, timestamp,
+                          content, source, metadata_json, created_at, updated_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (workspace_id, context_id, conversation_id, kind, timestamp, content, item_source, _json(metadata), now + index / 1_000_000, now),
+                    )
                 if cursor.rowcount:
                     inserted += 1
                 else:
@@ -395,6 +416,127 @@ class TranscriptStore:
             "duplicate_count": duplicates,
         }
 
+    def list_recent_context(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        *,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        conversation_id = _require_id(conversation_id, "conversation_id")
+        if type(limit) is not int or not 1 <= limit <= 2_000:
+            raise TranscriptStoreError("limit must be an integer between 1 and 2000.")
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT workspace_id, context_id, conversation_id, kind, timestamp,
+                       content, source, metadata_json, created_at, updated_at
+                FROM chat_context_entries
+                WHERE workspace_id=? AND conversation_id=?
+                ORDER BY updated_at DESC, context_id DESC
+                LIMIT ?
+                """,
+                (workspace_id, conversation_id, limit),
+            ).fetchall()
+        return [_decode_metadata(dict(row)) for row in rows]
+
+    def latest_instruction_attempt(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+    ) -> str | None:
+        """Return the newest durable attempt ID without a recent-row heuristic."""
+
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        conversation_id = _require_id(conversation_id, "conversation_id")
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT json_extract(metadata_json, '$.attempt_id') AS attempt_id
+                FROM chat_context_entries
+                WHERE workspace_id=? AND conversation_id=? AND kind='task_instruction'
+                  AND json_valid(metadata_json)
+                  AND json_extract(metadata_json, '$.attempt_id') IS NOT NULL
+                ORDER BY created_at DESC, context_id DESC
+                LIMIT 1
+                """,
+                (workspace_id, conversation_id),
+            ).fetchone()
+        return str(row["attempt_id"]) if row is not None else None
+
+    def prune_context(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        *,
+        limits: Mapping[str, int],
+        hard_cap: int = 500,
+    ) -> int:
+        """Deterministically retain newest evidence while protecting live states."""
+
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        conversation_id = _require_id(conversation_id, "conversation_id")
+        if type(hard_cap) is not int or hard_cap < 1:
+            raise TranscriptStoreError("hard_cap must be a positive integer.")
+        with self._write_lock, self._connection(write=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT context_id, kind, metadata_json, created_at, updated_at
+                FROM chat_context_entries
+                WHERE workspace_id=? AND conversation_id=?
+                ORDER BY COALESCE(updated_at, created_at) DESC, context_id DESC
+                """,
+                (workspace_id, conversation_id),
+            ).fetchall()
+            parsed: list[tuple[str, str, str, float]] = []
+            for row in rows:
+                try:
+                    metadata = json.loads(str(row["metadata_json"] or "{}"))
+                except json.JSONDecodeError:
+                    metadata = {}
+                parsed.append(
+                    (
+                        str(row["context_id"]),
+                        str(row["kind"]),
+                        str(metadata.get("status", "")).lower() if isinstance(metadata, dict) else "",
+                        float(row["updated_at"] or row["created_at"]),
+                    )
+                )
+            protected_ids_in_order = [
+                context_id
+                for context_id, kind, status, _created in parsed
+                if (kind == "job_state" and status in ACTIVE_JOB_STATUSES)
+                or (kind == "approval_state" and status in PENDING_APPROVAL_STATUSES)
+            ]
+            protected = set(protected_ids_in_order[:hard_cap])
+            delete: set[str] = set()
+            seen_by_kind: dict[str, int] = {}
+            for context_id, kind, _status, _created in parsed:
+                if context_id in protected:
+                    continue
+                seen_by_kind[kind] = seen_by_kind.get(kind, 0) + 1
+                if seen_by_kind[kind] > int(limits.get(kind, 0)):
+                    delete.add(context_id)
+            remaining = hard_cap - len(protected)
+            kept_total = 0
+            for context_id, _kind, _status, _created in parsed:
+                if context_id in protected:
+                    continue
+                if context_id in delete:
+                    continue
+                if kept_total >= remaining:
+                    delete.add(context_id)
+                else:
+                    kept_total += 1
+            if delete:
+                connection = conn
+                connection.executemany(
+                    "DELETE FROM chat_context_entries WHERE workspace_id=? AND conversation_id=? AND context_id=?",
+                    [(workspace_id, conversation_id, context_id) for context_id in delete],
+                )
+            return len(delete)
+
     def list_conversations(
         self,
         workspace_id: str | None,
@@ -402,6 +544,7 @@ class TranscriptStore:
         page: int = 1,
         page_size: int = 50,
         query: str | None = None,
+        conversation_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         if workspace_id is not None:
             workspace_id = _require_id(workspace_id, "workspace_id")
@@ -416,8 +559,33 @@ class TranscriptStore:
             pattern = f"%{_text(query, limit=200)}%"
             args.extend((pattern, pattern, pattern))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        normalized_ids = [str(item) for item in (conversation_ids or []) if str(item)]
+        join = ""
         with self._connection() as conn:
-            total = int(conn.execute(f"SELECT COUNT(*) FROM chat_conversations c{where}", args).fetchone()[0])
+            if conversation_ids is not None:
+                if not normalized_ids:
+                    return {"items": [], "count": 0, "total": 0, "page": page, "page_size": page_size}
+                join = " JOIN authorized_ids a ON a.workspace_id=c.workspace_id AND a.conversation_id=c.conversation_id"
+                conn.execute(
+                    """
+                    CREATE TEMP TABLE authorized_ids (
+                        workspace_id TEXT NOT NULL,
+                        conversation_id TEXT NOT NULL,
+                        PRIMARY KEY(workspace_id, conversation_id)
+                    )
+                    """
+                )
+                conn.executemany(
+                    "INSERT INTO authorized_ids(workspace_id, conversation_id) VALUES(?,?)",
+                    [
+                        (workspace_id or "", conversation_id)
+                        for conversation_id in normalized_ids
+                    ],
+                )
+            total = int(conn.execute(
+                f"SELECT COUNT(*) FROM chat_conversations c{join}{where}",
+                args,
+            ).fetchone()[0])
             rows = conn.execute(
                 f"""
                 SELECT c.workspace_id, c.conversation_id, c.title, c.source,
@@ -425,7 +593,7 @@ class TranscriptStore:
                        COUNT(DISTINCT m.message_id) AS message_count,
                        COUNT(DISTINCT x.context_id) AS context_count,
                        MAX(CASE WHEN m.role='user' THEN substr(m.content,1,240) END) AS preview
-                FROM chat_conversations c
+                FROM chat_conversations c{join}
                 LEFT JOIN chat_messages m ON m.workspace_id=c.workspace_id AND m.conversation_id=c.conversation_id
                 LEFT JOIN chat_context_entries x ON x.workspace_id=c.workspace_id AND x.conversation_id=c.conversation_id
                 {where}
@@ -705,6 +873,9 @@ class WorkspaceTranscriptService:
 
     def conversation_detail(self, conversation_id: str, **kwargs: Any) -> dict[str, Any] | None:
         return self.store.conversation_detail(self.scope.workspace_id, conversation_id, **kwargs)
+
+    def list_recent_context(self, conversation_id: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        return self.store.list_recent_context(self.scope.workspace_id, conversation_id, limit=limit)
 
 
 def _decode_metadata(item: dict[str, Any]) -> dict[str, Any]:

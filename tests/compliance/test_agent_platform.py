@@ -20,7 +20,11 @@ from coding_tools_mcp.agent_backends.codex_app_server import (
     CodexAppServerBackend,
     CodexAppServerConfig,
 )
-from coding_tools_mcp.agent_session_store import AgentSessionStore, AgentSessionStoreError
+from coding_tools_mcp.agent_session_store import (
+    MAX_LIST_LIMIT,
+    AgentSessionStore,
+    AgentSessionStoreError,
+)
 from coding_tools_mcp.agent_sessions import AgentSessionService, AgentSessionServiceError
 from coding_tools_mcp.workspace_catalog import WorkspaceCatalog, WorkspaceEntry
 
@@ -153,6 +157,26 @@ class AgentSessionStoreTests(unittest.TestCase):
             connection.execute("PRAGMA user_version=999")
         with self.assertRaisesRegex(AgentSessionStoreError, "newer version"):
             AgentSessionStore(path)
+
+    def test_iter_all_paginates_beyond_first_batch(self) -> None:
+        path = self.root / "agent-sessions.sqlite3"
+        store = AgentSessionStore(path)
+        expected_ids = {f"agent-{index:03d}" for index in range(MAX_LIST_LIMIT + 1)}
+        for session_id in expected_ids:
+            store.create(
+                workspace_id="workspace-a",
+                owner_principal_id="alice",
+                backend_kind="fake",
+                session_id=session_id,
+            )
+
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute("UPDATE agent_sessions SET updated_at=1234.5")
+
+        records = list(store.iter_all())
+
+        self.assertEqual({record.session_id for record in records}, expected_ids)
+        self.assertEqual(len(records), len(expected_ids))
 
 
 class AgentSessionServiceTests(unittest.TestCase):

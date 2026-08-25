@@ -1449,3 +1449,34 @@ Keep the local service running and verify through the real ChatGPT retry; otherw
 - Related Files: start-local.ps1, coding_tools_mcp/server.py
 
 ---
+## [ERR-20260824-001] qa_seed_response_shape
+
+**Logged**: 2026-08-24T19:22:21+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### Summary
+The temporary Conversation Center browser QA harness assumed an inner Conversation detail had a top-level ID.
+
+### Error
+```
+KeyError: 'conversation_id'
+```
+
+### Context
+- `OperatorAPIService.create_conversation()` wraps the detail response in a `conversation` key.
+- The QA harness had already selected that nested detail and then indexed it as if it were a summary.
+
+### Suggested Fix
+Read the returned payload shape before indexing and preserve the wrapper until the ID is extracted.
+
+### Metadata
+- Reproducible: yes
+- Related Files: .tmp/conversation_center_browser_qa_server.py
+
+### Resolution
+- **Resolved**: 2026-08-24T19:22:21+08:00
+- **Notes**: Extracted `conversation_id` from the nested detail's `conversation` object.
+
+---

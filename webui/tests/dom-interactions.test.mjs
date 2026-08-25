@@ -110,7 +110,7 @@ test('conversation summary and detail render untrusted text without creating mar
     messages_total: 1, message_page: 1, message_page_size: 50,
     contexts: [{ context_id: 'c1', kind: 'note', content: '<img onerror=evil()>' }],
     contexts_total: 1, context_page: 1, context_page_size: 50,
-    continuation: { status: '<script>alert("continuation")</script>' },
+    continuation: { attempt: { attempt_id: '<script>alert("continuation")</script>' } },
     handoff: { note: '<img src=x onerror=alert("handoff")>' },
   });
   assert.equal(tags(detail).includes('IFRAME'), false);
@@ -118,10 +118,107 @@ test('conversation summary and detail render untrusted text without creating mar
   assert.equal(tags(detail).includes('SCRIPT'), false);
   assert.equal(tags(detail).includes('IMG'), false);
   assert.match(detail.textContent, /<iframe src=evil>/);
-  assert.match(detail.textContent, /Continuation/);
-  assert.match(detail.textContent, /<script>alert\(\\"continuation\\"\)<\/script>/);
+  assert.match(detail.textContent, /Work \/ Progress/);
+  assert.match(detail.textContent, /<script>alert\("continuation"\)<\/script>/);
   assert.match(detail.textContent, /Handoff/);
   assert.match(detail.textContent, /<img src=x onerror=alert\(\\"handoff\\"\)>/);
+});
+
+test('conversation summaries and structured detail expose progress and controls', async () => {
+  const documentRef = new FakeDocument();
+  const list = new FakeNode(documentRef, 'div');
+  renderConversationItems(list, [{
+    workspace_id: 'ws-a', conversation_id: 'conv-a', title: 'Work',
+    message_count: 2, context_count: 7, execution: { status: 'running' },
+    progress: {
+      changed_path_count: 3, explored_path_count: 4, validation_status: 'failed',
+      unresolved_failure_count: 1, active_job_count: 2, pending_approval_count: 1,
+    },
+  }], () => {});
+  assert.match(list.textContent, /Changes: 3/);
+  assert.match(list.textContent, /Explored: 4/);
+  assert.match(list.textContent, /Validation: failed/);
+  assert.match(list.textContent, /Failures: 1/);
+  assert.match(list.textContent, /Jobs: 2/);
+  assert.match(list.textContent, /Approvals: 1/);
+
+  const detail = new FakeNode(documentRef, 'div');
+  const calls = [];
+  renderConversationDetail(detail, {
+    conversation: { workspace_id: 'ws-a', conversation_id: 'conv-a', title: 'Work' },
+    executions: [{ session_id: 'session-a', status: 'recovering', backend_kind: 'codex-app-server' }],
+    continuation: {
+      attempt: { attempt_id: 'attempt-a' },
+      previous_instruction: 'Continue the focused work',
+      changes: { paths: ['src/a.py'], total: 1, truncated: false },
+      exploration: { paths: ['docs/a.md'], total: 1, truncated: false },
+      validation: { status: 'failed', failures: ['pytest:focus'] },
+      jobs: { active: 1, recovering: 1, items: [{ id: 'job-a', status: 'recovering' }] },
+      approvals: { pending: 1, items: [{ id: 'approval-a', status: 'pending' }] },
+      checkpoints: ['saved'],
+      suggested_actions: ['resolve_failure'],
+    },
+    handoff: { instruction: 'Continue the focused work' },
+  }, {
+    onCreateExecution: async (backendKind) => calls.push(['create', backendKind]),
+    onSendTurn: async (sessionId, message) => calls.push(['send', sessionId, message]),
+    onResume: async (sessionId) => calls.push(['resume', sessionId]),
+    onClose: async (sessionId) => calls.push(['close', sessionId]),
+    onValidate: async (sessionId, recipe) => calls.push(['validate', sessionId, recipe]),
+    onApproval: async (approvalId, decision) => calls.push(['approval', approvalId, decision]),
+  });
+  assert.match(detail.textContent, /Work \/ Progress · attempt-a/);
+  assert.match(detail.textContent, /Continue the focused work/);
+  assert.match(detail.textContent, /src\/a\.py/);
+  assert.match(detail.textContent, /docs\/a\.md/);
+  assert.match(detail.textContent, /pytest:focus/);
+  assert.match(detail.textContent, /Job job-a: recovering/);
+  assert.match(detail.textContent, /saved/);
+  assert.match(detail.textContent, /resolve_failure/);
+
+  const buttons = descendants(detail).filter((node) => node.tagName === 'BUTTON');
+  const button = (label) => buttons.find((node) => node.textContent === label);
+  button('Start execution').click();
+  const executionCard = descendants(detail).find((node) => node.tagName === 'SECTION' && node.textContent.includes('session-a · recovering'));
+  const inputs = descendants(executionCard).filter((node) => node.tagName === 'INPUT');
+  inputs[0].value = 'continue';
+  inputs[1].value = 'pytest:focus';
+  const cardButtons = descendants(executionCard).filter((node) => node.tagName === 'BUTTON');
+  const cardButton = (label) => cardButtons.find((node) => node.textContent === label);
+  cardButton('Send').click();
+  cardButton('Resume').click();
+  cardButton('Close').click();
+  cardButton('Validate').click();
+  const approvalRow = descendants(detail).find((node) => node.textContent.includes('Approval approval-a'));
+  descendants(approvalRow).find((node) => node.tagName === 'BUTTON' && node.textContent === 'Approve').click();
+  await Promise.resolve();
+  assert.deepEqual(calls, [
+    ['create', 'codex-app-server'],
+    ['send', 'session-a', 'continue'],
+    ['resume', 'session-a'],
+    ['close', 'session-a'],
+    ['validate', 'session-a', 'pytest:focus'],
+    ['approval', 'approval-a', 'approve'],
+  ]);
+});
+
+test('projection failures render bounded inline retry actions', async () => {
+  const documentRef = new FakeDocument();
+  const detail = new FakeNode(documentRef, 'div');
+  let retries = 0;
+  renderConversationDetail(detail, {
+    conversation: { workspace_id: 'ws-a', conversation_id: 'conv-a', title: 'Work' },
+    continuationError: 'projection unavailable',
+    handoffError: 'handoff unavailable',
+  }, { onRetryProjections: () => { retries += 1; } });
+  assert.match(detail.textContent, /Continuation failed/);
+  assert.match(detail.textContent, /projection unavailable/);
+  assert.match(detail.textContent, /Handoff failed/);
+  assert.match(detail.textContent, /handoff unavailable/);
+  const retry = descendants(detail).filter((node) => node.tagName === 'BUTTON' && node.textContent === 'Retry');
+  retry[0].click();
+  retry[1].click();
+  assert.equal(retries, 2);
 });
 
 test('workspace renderer keeps identifiers as text and wires exact actions', () => {

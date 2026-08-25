@@ -1,9 +1,9 @@
 {
-  "commit": "5e3a27c65da9fff32e8cd9370f0462565b236377+dirty",
+  "commit": "7dac062278dcd711cf7293ea542214fc8d1d0251+dirty",
   "contract": "coding-tools-mcp-v0.2",
   "dogfood": "passed",
   "e2e": "passed",
-  "elapsed_seconds": 3.464,
+  "elapsed_seconds": 1.21,
   "failures": [],
   "passed": true,
   "required_tools": {

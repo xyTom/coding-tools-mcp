@@ -10,7 +10,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, List, Mapping
 
 
 SCHEMA_VERSION = 1
@@ -289,6 +289,75 @@ class AgentSessionStore:
             ).fetchall()
         return [self._record(row) for row in rows]
 
+    def list_workspace(self, workspace_id: str, *, limit: int = 100) -> List[AgentSessionRecord]:
+        """Privileged workspace-wide listing; callers must authorize admin access."""
+
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        if type(limit) is not int or limit < 1:
+            raise AgentSessionStoreError("limit must be a positive integer.")
+        bounded_limit = min(limit, MAX_LIST_LIMIT)
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_sessions
+                WHERE workspace_id=?
+                ORDER BY updated_at DESC, session_id
+                LIMIT ?
+                """,
+                (workspace_id, bounded_limit),
+            ).fetchall()
+        return [self._record(row) for row in rows]
+
+    def list_all(self, *, limit: int = 1000) -> List[AgentSessionRecord]:
+        """Privileged inventory used only for explicit ownership migration."""
+
+        if type(limit) is not int or limit < 1:
+            raise AgentSessionStoreError("limit must be a positive integer.")
+        bounded_limit = min(limit, MAX_LIST_LIMIT)
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_sessions ORDER BY updated_at DESC, session_id LIMIT ?",
+                (bounded_limit,),
+            ).fetchall()
+        return [self._record(row) for row in rows]
+
+    def iter_all(self, *, batch_size: int = MAX_LIST_LIMIT) -> Iterator[AgentSessionRecord]:
+        """Iterate every historical session without a fixed total limit.
+
+        The result is materialized by the caller-facing generator so ownership
+        migration sees all candidates before making any uniqueness decision.
+        """
+
+        if type(batch_size) is not int or batch_size < 1:
+            raise AgentSessionStoreError("batch_size must be a positive integer.")
+        bounded_batch = min(batch_size, MAX_LIST_LIMIT)
+        last_key: tuple[float, str] | None = None
+        while True:
+            with self._connection() as conn:
+                if last_key is None:
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM agent_sessions
+                        ORDER BY updated_at DESC, session_id LIMIT ?
+                        """,
+                        (bounded_batch,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT * FROM agent_sessions
+                        WHERE (updated_at < ?) OR (updated_at=? AND session_id>?)
+                        ORDER BY updated_at DESC, session_id LIMIT ?
+                        """,
+                        (last_key[0], last_key[0], last_key[1], bounded_batch),
+                    ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield self._record(row)
+            final = rows[-1]
+            last_key = (float(final["updated_at"]), str(final["session_id"]))
+
     def update_state(
         self,
         session_id: str,
@@ -367,6 +436,53 @@ class AgentSessionStore:
             owner_principal_id,
             status="closed",
         )
+
+    def admin_get(self, session_id: str, workspace_id: str) -> AgentSessionRecord:
+        """Fetch any owner after the caller has proven privileged workspace access."""
+
+        session_id = _require_id(session_id, "session_id")
+        workspace_id = _require_id(workspace_id, "workspace_id")
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_sessions WHERE session_id=? AND workspace_id=?",
+                (session_id, workspace_id),
+            ).fetchone()
+        if row is None:
+            raise AgentSessionNotFoundError("Agent Session was not found.")
+        return self._record(row)
+
+    def admin_update_state(
+        self,
+        session_id: str,
+        workspace_id: str,
+        *,
+        status: str | None = None,
+        last_turn_id: str | None = None,
+    ) -> AgentSessionRecord:
+        """Privileged state update that deliberately preserves historical owner."""
+
+        current = self.admin_get(session_id, workspace_id)
+        next_status = current.status if status is None else _status(status)
+        next_turn = current.last_turn_id if last_turn_id is None else _require_id(last_turn_id, "last_turn_id")
+        now = _now()
+        with self._write_lock, self._connection(write=True) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE agent_sessions
+                SET status=?, last_turn_id=?, updated_at=?
+                WHERE session_id=? AND workspace_id=?
+                """,
+                (next_status, next_turn, now, session_id, workspace_id),
+            )
+            if cursor.rowcount != 1:
+                raise AgentSessionNotFoundError("Agent Session was not found.")
+        return self.admin_get(session_id, workspace_id)
+
+    def admin_close(self, session_id: str, workspace_id: str) -> AgentSessionRecord:
+        current = self.admin_get(session_id, workspace_id)
+        if current.status == "closed":
+            return current
+        return self.admin_update_state(session_id, workspace_id, status="closed")
 
     @staticmethod
     def _record(row: sqlite3.Row) -> AgentSessionRecord:

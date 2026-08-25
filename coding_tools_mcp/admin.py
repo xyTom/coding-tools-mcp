@@ -362,7 +362,7 @@ class AdminService:
 
     def status_payload(self) -> dict[str, Any]:
         mode = telemetry_mode()
-        payload = {
+        payload: dict[str, Any] = {
             "ok": True,
             "admin_api": 1,
             "settings": {"available": True},
@@ -1400,15 +1400,24 @@ class AdminService:
             raise AdminServiceError("workspace_id is required.")
         return {"ok": True, **service.create_conversation(self._conversation_principal({"workspace_id": workspace_id}), body)}
 
-    def conversation_detail(self, workspace_id: str, conversation_id: str) -> dict[str, Any]:
+    def conversation_detail(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        query: dict[str, str],
+    ) -> dict[str, Any]:
         service = self._require_conversation_service()
         self._workspace_entry(workspace_id)
         return {
             "ok": True,
             "conversation": service.get_conversation(
-                OperatorPrincipal("admin", (workspace_id,)),
+                OperatorPrincipal("admin", (workspace_id,), role="admin"),
                 workspace_id,
                 conversation_id,
+                message_page=_query_int(query, "message_page", 1),
+                message_page_size=_query_int(query, "message_page_size", 100),
+                context_page=_query_int(query, "context_page", 1),
+                context_page_size=_query_int(query, "context_page_size", 100),
             ),
         }
 
@@ -1423,7 +1432,7 @@ class AdminService:
         return {
             "ok": True,
             **service.create_execution(
-                OperatorPrincipal("admin", (workspace_id,)),
+                OperatorPrincipal("admin", (workspace_id,), role="admin"),
                 workspace_id,
                 conversation_id,
                 body,
@@ -1439,7 +1448,7 @@ class AdminService:
         service = self._require_conversation_service()
         self._workspace_entry(workspace_id)
         return service.send_conversation_turn(
-            OperatorPrincipal("admin", (workspace_id,)),
+            OperatorPrincipal("admin", (workspace_id,), role="admin"),
             workspace_id,
             conversation_id,
             body,
@@ -1454,7 +1463,7 @@ class AdminService:
         service = self._require_conversation_service()
         self._workspace_entry(workspace_id)
         return service.resume_conversation(
-            OperatorPrincipal("admin", (workspace_id,)),
+            OperatorPrincipal("admin", (workspace_id,), role="admin"),
             workspace_id,
             conversation_id,
             body,
@@ -1469,7 +1478,44 @@ class AdminService:
         service = self._require_conversation_service()
         self._workspace_entry(workspace_id)
         return service.close_conversation_execution(
-            OperatorPrincipal("admin", (workspace_id,)),
+            OperatorPrincipal("admin", (workspace_id,), role="admin"),
+            workspace_id,
+            conversation_id,
+            body,
+        )
+
+    def conversation_approval(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        approval_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        return service.approve_conversation_execution(
+            OperatorPrincipal("admin", (workspace_id,), role="admin"),
+            workspace_id,
+            conversation_id,
+            approval_id,
+            body,
+        )
+
+    def conversation_executions(self, workspace_id: str, conversation_id: str) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        detail = service.get_conversation(
+            OperatorPrincipal("admin", (workspace_id,), role="admin"),
+            workspace_id,
+            conversation_id,
+        )
+        return {"ok": True, "executions": detail.get("executions", [])}
+
+    def conversation_validation(self, workspace_id: str, conversation_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        service = self._require_conversation_service()
+        self._workspace_entry(workspace_id)
+        return service.run_conversation_validation(
+            OperatorPrincipal("admin", (workspace_id,), role="admin"),
             workspace_id,
             conversation_id,
             body,
@@ -1478,19 +1524,19 @@ class AdminService:
     def conversation_continuation(self, workspace_id: str, conversation_id: str) -> dict[str, Any]:
         service = self._require_conversation_service()
         self._workspace_entry(workspace_id)
-        return service.continuation(OperatorPrincipal("admin", (workspace_id,)), workspace_id, conversation_id)
+        return service.continuation(OperatorPrincipal("admin", (workspace_id,), role="admin"), workspace_id, conversation_id)
 
     def conversation_handoff(self, workspace_id: str, conversation_id: str) -> dict[str, Any]:
         service = self._require_conversation_service()
         self._workspace_entry(workspace_id)
-        return service.conversation_handoff(OperatorPrincipal("admin", (workspace_id,)), workspace_id, conversation_id)
+        return service.conversation_handoff(OperatorPrincipal("admin", (workspace_id,), role="admin"), workspace_id, conversation_id)
 
     @staticmethod
     def _conversation_principal(query: dict[str, str]) -> OperatorPrincipal:
         workspace_id = query.get("workspace_id") or ""
         if not workspace_id:
             raise AdminServiceError("workspace_id is required.")
-        return OperatorPrincipal("admin", (workspace_id,))
+        return OperatorPrincipal("admin", (workspace_id,), role="admin")
 
     def _require_conversation_service(self) -> Any:
         if self.conversation_service is None:
@@ -1667,9 +1713,11 @@ class AdminService:
         if method == "POST" and parts == ["conversations"]:
             return self.conversation_create(body)
         if len(parts) == 3 and parts[:1] == ["conversations"] and method == "GET":
-            return self.conversation_detail(parts[1], parts[2])
+            return self.conversation_detail(parts[1], parts[2], query)
         if len(parts) == 4 and parts[:1] == ["conversations"] and parts[3] == "executions" and method == "POST":
             return self.conversation_execution_create(parts[1], parts[2], body)
+        if len(parts) == 4 and parts[:1] == ["conversations"] and parts[3] == "executions" and method == "GET":
+            return self.conversation_executions(parts[1], parts[2])
         if len(parts) == 4 and parts[:1] == ["conversations"] and method == "POST":
             if parts[3] == "turns":
                 return self.conversation_turn(parts[1], parts[2], body)
@@ -1682,6 +1730,10 @@ class AdminService:
                 return self.conversation_continuation(parts[1], parts[2])
             if parts[3] == "handoff":
                 return self.conversation_handoff(parts[1], parts[2])
+        if len(parts) == 5 and parts[:1] == ["conversations"] and parts[3] == "approvals" and method == "POST":
+            return self.conversation_approval(parts[1], parts[2], parts[4], body)
+        if len(parts) == 4 and parts[:1] == ["conversations"] and parts[3] == "validation" and method == "POST":
+            return self.conversation_validation(parts[1], parts[2], body)
         if len(parts) == 4 and parts[:2] == ["chat", "conversations"] and method == "GET":
             return self.chat_conversation_detail(parts[2], parts[3], query)
         if len(parts) == 5 and parts[:2] == ["chat", "conversations"] and method == "POST":

@@ -112,7 +112,7 @@ coding-tools-mcp-runner --allow-insecure-ws --server "ws://127.0.0.1:8765/runner
 
 ## 安全与运维清单
 
-- Operator、Admin、Runner 三类 credential 必须分开。
+- MCP principal、Admin、Runner 三类 credential 必须分开。
 - token 不放进 URL、二维码、命令行参数、Git 或截图；优先使用环境变量、Secret Vault 或受保护的 credential file。
 - 公网只使用 HTTPS/WSS，并在 tunnel 或反向代理处保留认证。
 - 不要把 `permission_mode=dangerous` 当作沙箱；仅在外部隔离的容器或 VM 中使用。

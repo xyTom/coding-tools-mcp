@@ -365,6 +365,7 @@ function createNode(documentRef, tag, options = {}) {
   if (options.text !== undefined) node.textContent = String(options.text);
   if (options.type) node.type = options.type;
   if (options.id) node.id = options.id;
+  if (Array.isArray(options.children)) node.append(...options.children);
   return node;
 }
 
@@ -413,6 +414,63 @@ function appendDefinitionList(documentRef, container, value) {
   container.append(dl);
 }
 
+function appendProjectionError(container, title, message, handlers) {
+  const documentRef = container.ownerDocument || document;
+  const section = createNode(documentRef, 'section', { className: 'context-entry' });
+  const retry = createNode(documentRef, 'button', { type: 'button', className: 'compact secondary', text: 'Retry' });
+  retry.addEventListener('click', () => handlers.onRetryProjections?.(retry));
+  section.append(
+    createNode(documentRef, 'strong', { text: title }),
+    createNode(documentRef, 'p', { className: 'danger-text', text: String(message || 'Unknown projection error.') }),
+    retry,
+  );
+  container.append(section);
+}
+
+function renderWorkProgress(container, continuation, payload, handlers) {
+  const documentRef = container.ownerDocument || document;
+  const execution = continuation.execution || {};
+  const section = createNode(documentRef, 'section', { className: 'context-entry' });
+  section.append(createNode(documentRef, 'h4', { text: `Work / Progress · ${continuation.attempt?.attempt_id || 'no attempt'}` }));
+  section.append(createNode(documentRef, 'p', {
+    text: continuation.previous_instruction
+      || continuation.attempt?.previous_instruction
+      || 'No instruction recorded.',
+  }));
+
+  const changes = createNode(documentRef, 'p', {
+    className: 'muted',
+    text: `Changed ${continuation.changes?.total || 0} · Explored ${continuation.exploration?.total || 0} · Validation ${continuation.validation?.status || 'unknown'}`,
+  });
+  section.append(changes);
+  const pathList = createNode(documentRef, 'ul', {});
+  for (const path of [...(continuation.changes?.paths || []), ...(continuation.exploration?.paths || [])]) {
+    pathList.append(createNode(documentRef, 'li', { text: path }));
+  }
+  section.append(pathList);
+
+  for (const failure of continuation.validation?.failures || []) {
+    section.append(createNode(documentRef, 'p', { className: 'danger-text', text: failure }));
+  }
+  for (const job of continuation.jobs?.items || []) {
+    section.append(createNode(documentRef, 'p', { text: `Job ${job.id}: ${job.status}` }));
+  }
+  for (const approval of continuation.approvals?.items || []) {
+    const row = createNode(documentRef, 'div', { className: 'button-row' });
+    const approve = createNode(documentRef, 'button', { type: 'button', className: 'compact', text: 'Approve' });
+    const deny = createNode(documentRef, 'button', { type: 'button', className: 'compact danger', text: 'Deny' });
+    approve.addEventListener('click', () => handlers.onApproval?.(approval.approval_id || approval.id, 'approve', approval.session_id, approve));
+    deny.addEventListener('click', () => handlers.onApproval?.(approval.approval_id || approval.id, 'deny', approval.session_id, deny));
+    row.append(createNode(documentRef, 'span', { text: `Approval ${approval.id}` }), approve, deny);
+    section.append(row);
+  }
+  for (const checkpoint of continuation.checkpoints || []) {
+    section.append(createNode(documentRef, 'p', { className: 'muted', text: checkpoint }));
+  }
+  section.append(createNode(documentRef, 'p', { className: 'muted', text: (continuation.suggested_actions || []).join(', ') }));
+  container.append(section);
+}
+
 function renderConversationItems(container, items, onSelect) {
   const documentRef = container.ownerDocument || document;
   container.replaceChildren();
@@ -427,12 +485,23 @@ function renderConversationItems(container, items, onSelect) {
     const identity = createNode(documentRef, 'p', { className: 'muted', text: `${item.workspace_id || '—'} / ${item.conversation_id || '—'}` });
     const preview = createNode(documentRef, 'p', { text: item.preview || '无摘要正文。' });
     const execution = item.execution;
+    const progress = item.progress || {};
     const counts = createNode(
       documentRef,
       'p',
       {
         className: 'muted',
-        text: `Messages: ${item.message_count || 0} · Context: ${item.context_count || 0} · Execution: ${execution ? execution.status : 'none'}`,
+        text: [
+          `Messages: ${item.message_count || 0}`,
+          `Context: ${item.context_count || 0}`,
+          `Execution: ${execution ? execution.status : 'none'}`,
+          `Changes: ${progress.changed_path_count || 0}`,
+          `Explored: ${progress.explored_path_count || 0}`,
+          `Validation: ${progress.validation_status || 'unknown'}`,
+          `Failures: ${progress.unresolved_failure_count || 0}`,
+          `Jobs: ${progress.active_job_count || 0}`,
+          `Approvals: ${progress.pending_approval_count || 0}`,
+        ].join(' · '),
       },
     );
     button.append(title, identity, preview, counts);
@@ -457,15 +526,34 @@ function renderConversationDetail(container, payload, handlers = {}) {
   heading.append(titleWrap, deleteConversation);
   container.append(heading);
 
+  const executionControls = createNode(documentRef, 'div', { className: 'button-row' });
+  const startExecution = createNode(documentRef, 'button', { type: 'button', className: 'secondary', text: 'Start execution' });
+  startExecution.addEventListener('click', () => handlers.onCreateExecution?.('codex-app-server', startExecution));
+  executionControls.append(startExecution);
+  container.append(executionControls);
+
   const executions = payload.executions || [];
   if (executions.length) {
     const executionHeading = createNode(documentRef, 'h4', { text: `Agent Execution (${executions.length})` });
     const executionList = createNode(documentRef, 'div', { className: 'compact-list' });
     for (const execution of executions) {
       const card = createNode(documentRef, 'section', { className: 'context-entry' });
+      const turnInput = createNode(documentRef, 'input', { type: 'text', placeholder: 'Turn message' });
+      const recipeInput = createNode(documentRef, 'input', { type: 'text', placeholder: 'Validation recipe' });
+      const sendTurn = createNode(documentRef, 'button', { type: 'button', className: 'compact', text: 'Send' });
+      const resume = createNode(documentRef, 'button', { type: 'button', className: 'compact secondary', text: 'Resume' });
+      const close = createNode(documentRef, 'button', { type: 'button', className: 'compact danger', text: 'Close' });
+      sendTurn.addEventListener('click', () => handlers.onSendTurn?.(execution.session_id, turnInput.value, sendTurn));
+      resume.addEventListener('click', () => handlers.onResume?.(execution.session_id, resume));
+      close.addEventListener('click', () => handlers.onClose?.(execution.session_id, close));
+      const validate = createNode(documentRef, 'button', { type: 'button', className: 'compact secondary', text: 'Validate' });
+      validate.addEventListener('click', () => handlers.onValidate?.(execution.session_id, recipeInput.value, validate));
       card.append(
         createNode(documentRef, 'p', { className: 'muted', text: `${execution.session_id} · ${execution.status} · ${execution.backend_kind}` }),
-        createNode(documentRef, 'pre', { text: `last turn: ${execution.last_turn_id || '—'}` }),
+        turnInput,
+        recipeInput,
+        createNode(documentRef, 'div', { className: 'button-row', children: [sendTurn, resume, close] }),
+        createNode(documentRef, 'div', { className: 'button-row', children: [validate] }),
       );
       executionList.append(card);
     }
@@ -473,10 +561,9 @@ function renderConversationDetail(container, payload, handlers = {}) {
   }
 
   if (payload.continuation) {
-    container.append(
-      createNode(documentRef, 'h4', { text: 'Continuation' }),
-      createNode(documentRef, 'pre', { text: JSON.stringify(payload.continuation, null, 2) }),
-    );
+    renderWorkProgress(container, payload.continuation, payload, handlers);
+  } else if (payload.continuationError) {
+    appendProjectionError(container, 'Continuation failed', payload.continuationError, handlers);
   }
 
   if (payload.handoff) {
@@ -484,6 +571,8 @@ function renderConversationDetail(container, payload, handlers = {}) {
       createNode(documentRef, 'h4', { text: 'Handoff' }),
       createNode(documentRef, 'pre', { text: JSON.stringify(payload.handoff, null, 2) }),
     );
+  } else if (payload.handoffError) {
+    appendProjectionError(container, 'Handoff failed', payload.handoffError, handlers);
   }
 
   const messagesHeading = createNode(documentRef, 'h4', { text: `Messages (${payload.messages_total || 0})` });
@@ -844,7 +933,16 @@ function initAdminApp(documentRef = document) {
     byId('gatewayCredentialNotice').textContent = '';
     gatewayFormError();
     updateGatewayTransportFields();
-    if (focus) byId('gatewayAlias').focus();
+  }
+
+  function openGatewayServerDialog() {
+    resetGatewayServerForm();
+    byId('gatewayServerDialog')?.showModal();
+    byId('gatewayAlias')?.focus();
+  }
+
+  function closeGatewayServerDialog() {
+    resetGatewayServerForm();
   }
 
   function editableEnvironment(config) {
@@ -881,7 +979,7 @@ function initAdminApp(documentRef = document) {
       : '';
     gatewayFormError();
     updateGatewayTransportFields();
-    byId('gatewayServerForm').scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+    byId('gatewayServerDialog')?.showModal();
     byId('gatewayCommand').focus();
   }
 
@@ -1464,12 +1562,17 @@ function initAdminApp(documentRef = document) {
     return true;
   }
 
+  async function refreshConversationViews() {
+    await loadConversations();
+    await loadConversationDetail();
+  }
+
   async function loadConversationDetail() {
     const selected = state.selectedConversation;
     if (!selected) return;
     const query = new URLSearchParams({ message_page: String(state.messagePage), message_page_size: '50', context_page: String(state.contextPage), context_page_size: '50' });
     const conversationPath = `/conversations/${encodeURIComponent(selected.workspaceId)}/${encodeURIComponent(selected.conversationId)}`;
-    const payload = await api.request(conversationPath);
+    const payload = await api.request(`${conversationPath}?${query}`);
     const [continuationResult, handoffResult] = await Promise.allSettled([
       api.request(`${conversationPath}/continuation`),
       api.request(`${conversationPath}/handoff`),
@@ -1479,7 +1582,63 @@ function initAdminApp(documentRef = document) {
       ...payload.conversation,
       continuation: continuationResult.status === 'fulfilled' ? continuationResult.value.continuation : null,
       handoff: handoffResult.status === 'fulfilled' ? handoffResult.value.handoff : null,
+      continuationError: continuationResult.status === 'rejected' ? continuationResult.reason.message : null,
+      handoffError: handoffResult.status === 'rejected' ? handoffResult.reason.message : null,
     }, {
+      onCreateExecution: async (backendKind, button) => {
+        button.disabled = true;
+        try {
+          await api.request(`${conversationPath}/executions`, { method: 'POST', body: { backend_kind: backendKind } });
+          status('Execution created.');
+          await refreshConversationViews();
+        } finally { button.disabled = false; }
+      },
+      onSendTurn: async (sessionId, message, button) => {
+        if (!message.trim()) return;
+        button.disabled = true;
+        try {
+          await api.request(`${conversationPath}/turns`, { method: 'POST', body: { session_id: sessionId, message } });
+          status('Turn sent.');
+          await refreshConversationViews();
+        } finally { button.disabled = false; }
+      },
+      onResume: async (sessionId, button) => {
+        button.disabled = true;
+        try {
+          await api.request(`${conversationPath}/resume`, { method: 'POST', body: { session_id: sessionId } });
+          await refreshConversationViews();
+        } finally { button.disabled = false; }
+      },
+      onClose: async (sessionId, button) => {
+        button.disabled = true;
+        try {
+          await api.request(`${conversationPath}/close`, { method: 'POST', body: { session_id: sessionId } });
+          await refreshConversationViews();
+        } finally { button.disabled = false; }
+      },
+      onValidate: async (sessionId, recipe, button) => {
+        if (!recipe.trim()) return;
+        button.disabled = true;
+        try {
+          await api.request(
+            `${conversationPath}/validation`,
+            { method: 'POST', body: { session_id: sessionId, recipe } },
+          );
+          status('Validation complete.');
+          await refreshConversationViews();
+        } finally { button.disabled = false; }
+      },
+      onApproval: async (approvalId, decision, sessionId, button) => {
+        button.disabled = true;
+        try {
+          await api.request(
+            `${conversationPath}/approvals/${encodeURIComponent(approvalId)}`,
+            { method: 'POST', body: { session_id: sessionId, decision } },
+          );
+          await refreshConversationViews();
+        } finally { button.disabled = false; }
+      },
+      onRetryProjections: async () => { await loadConversationDetail(); },
       onDeleteMessage: async (message, button) => {
         if (await deleteChatResource('messages', selected.workspaceId, message.message_id, button, '最多删除 1 条 message。')) await loadConversationDetail();
       },
@@ -1651,6 +1810,11 @@ function initAdminApp(documentRef = document) {
     byId('permissionHelp').textContent = copy.permissionPresentation(byId('settingsPermission').value).description;
   });
   byId('reloadWorkspaces').addEventListener('click', () => loadWorkspaces().catch((error) => status(error.message, 'danger')));
+  byId('openWorkspaceAdd')?.addEventListener('click', () => {
+    byId('workspaceAddDialog')?.showModal();
+    byId('workspaceId')?.focus();
+  });
+  documentRef.querySelectorAll('[data-close-workspace-add]').forEach((control) => control.addEventListener('click', () => byId('workspaceAddDialog')?.close()));
   byId('workspaceAddForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const workspace = {
@@ -1660,6 +1824,7 @@ function initAdminApp(documentRef = document) {
     try {
       await api.request('/workspaces', { method: 'POST', body: { expected_revision: state.workspaceRevision, workspace } });
       event.currentTarget.reset(); byId('workspaceEnabled').checked = true;
+      byId('workspaceAddDialog')?.close();
       await Promise.all([loadWorkspaces(), loadSettings()]);
       status(`Workspace ${workspace.id} 已添加。`);
     } catch (error) { status(error.message, 'danger'); }
@@ -1678,9 +1843,10 @@ function initAdminApp(documentRef = document) {
       status('凭据安全策略已保存。');
     } catch (error) { status(error.message, 'danger'); }
   });
-  byId('newGatewayForm').addEventListener('click', () => resetGatewayServerForm({ focus: true }));
+  byId('newGatewayForm').addEventListener('click', () => openGatewayServerDialog());
+  byId('closeGatewayDialog')?.addEventListener('click', closeGatewayServerDialog);
   byId('gatewayTransport').addEventListener('change', updateGatewayTransportFields);
-  byId('cancelGatewayEdit').addEventListener('click', () => resetGatewayServerForm());
+  byId('cancelGatewayEdit').addEventListener('click', () => { byId('gatewayServerDialog')?.close(); resetGatewayServerForm(); });
   byId('gatewayServerForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     gatewayFormError();
@@ -1692,6 +1858,7 @@ function initAdminApp(documentRef = document) {
       }
       await saveGatewayServer(alias, config);
       resetGatewayServerForm();
+      byId('gatewayServerDialog')?.close();
       status(`MCP 连接 ${alias} 已${editing ? '更新' : '添加'}；新建 MCP Session/Runtime 或服务重启后生效。`);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
@@ -1750,6 +1917,11 @@ function initAdminApp(documentRef = document) {
     }
   });
   byId('reloadSecrets').addEventListener('click', () => loadSecrets().catch((error) => status(error.message, 'danger')));
+  byId('openSecretSet')?.addEventListener('click', () => {
+    byId('secretSetDialog')?.showModal();
+    byId('secretName')?.focus();
+  });
+  documentRef.querySelectorAll('[data-close-secret-set]').forEach((control) => control.addEventListener('click', () => byId('secretSetDialog')?.close()));
   byId('secretForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const name = byId('secretName').value.trim();
@@ -1758,6 +1930,7 @@ function initAdminApp(documentRef = document) {
       const result = await api.request(`/secrets/${encodeURIComponent(name)}`, { method: 'PUT', body: { value } });
       byId('secretValue').value = '';
       setPasswordVisibility(byId('secretValue'), byId('secretValueToggle'), false);
+      byId('secretSetDialog')?.close();
       status(result.oauth_applied_immediately
         ? 'OAuth Authorize 密码已更新并立即生效；旧密码已失效。'
         : `Secret ${name} 已配置；实际影响数量：${result.affected_count || 0}。`);

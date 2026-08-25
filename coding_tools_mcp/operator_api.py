@@ -19,7 +19,8 @@ from .agent_backends.base import AgentBackendEvent
 from .agent_session_store import AgentSessionRecord
 from .agent_sessions import AgentSessionService, AgentSessionServiceError
 from .handoff import build_session_handoff
-from .conversation_evidence import continuation_feedback, evidence_entry, handoff_brief
+from .conversation_evidence import continuation_feedback, handoff_brief
+from .conversation_recorder import ConversationEvidenceRecorder
 from .transcript import TranscriptStore, TranscriptStoreError
 from .validation import ValidationBackend
 from .workspace_catalog import WorkspaceCatalog, WorkspaceCatalogError, WorkspaceEntry
@@ -48,6 +49,7 @@ class OperatorAPIError(RuntimeError):
 class OperatorPrincipal:
     principal_id: str
     workspace_ids: tuple[str, ...]
+    role: str = "principal"
 
     def can_access(self, workspace_id: str) -> bool:
         return workspace_id in self.workspace_ids
@@ -79,6 +81,7 @@ class OperatorAPIService:
         self.handoff_jobs = handoff_jobs
         self.validation_backend_factory = validation_backend_factory
         self.transcript_store = transcript_store
+        self.evidence = ConversationEvidenceRecorder(transcript_store) if transcript_store is not None else None
         self._event_lock = threading.RLock()
         self._events: dict[str, deque[dict[str, Any]]] = {}
         self._next_sequence: dict[str, int] = {}
@@ -119,14 +122,28 @@ class OperatorAPIService:
             page_size=max(1, min(int(page_size), 200)),
             query=query,
         )
-        records = self._conversation_execution_map(principal, workspace_id)
+        execution_records = self._conversation_execution_records(principal, workspace_id)
+        records: dict[str, AgentSessionRecord] = {}
+        executions_by_conversation: dict[str, list[dict[str, Any]]] = {}
+        for record in execution_records:
+            if not record.conversation_id:
+                continue
+            records.setdefault(record.conversation_id, record)
+        for record in reversed(execution_records):
+            if record.conversation_id:
+                executions_by_conversation.setdefault(record.conversation_id, []).append(
+                    self._detail_payload(record)
+                )
         items: list[dict[str, Any]] = []
         for raw in payload.get("items", []):
             if not isinstance(raw, dict) or not raw.get("conversation_id"):
                 continue
             item = dict(raw)
-            record = records.get(str(item["conversation_id"]))
+            conversation_id = str(item["conversation_id"])
+            record = records.get(conversation_id)
             item["execution"] = self._conversation_execution_payload(record) if record else None
+            executions = executions_by_conversation.get(conversation_id, [])
+            item["progress"] = self._conversation_progress(workspace_id, conversation_id, executions)
             items.append(item)
         return {"items": items, "page": payload.get("page"), "page_size": payload.get("page_size"), "total": payload.get("total")}
 
@@ -159,6 +176,11 @@ class OperatorAPIService:
         principal: OperatorPrincipal,
         workspace_id: str,
         conversation_id: str,
+        *,
+        message_page: int = 1,
+        message_page_size: int = 100,
+        context_page: int = 1,
+        context_page_size: int = 100,
     ) -> dict[str, Any]:
         conversation_id = self._required_string(conversation_id, "conversation_id", 256)
         self._require_workspace(principal, workspace_id)
@@ -166,10 +188,10 @@ class OperatorAPIService:
         summary = store.conversation_detail(
             workspace_id,
             conversation_id,
-            message_page=1,
-            message_page_size=100,
-            context_page=1,
-            context_page_size=100,
+            message_page=message_page,
+            message_page_size=message_page_size,
+            context_page=context_page,
+            context_page_size=context_page_size,
         )
         if summary is None:
             raise OperatorAPIError(
@@ -177,7 +199,7 @@ class OperatorAPIService:
                 "Conversation is unavailable.",
                 status=404,
             )
-        records = self.agent_sessions.list_sessions(workspace_id, principal.principal_id, limit=200)
+        records = self._conversation_execution_records(principal, workspace_id)
         executions = [
             self._detail_payload(record)
             for record in reversed(records)
@@ -208,6 +230,12 @@ class OperatorAPIService:
             conversation_id=conversation_id,
         )
         record = self._ensure_transcript_conversation(record)
+        self._record_evidence(
+            record,
+            "job_state",
+            record.status,
+            {"job_id": record.session_id, "status": record.status},
+        )
         return {"execution": self._detail_payload(record)}
 
     def send_conversation_turn(
@@ -223,7 +251,18 @@ class OperatorAPIService:
             conversation_id,
             body.get("session_id"),
         )
-        return self.send_turn(principal, record.session_id, body)
+        if principal.role == "admin":
+            return self._admin_send_turn(workspace_id, conversation_id, record.session_id, body)
+        result = self.send_turn(principal, record.session_id, body)
+        updated = result.get("session", {})
+        if isinstance(updated, Mapping) and updated.get("session_id"):
+            self._record_evidence(
+                record,
+                "job_state",
+                str(updated.get("status") or record.status),
+                {"job_id": str(updated["session_id"]), "status": str(updated.get("status") or record.status)},
+            )
+        return result
 
     def resume_conversation(
         self,
@@ -239,12 +278,27 @@ class OperatorAPIService:
             body.get("session_id"),
             allow_closed=False,
         )
+        if principal.role == "admin":
+            try:
+                record = self.agent_sessions.admin_resume_session(record.session_id, workspace_id)
+            except AgentSessionServiceError as exc:
+                if not exc.retryable:
+                    raise
+                record = self.agent_sessions.admin_get_session(record.session_id, workspace_id)
+            record = self._ensure_transcript_conversation(record)
+            return {"execution": self._detail_payload(record)}
         try:
             record = self.agent_sessions.resume_session(record.session_id, principal.principal_id)
         except AgentSessionServiceError as exc:
             if not exc.retryable:
                 raise
             record = self.agent_sessions.get_session(record.session_id, principal.principal_id)
+        self._record_evidence(
+            record,
+            "job_state",
+            record.status,
+            {"job_id": record.session_id, "status": record.status},
+        )
         return {"execution": self._detail_payload(self._ensure_transcript_conversation(record))}
 
     def close_conversation_execution(
@@ -260,7 +314,70 @@ class OperatorAPIService:
             conversation_id,
             body.get("session_id"),
         )
-        record = self.agent_sessions.close_session(record.session_id, principal.principal_id)
+        if principal.role == "admin":
+            record = self.agent_sessions.admin_close_session(record.session_id, workspace_id)
+        else:
+            record = self.agent_sessions.close_session(record.session_id, principal.principal_id)
+        self._record_evidence(
+            record,
+            "job_state",
+            record.status,
+            {"job_id": record.session_id, "status": record.status},
+        )
+        return {"execution": record.summary_payload()}
+
+    def approve_conversation_execution(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+        approval_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        mapped = {
+            "approve": "accept",
+            "accept": "accept",
+            "acceptForSession": "acceptForSession",
+            "deny": "decline",
+            "decline": "decline",
+            "cancel": "cancel",
+        }.get(body.get("decision") if isinstance(body.get("decision"), str) else "")
+        if mapped is None:
+            raise OperatorAPIError("operator_invalid_request", "decision must be approve, deny, accept, acceptForSession, decline, or cancel.", status=400)
+        requested_session_id = body.get("session_id")
+        if not isinstance(requested_session_id, str) or not requested_session_id.strip():
+            raise OperatorAPIError(
+                "operator_invalid_request",
+                "session_id is required for a Conversation approval.",
+                status=400,
+            )
+        record = self._latest_execution_for_action(
+            principal,
+            workspace_id,
+            conversation_id,
+            requested_session_id,
+        )
+        self._require_pending_conversation_approval(record, approval_id)
+        if principal.role == "admin":
+            record = self.agent_sessions.admin_approve(
+                record.session_id,
+                workspace_id,
+                approval_id,
+                mapped,
+            )
+        else:
+            record = self.agent_sessions.approve(
+                record.session_id,
+                principal.principal_id,
+                approval_id,
+                mapped,
+            )
+        self._record_evidence(
+            record,
+            "approval_state",
+            mapped,
+            {"approval_id": approval_id, "session_id": record.session_id, "status": mapped},
+        )
         return {"execution": record.summary_payload()}
 
     def list_sessions(
@@ -389,10 +506,7 @@ class OperatorAPIService:
             ],
             title=self._message_title(message) if first_turn else None,
         )
-        self._record_context(
-            record,
-            [evidence_entry("task_instruction", message) or {}],
-        )
+        self._record_evidence(record, "task_instruction", message)
         return {"session": self._session_summary_payload(record)}
 
     def interrupt(
@@ -433,6 +547,12 @@ class OperatorAPIService:
             self._required_string(approval_id, "approval_id", 256),
             mapped,
         )
+        self._record_evidence(
+            record,
+            "approval_state",
+            mapped,
+            {"approval_id": approval_id, "session_id": record.session_id, "status": mapped},
+        )
         return {"session": record.summary_payload()}
 
     def events(
@@ -463,6 +583,14 @@ class OperatorAPIService:
                     limit=MAX_OPERATOR_EVENT_PULL,
                 )
             self._append_events(record, backend_events)
+            for event in backend_events:
+                if event.kind == "approval" and event.approval_id:
+                    self._record_evidence(
+                        record,
+                        "approval_state",
+                        "pending",
+                        {"approval_id": event.approval_id, "session_id": record.session_id, "status": "pending"},
+                    )
         events = self._buffered_events(session_id, after=max(0, int(after)))
         cursor = events[-1]["sequence"] if events else max(0, int(after))
         return {"events": events, "cursor": cursor}
@@ -477,44 +605,45 @@ class OperatorAPIService:
         recipe = self._required_string(body.get("recipe"), "recipe", 128)
         record = self.agent_sessions.get_session(session_id, principal.principal_id)
         workspace = self._require_workspace(principal, record.workspace_id)
-        factory = self.validation_backend_factory
-        if factory is None:
-            raise OperatorAPIError(
-                "operator_validation_unavailable",
-                "Structured validation is unavailable.",
-                status=503,
-                retryable=True,
-            )
-        try:
-            backend = factory(workspace)
-            try:
-                result = backend.run(recipe)
-            finally:
-                backend.close()
-        except OperatorAPIError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - backend failures stay behind Operator boundary
-            raise OperatorAPIError(
-                "operator_validation_unavailable",
-                "Structured validation backend is unavailable.",
-                status=503,
-                retryable=True,
-            ) from exc
-        payload = result.payload()
+        payload = self._execute_validation(workspace, recipe)
         with self._event_lock:
             self._validation_results[session_id] = dict(payload)
-        self._record_context(
+        self._record_evidence(
             record,
-            [
-                evidence_entry(
-                    "validation",
-                    payload.get("status"),
-                    {"recipe": recipe, "status": payload.get("status")},
-                )
-                or {}
-            ],
+            "validation",
+            payload.get("status"),
+            {"recipe": recipe, "status": payload.get("status")},
         )
         return {"validation": payload}
+
+    def run_conversation_validation(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+        conversation_id: str,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        recipe = self._required_string(body.get("recipe"), "recipe", 128)
+        record = self._latest_execution_for_action(
+            principal,
+            workspace_id,
+            conversation_id,
+            body.get("session_id"),
+        )
+        workspace = self.workspace_catalog.get(workspace_id)
+        payload = self._execute_validation(workspace, recipe)
+        with self._event_lock:
+            self._validation_results[record.session_id] = dict(payload)
+        self._record_evidence(
+            record,
+            "validation",
+            payload.get("status"),
+            {"recipe": recipe, "status": payload.get("status")},
+        )
+        return {
+            "validation": payload,
+            "execution": record.summary_payload(),
+        }
 
     def continuation(
         self,
@@ -597,12 +726,21 @@ class OperatorAPIService:
         principal: OperatorPrincipal,
         workspace_id: str,
     ) -> dict[str, AgentSessionRecord]:
-        records = self.agent_sessions.list_sessions(workspace_id, principal.principal_id, limit=200)
+        records = self._conversation_execution_records(principal, workspace_id)
         result: dict[str, AgentSessionRecord] = {}
         for record in records:
             if record.conversation_id and record.conversation_id not in result:
                 result[record.conversation_id] = record
         return result
+
+    def _conversation_execution_records(
+        self,
+        principal: OperatorPrincipal,
+        workspace_id: str,
+    ) -> list[AgentSessionRecord]:
+        if principal.role == "admin":
+            return self.agent_sessions.list_workspace_sessions(workspace_id, limit=200)
+        return self.agent_sessions.list_sessions(workspace_id, principal.principal_id, limit=200)
 
     def _conversation_execution_payload(self, record: AgentSessionRecord) -> dict[str, Any]:
         payload = record.summary_payload()
@@ -623,7 +761,7 @@ class OperatorAPIService:
         records = [
             record
             for record in reversed(
-                self.agent_sessions.list_sessions(workspace_id, principal.principal_id, limit=200)
+                self._conversation_execution_records(principal, workspace_id)
             )
             if record.conversation_id == conversation_id
         ]
@@ -639,7 +777,56 @@ class OperatorAPIService:
                 "Conversation is unavailable.",
                 status=404,
             )
+        if principal.role == "admin":
+            return self.agent_sessions.admin_get_session(selected[-1].session_id, workspace_id)
         return self._resume_for_action(principal, selected[-1].session_id)
+
+    def _admin_send_turn(self, workspace_id: str, conversation_id: str, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        message = body.get("message")
+        if not isinstance(message, str) or not message.strip():
+            raise OperatorAPIError("operator_invalid_request", "message must be non-empty text.", status=400)
+        previous = self.agent_sessions.admin_get_session(session_id, workspace_id)
+        first_turn = previous.last_turn_id is None
+        record = self.agent_sessions.admin_send_turn(session_id, workspace_id, message)
+        self._record_transcript_messages(
+            record,
+            [{
+                "message_id": f"{record.session_id}:{record.last_turn_id or 'turn'}:user",
+                "role": "user",
+                "content": message,
+                "source": "admin-api",
+            }],
+            title=self._message_title(message) if first_turn else None,
+        )
+        self._record_evidence(record, "task_instruction", message)
+        self._record_evidence(record, "job_state", record.status, {"job_id": record.session_id, "status": record.status})
+        return {"session": record.summary_payload()}
+
+    def _execute_validation(self, workspace: WorkspaceEntry, recipe: str) -> dict[str, Any]:
+        factory = self.validation_backend_factory
+        if factory is None:
+            raise OperatorAPIError(
+                "operator_validation_unavailable",
+                "Structured validation is unavailable.",
+                status=503,
+                retryable=True,
+            )
+        try:
+            backend = factory(workspace)
+            try:
+                result = backend.run(recipe)
+            finally:
+                backend.close()
+        except OperatorAPIError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - backend failures stay behind Operator boundary
+            raise OperatorAPIError(
+                "operator_validation_unavailable",
+                "Structured validation backend is unavailable.",
+                status=503,
+                retryable=True,
+            ) from exc
+        return result.payload()
 
     def _append_events(self, record: AgentSessionRecord, events: list[AgentBackendEvent]) -> None:
         if not events:
@@ -803,7 +990,112 @@ class OperatorAPIService:
         conversation_id: str,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         detail = self.get_conversation(principal, workspace_id, conversation_id)
+        store = self._require_transcript_store()
+        detail["contexts"] = store.list_recent_context(workspace_id, conversation_id, limit=500)
+        detail["conversation_id"] = conversation_id
         return detail, detail.get("executions", [])
+
+    def _require_pending_conversation_approval(
+        self,
+        record: AgentSessionRecord,
+        approval_id: str,
+    ) -> None:
+        if not record.conversation_id:
+            raise OperatorAPIError(
+                "operator_conversation_not_found",
+                "Conversation is unavailable.",
+                status=404,
+            )
+        store = self._require_transcript_store()
+        try:
+            contexts = store.list_recent_context(
+                record.workspace_id,
+                record.conversation_id,
+                limit=500,
+            )
+        except (TranscriptStoreError, OSError) as exc:
+            raise OperatorAPIError(
+                "operator_projection_unavailable",
+                "Conversation approval state is temporarily unavailable.",
+                status=503,
+                retryable=True,
+            ) from exc
+        for item in contexts:
+            if item.get("kind") != "approval_state":
+                continue
+            metadata = item.get("metadata")
+            if not isinstance(metadata, Mapping):
+                continue
+            if (
+                metadata.get("approval_id") == approval_id
+                and metadata.get("session_id") == record.session_id
+                and str(metadata.get("status") or item.get("content") or "").lower()
+                in {"pending", "requested", "required"}
+            ):
+                return
+        raise OperatorAPIError(
+            "operator_approval_not_found",
+            "Approval is unavailable.",
+            status=404,
+        )
+
+    def _conversation_progress(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        executions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        store = self._require_transcript_store()
+        try:
+            contexts = store.list_recent_context(workspace_id, conversation_id, limit=500)
+        except (TranscriptStoreError, OSError):
+            raise OperatorAPIError(
+                "operator_projection_unavailable",
+                "Conversation progress is temporarily unavailable.",
+                status=503,
+                retryable=True,
+            ) from None
+        feedback = continuation_feedback({"contexts": contexts}, executions)
+        validation = feedback.get("validation", {})
+        changes = feedback.get("changes", {})
+        exploration = feedback.get("exploration", {})
+        jobs = feedback.get("jobs", {})
+        approvals = feedback.get("approvals", {})
+        return {
+            "attempt_id": feedback.get("attempt", {}).get("attempt_id"),
+            "changed_path_count": int(changes.get("total") or 0),
+            "changed_paths_truncated": bool(changes.get("truncated")),
+            "explored_path_count": int(exploration.get("total") or 0),
+            "explored_paths_truncated": bool(exploration.get("truncated")),
+            "validation_status": validation.get("status") or "unknown",
+            "unresolved_failure_count": int(validation.get("unresolved_failure_count") or 0),
+            "failures_truncated": bool(validation.get("truncated")),
+            "active_job_count": int(jobs.get("active") or 0),
+            "pending_approval_count": int(approvals.get("pending") or 0),
+            "states_truncated": bool(jobs.get("truncated") or approvals.get("truncated")),
+        }
+
+    def _record_evidence(
+        self,
+        record: AgentSessionRecord,
+        kind: str,
+        content: Any,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> bool:
+        recorder = self.evidence
+        if recorder is None or not record.conversation_id:
+            return False
+        try:
+            result = recorder.record(
+                record.workspace_id,
+                record.conversation_id,
+                kind,
+                content,
+                metadata,
+            )
+        except (TranscriptStoreError, OSError):
+            return False
+        return result is not None
 
     def _assistant_transcript_message(
         self,

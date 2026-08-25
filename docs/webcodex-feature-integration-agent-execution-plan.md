@@ -1,5 +1,9 @@
 # WebCodex 特性融合与 Coding Runtime 平台化：低上下文 Agent 分阶段执行计划
 
+> Status: historical plan. The `/app` and `/api/app/*` Operator App design in
+> this document is superseded and removed. `/admin` is the only WebUI management
+> entry; use `/admin/api/conversations/*` for Conversation Center operations.
+
 ## 0. 文档用途
 
 本文档用于指导多个低上下文 Agent / 多个独立会话，分阶段把 WebCodex 类产品能力和当前已经提出的增强能力融合进 `coding-tools-mcp`，同时尽量保护现有 MCP Runtime、固定工具目录、Upstream Broker、OAuth、Workspace 隔离、原子 Patch 和测试资产。

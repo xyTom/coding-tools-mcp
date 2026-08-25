@@ -2,34 +2,26 @@
 
 ## Status
 
-Accepted.
+Superseded by `/admin` Conversation Center service projections and execution APIs.
 
 ## Context
 
-The Agent workbench needs ordered server events for assistant text, tool activity,
-progress, approvals, failures, and repository-context changes. Operator requests
-require bearer authorization, while native `EventSource` cannot set an
-`Authorization` header. Credentials must never be put in event-stream URLs.
+This ADR described a former Operator App design that used
+`/api/app/sessions/{session_id}/events`. That product entry, route namespace,
+and separate Operator browser session were removed. They must not be restored.
 
 ## Decision
 
-The browser uses authenticated `fetch` to read SSE:
-
-```text
-GET /api/app/sessions/{session_id}/events?after={cursor}
-Accept: text/event-stream
-Authorization: Bearer <operator credential>
-```
-
-Create/list/get, turns, interrupt and approval decisions remain ordinary Operator
-HTTP requests. The browser keeps a bounded in-memory projection and reconnects
-with the latest cursor. A page refresh restores durable AgentSession state; it
-never resubmits the previous turn.
+Conversation Center reads bounded execution and evidence projections through
+authorized `/admin/api/conversations/*` service APIs. The browser polls or
+explicitly refreshes after a user-visible action; durable execution state remains
+separate from browser transport state. A refresh may recover the Admin session,
+but it never resubmits a prior Agent turn.
 
 ## Security and failure behavior
 
-- Operator bearer material is header-only and memory-only.
-- Admin credentials are not accepted as Operator identity.
+- Admin authority is separate from MCP principal ownership.
+- Historical execution owners are not rewritten for privileged Admin access.
 - Backend text is rendered with DOM creation and `textContent`, never HTML.
-- Stream loss is recoverable transport state and does not imply session/job loss.
+- Browser transport loss does not imply session/job loss.
 - Browser SSE and Runner WebSocket are separate transport/lifecycle boundaries.

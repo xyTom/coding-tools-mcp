@@ -2,6 +2,11 @@
 
 > Status: handoff plan for follow-up sessions
 >
+> Historical baseline plan. The completion checklist in
+> `conversation-center-session-continuity-completion-taskbook.md` supersedes
+> this document for current acceptance. Its `/app` removal decision remains
+> normative.
+>
 > Project: `coding-tools-mcp`
 >
 > Primary product decision: **remove `/app` as a product entry point. `/admin` is the single WebUI entry.**
@@ -810,27 +815,27 @@ Update user/admin documentation so it consistently states:
 
 This work is complete only when all of the following are true:
 
-- [ ] `/admin` is the only WebUI management entry.
-- [ ] `/app` is removed as a functional entry.
-- [ ] `/api/app/*` is no longer part of the supported WebUI architecture.
-- [ ] Independent Operator authentication/session code is removed if no longer used.
-- [ ] WebUI shows one Conversation list, not separate Chat Conversation and Agent Session products.
-- [ ] A Conversation may exist without an Agent Session.
-- [ ] A Conversation may own multiple Agent Sessions over time.
-- [ ] MCP client-window identity is hashed/domain-separated before durable use.
-- [ ] Raw transport/window identifiers and credentials are not persisted in Conversation bindings.
-- [ ] Exact binding prevents two ChatGPT windows from sharing a Conversation accidentally.
-- [ ] No credential-wide/recent-conversation fallback exists.
-- [ ] Exact supported binding can survive server restart.
-- [ ] Explicit resume exists for identity-loss cases where needed.
-- [ ] `chat_context_entries` (or an equivalently bounded evidence layer) records useful structured work facts.
-- [ ] continuation feedback is pure, bounded, deterministic, and side-effect free.
-- [ ] handoff brief is bounded (target <= 8192 bytes).
-- [ ] Existing transcript recording and Agent backend resume behavior remain functional.
-- [ ] OAuth unrelated changes are preserved.
-- [ ] Python, MCP, WebUI, build, static, and browser QA gates pass.
-- [ ] Generated WebUI artifacts are rebuilt from sources.
-- [ ] User documentation no longer references `/app` as an entry.
+- [x] `/admin` is the only WebUI management entry.
+- [x] `/app` is removed as a functional entry.
+- [x] `/api/app/*` is no longer part of the supported WebUI architecture.
+- [x] Independent Operator authentication/session code is removed if no longer used.
+- [x] WebUI shows one Conversation list, not separate Chat Conversation and Agent Session products.
+- [x] A Conversation may exist without an Agent Session.
+- [x] A Conversation may own multiple Agent Sessions over time.
+- [x] MCP client-window identity is hashed/domain-separated before durable use.
+- [x] Raw transport/window identifiers and credentials are not persisted in Conversation bindings.
+- [x] Exact binding prevents two ChatGPT windows from sharing a Conversation accidentally.
+- [x] No credential-wide/recent-conversation fallback exists.
+- [x] Exact supported binding can survive server restart.
+- [x] Explicit resume exists for identity-loss cases where needed.
+- [x] `chat_context_entries` (or an equivalently bounded evidence layer) records useful structured work facts.
+- [x] continuation feedback is pure, bounded, deterministic, and side-effect free.
+- [x] handoff brief is bounded (target <= 8192 bytes).
+- [x] Existing transcript recording and Agent backend resume behavior remain functional.
+- [x] OAuth unrelated changes are preserved.
+- [x] Python, MCP, WebUI, build, static, and browser QA gates pass.
+- [x] Generated WebUI artifacts are rebuilt from sources.
+- [x] User documentation no longer references `/app` as an entry.
 
 ## 26. Implementation guidance for follow-up sessions
 
@@ -860,4 +865,3 @@ shared management/auth boundary, not a second application
 ```
 
 Those invariants are the required outcome.
-

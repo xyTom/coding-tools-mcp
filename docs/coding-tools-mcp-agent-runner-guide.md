@@ -142,7 +142,7 @@ for detailed diagnostics.
 
 ## Security and operations checklist
 
-- Keep Operator, Admin, and Runner credentials separate.
+- Keep MCP principal, Admin, and Runner credentials separate.
 - Keep tokens out of URLs, QR codes, command-line arguments, Git, and screenshots.
   Prefer environment variables, Secret Vault, or a protected credential file.
 - Use HTTPS/WSS for public access and preserve authentication at the tunnel or

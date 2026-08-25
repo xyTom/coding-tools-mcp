@@ -258,6 +258,32 @@ class HTTPSessionManager:
                         self._creating_by_identity.pop(quota_key, None)
                     self._condition.notify_all()
 
+    def create_recovered(self, context: Any, session_id: str) -> Any:
+        """Create a Runtime while retaining a client-provided transport header."""
+
+        if not isinstance(session_id, str) or not 1 <= len(session_id) <= 4096:
+            raise ValueError("Recovered HTTP session identifier is invalid.")
+        # Reuse admission accounting, then install under the retained opaque ID.
+        runtime = self.create(context)
+        old_id = getattr(runtime, "http_session_id", None)
+        record = None
+        with self._condition:
+            if self._closed or session_id in self._sessions:
+                installed = False
+            else:
+                record = self._sessions.pop(old_id, None)
+                installed = record is not None
+                if installed:
+                    self._idle_order.pop(old_id, None)
+                    self._idle_order[session_id] = None
+                    self._sessions[session_id] = record
+                    runtime.http_session_id = session_id
+        if not installed:
+            if old_id is not None:
+                self.delete(old_id)
+            raise RuntimeError("Recovered HTTP session identifier is unavailable.")
+        return runtime
+
     def _detach_oldest_idle_locked(
         self,
         quota_key: Hashable,
@@ -320,7 +346,17 @@ class HTTPSessionManager:
             record.last_seen = self._clock()
             record.generation += 1
             self._idle_order.move_to_end(session_id)
-            return record.runtime
+        return record.runtime
+
+    def contains(self, session_id: str) -> bool:
+        """Return whether a live transport ID exists without touching its LRU state."""
+
+        with self._condition:
+            return (
+                not self._closed
+                and session_id in self._sessions
+                and not self._sessions[session_id].closing
+            )
 
     def delete(self, session_id: str) -> bool:
         record = self._detach_for_close(session_id)

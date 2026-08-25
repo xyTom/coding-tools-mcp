@@ -30,7 +30,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -63,6 +63,7 @@ from .conversation_continuity import (
     ConversationBindingStoreError,
     ConversationContinuityService,
 )
+from .conversation_evidence import compact_path, evidence_entry
 from .errors import JsonRpcError, ToolFailure
 from .json_utils import strict_json_bytes, strict_json_loads
 from .landlock_exec import libc_syscall
@@ -680,6 +681,7 @@ class ToolSpec:
     content_builder: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None
     gated_by: str | None = None
     """Name of a Runtime attribute that must be truthy for the tool to be exposed."""
+    conversation_mode: str = "none"
 
 
 def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -769,29 +771,34 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="Read a UTF-8 text file slice inside the configured workspace.",
         read_only=True,
         idempotent=True,
+        conversation_mode="observe",
     ),
     "list_dir": ToolSpec(
         title="List directory",
         description="List directory entries inside the configured workspace.",
         read_only=True,
         idempotent=True,
+        conversation_mode="observe",
     ),
     "list_files": ToolSpec(
         title="List files",
         description="List workspace files using glob filters.",
         read_only=True,
         idempotent=True,
+        conversation_mode="observe",
     ),
     "search_text": ToolSpec(
         title="Search text",
         description="Search UTF-8 workspace files for text or regex matches.",
         read_only=True,
         idempotent=True,
+        conversation_mode="observe",
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
         description="Stage, validate, and atomically replace files from a patch envelope inside the workspace.",
         destructive=True,
+        conversation_mode="mutate",
     ),
     "exec_command": ToolSpec(
         title="Execute command",
@@ -799,6 +806,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         destructive=True,
         open_world=True,
         error_status="failed",
+        conversation_mode="execution",
     ),
     "write_stdin": ToolSpec(
         title="Write stdin",
@@ -806,47 +814,55 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "Poll or interact with a running command session. Pass empty chars to wait for more output; "
             "pass non-empty chars to write to stdin."
         ),
+        conversation_mode="execution",
     ),
     "kill_session": ToolSpec(
         title="Kill session",
         description="Terminate a server-managed running command session.",
         destructive=True,
+        conversation_mode="execution",
     ),
     "read_output": ToolSpec(
         title="Read output",
         description="Read retained stdout or stderr by output_ref with per-stream byte offset pagination.",
         read_only=True,
         idempotent=True,
+        conversation_mode="execution",
     ),
     "git_status": ToolSpec(
         title="Git status",
         description="Return git working tree status for the workspace.",
         read_only=True,
         idempotent=True,
+        conversation_mode="observe",
     ),
     "git_diff": ToolSpec(
         title="Git diff",
         description="Return unified git diff for workspace changes.",
         read_only=True,
         idempotent=True,
+        conversation_mode="observe",
     ),
     "git_log": ToolSpec(
         title="Git log",
         description="Return recent git commits with bounded structured metadata.",
         read_only=True,
         idempotent=True,
+        conversation_mode="observe",
     ),
     "git_show": ToolSpec(
         title="Git show",
         description="Return bounded git show output for a revision.",
         read_only=True,
         idempotent=True,
+        conversation_mode="observe",
     ),
     "git_blame": ToolSpec(
         title="Git blame",
         description="Return bounded git blame metadata for a workspace file.",
         read_only=True,
         idempotent=True,
+        conversation_mode="observe",
     ),
     "request_permissions": ToolSpec(
         title="Request permissions",
@@ -860,6 +876,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         idempotent=True,
         content_builder=_image_content,
         gated_by="enable_view_image",
+        conversation_mode="observe",
     ),
 }
 
@@ -1528,6 +1545,7 @@ class Runtime:
         self.request_sessions_lock = threading.Lock()
         self.request_context = threading.local()
         self.initialized = False
+        self.current_conversation_id: str | None = None
         self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
 
@@ -1662,8 +1680,18 @@ class Runtime:
         return service
 
     def conversation_start(self, args: dict[str, Any]) -> dict[str, Any]:
-        del args
-        return {"ok": True, **self._conversation_continuity().start_or_resume_exact(runtime=self)}
+        title = args.get("title")
+        instruction = args.get("instruction")
+        if title is not None and (not isinstance(title, str) or len(title) > 500):
+            raise ToolFailure("INVALID_ARGUMENT", "title must be text up to 500 characters.", category="validation")
+        if instruction is not None and (not isinstance(instruction, str) or not instruction.strip() or len(instruction) > 512):
+            raise ToolFailure("INVALID_ARGUMENT", "instruction must be non-empty text up to 512 characters.", category="validation")
+        payload = self._conversation_continuity().start_or_resume_exact(
+            runtime=self,
+            title=title,
+            instruction=instruction,
+        )
+        return {"ok": True, **payload}
 
     def conversation_list(self, args: dict[str, Any]) -> dict[str, Any]:
         limit = args.get("limit", 20)
@@ -1688,6 +1716,91 @@ class Runtime:
                 category="validation",
             ) from exc
         return {"ok": True, **payload}
+
+    def _ensure_current_conversation(self) -> None:
+        continuity = getattr(self, "conversation_continuity", None)
+        if not isinstance(continuity, ConversationContinuityService):
+            return
+        if getattr(self, "current_conversation_id", None):
+            return
+        payload = continuity.start_or_resume_exact(runtime=self)
+        self.current_conversation_id = str(payload["conversation_id"])
+
+    def _record_conversation_tool_evidence(self, name: str, args: dict[str, Any], payload: Any) -> None:
+        """Record one bounded, allowlisted fact for a successful classified tool."""
+
+        if getattr(self, "current_conversation_id", None) is None:
+            return
+        continuity = self._conversation_continuity()
+        kind = ""
+        content = ""
+        metadata: dict[str, Any] = {}
+        if name in {"read_file", "view_image"}:
+            path = compact_path(args.get("path"))
+            if path:
+                kind, content = "explored_path", path
+        elif name in {"list_dir", "list_files", "search_text", "git_status", "git_diff", "git_log", "git_show", "git_blame"}:
+            path = compact_path(args.get("path") or args.get("root"))
+            if path:
+                kind, content = "explored_path", path
+            elif name.startswith("git_"):
+                kind, content, metadata = "checkpoint", f"git:{name}", {}
+        elif name == "apply_patch":
+            if not bool(payload.get("dry_run")):
+                affected = payload.get("affected_files")
+                paths: list[tuple[str, dict[str, Any]]] = []
+                if isinstance(affected, list):
+                    for item in affected:
+                        if not isinstance(item, Mapping):
+                            continue
+                        operation = str(item.get("operation") or "patch")
+                        new_path = compact_path(item.get("path"))
+                        old_path = compact_path(item.get("old_path"))
+                        if new_path:
+                            paths.append((new_path, {"operation": operation}))
+                        if old_path:
+                            paths.append((old_path, {"operation": f"{operation}:source", "stable_id": f"{operation}:{old_path}:{new_path}"}))
+                # The dispatch adapter records one fact per unique path; the first
+                # is emitted here and the remainder are recorded below.
+                if paths:
+                    kind, content, metadata = "changed_path", paths[0][0], paths[0][1]
+        elif name in {"exec_command", "write_stdin", "kill_session", "read_output"}:
+            session_id = args.get("session_id") or payload.get("session_id")
+            if isinstance(session_id, str) and session_id and len(session_id) <= 256:
+                kind, content, metadata = (
+                    "job_state",
+                    str(payload.get("status") or "observed"),
+                    {"job_id": session_id},
+                )
+        entry = evidence_entry(kind, content, metadata)
+        recorder = continuity.recorder
+        if entry is None or recorder is None or not getattr(self, "current_conversation_id", None):
+            return
+        try:
+            recorder.record(
+                self.workspace_binding.workspace_id,
+                str(self.current_conversation_id),
+                kind,
+                content,
+                metadata,
+                source="mcp-tool-evidence",
+            )
+        except Exception:
+            # Evidence must never turn successful tool work into an MCP failure.
+            return
+        if name == "apply_patch" and kind == "changed_path":
+            try:
+                for path, path_metadata in paths[1:]:
+                    recorder.record(
+                        self.workspace_binding.workspace_id,
+                        str(self.current_conversation_id),
+                        "changed_path",
+                        path,
+                        path_metadata,
+                        source="mcp-tool-evidence",
+                    )
+            except Exception:
+                return
 
     def list_tools(self) -> dict[str, Any]:
         local_definitions = [
@@ -1806,8 +1919,12 @@ class Runtime:
         validate_arguments(name, args)
         try:
             self.request_context.request_id = request_id
+            if spec.conversation_mode != "none":
+                self._ensure_current_conversation()
             try:
                 payload = handler(args)
+                if spec.conversation_mode != "none" and payload.get("ok") is not False:
+                    self._record_conversation_tool_evidence(name, args, payload)
             finally:
                 if request_id is not None:
                     with self.request_sessions_lock:
@@ -1824,6 +1941,25 @@ class Runtime:
             content = spec.content_builder(payload) if spec.content_builder else None
             return make_tool_result(name, payload, is_error=payload.get("ok") is False, content=content)
         except ToolFailure as exc:
+            if spec.conversation_mode != "none":
+                continuity = getattr(self, "conversation_continuity", None)
+                recorder = getattr(continuity, "recorder", None)
+                if (
+                    isinstance(continuity, ConversationContinuityService)
+                    and recorder is not None
+                    and getattr(self, "current_conversation_id", None)
+                ):
+                    try:
+                        recorder.record(
+                            self.workspace_binding.workspace_id,
+                            str(self.current_conversation_id),
+                            "failure",
+                            exc.code,
+                            {"status": "failed"},
+                            source="mcp-tool-evidence",
+                        )
+                    except Exception:
+                        pass
             payload = {
                 "ok": False,
                 "error": {
@@ -5156,7 +5292,12 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     string_array = {"type": "array", "items": {"type": "string"}}
     return {
         "server_info": object_schema(),
-        "conversation_start": object_schema(),
+        "conversation_start": object_schema(
+            {
+                "title": {**string, "maxLength": 500},
+                "instruction": {**string, "minLength": 1, "maxLength": 512},
+            }
+        ),
         "conversation_list": object_schema(
             {
                 "limit": {**integer, "minimum": 1, "maximum": 100, "default": 20},
@@ -6149,6 +6290,47 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             leased_session_id = self.runtime.http_session_id
         elif session_id:
             leased_session_id = session_id
+            if not self.server.sessions.contains(session_id):  # type: ignore[attr-defined]
+                authorization_context = getattr(self, "_authorization_context", None)
+                continuity = self.server.conversation_continuity()  # type: ignore[attr-defined]
+                if (
+                    method != "ping"
+                    and isinstance(authorization_context, AuthorizationContext)
+                    and continuity is not None
+                    and 1 <= len(session_id) <= 4096
+                ):
+                    try:
+                        candidate = self.server.sessions.create_recovered(  # type: ignore[attr-defined]
+                            authorization_context,
+                            session_id,
+                        )
+                    except HTTPSessionAdmissionError as exc:
+                        self.send_rpc_error(
+                            -32003,
+                            exc.message,
+                            status=503,
+                            request_id=response_id(request),
+                            data={"code": exc.code, "retry_after_seconds": exc.retry_after_seconds},
+                            extra_headers={"Retry-After": str(exc.retry_after_seconds)},
+                        )
+                        return
+                    except (ValueError, RuntimeError):
+                        leased_session_id = None
+                    else:
+                        candidate.protocol_version = protocol_version or candidate.protocol_version
+                        candidate.initialized = True
+                        candidate.conversation_continuity = continuity
+                        if continuity.recover_retained(candidate) is None:
+                            self.server.sessions.delete(session_id)  # type: ignore[attr-defined]
+                            leased_session_id = None
+                if leased_session_id is None:
+                    self.send_rpc_error(
+                        -32001,
+                        "Unknown MCP session",
+                        status=404,
+                        request_id=response_id(request),
+                    )
+                    return
         elif method == "ping":
             self._runtime = self.server.control_runtime  # type: ignore[attr-defined]
         else:
@@ -7894,6 +8076,24 @@ def run_http(args: argparse.Namespace) -> int:
     except (AgentSessionStoreError, OSError) as exc:
         runtime.close()
         print(f"ERROR: Agent Session persistence is unavailable: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+            conversation_binding_store.backfill_ownership(
+                [
+                    {
+                        "workspace_id": record.workspace_id,
+                        "conversation_id": record.conversation_id,
+                        "owner_principal_id": record.owner_principal_id,
+                    }
+                    for record in AgentSessionStore(
+                        config_dir / AGENT_SESSION_DB_FILENAME
+                    ).iter_all()
+                ]
+            )
+    except (ConversationBindingStoreError, AgentSessionStoreError, OSError) as exc:
+        runtime.close()
+        print(f"ERROR: Conversation ownership migration failed: {exc}", file=sys.stderr)
         return 2
 
     if admin_service is not None:

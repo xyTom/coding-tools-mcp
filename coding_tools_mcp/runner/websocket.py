@@ -17,8 +17,6 @@ import struct
 import threading
 import urllib.parse
 from dataclasses import dataclass
-from typing import Any
-
 from .protocol import DEFAULT_MAX_MESSAGE_BYTES
 
 

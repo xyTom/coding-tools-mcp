@@ -651,6 +651,8 @@ class WorkspaceHostFactory:
             )
         runner_id = workspace.runner_id
         remote_root = str(workspace.root)
+        remote_runner_status = self._remote_runner_status
+        remote_agent_backend_factory = self._remote_agent_backend_factory
         return RemoteRunnerWorkspaceHost(
             runner_id=runner_id,
             workspace_id=workspace.id,
@@ -658,17 +660,17 @@ class WorkspaceHostFactory:
             remote_root=remote_root,
             route_service=self._remote_route_service,
             runner_status=(
-                (lambda: self._remote_runner_status(runner_id))
-                if self._remote_runner_status is not None
+                (lambda: remote_runner_status(runner_id))
+                if remote_runner_status is not None
                 else None
             ),
             agent_backend_factory=(
-                (lambda workspace_id, backend_kind: self._remote_agent_backend_factory(
+                (lambda workspace_id, backend_kind: remote_agent_backend_factory(
                     runner_id,
                     workspace_id,
                     backend_kind,
                 ))
-                if self._remote_agent_backend_factory is not None
+                if remote_agent_backend_factory is not None
                 else None
             ),
             semantic_backend_factory=self._remote_semantic_backend_factory,

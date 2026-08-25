@@ -2,17 +2,7 @@
 
 Phase 08 exposes a backend-only management API under `/admin/api`. The API is disabled unless a dedicated Admin token is configured with `--admin-token`, `CODING_TOOLS_MCP_ADMIN_TOKEN`, or `admin_token_secret_ref` in the server Secret Vault.
 
-Ordinary MCP bearer credentials and OAuth access tokens are never promoted to Admin authority. Management clients authenticate with either:
-
-```http
-Authorization: Bearer <dedicated-admin-token>
-```
-
-or:
-
-```http
-X-Admin-Token: <dedicated-admin-token>
-```
+Ordinary MCP bearer credentials and OAuth access tokens are never promoted to Admin authority. A browser exchanges a dedicated Admin token once at `POST /admin/api/session` for a server-side, HttpOnly Admin session and uses its CSRF token on writes. Non-browser management clients may use `Authorization: Bearer <dedicated-admin-token>` or `X-Admin-Token: <dedicated-admin-token>`.
 
 All responses use `Cache-Control: no-store`, apply the same validated allowed-origin policy as the MCP endpoint, and redact secret material.
 
@@ -56,6 +46,18 @@ All responses use `Cache-Control: no-store`, apply the same validated allowed-or
 | POST | `/admin/api/codex/sessions/import` | Import explicitly selected candidate IDs. |
 | GET | `/admin/api/codex/sessions` | Paginated imported-session summaries. |
 | DELETE | `/admin/api/codex/sessions/{workspace_id}/{session_id}` | Stable-ID idempotent imported-session deletion. |
+| GET | `/admin/api/conversations` | Unified Conversation Center summaries with bounded progress counts. |
+| POST | `/admin/api/conversations` | Create a Conversation in a registered Workspace. |
+| GET | `/admin/api/conversations/{workspace_id}/{conversation_id}` | Unified Conversation, execution, message, and context projection. |
+| GET | `/admin/api/conversations/{workspace_id}/{conversation_id}/executions` | List executions attached to one Conversation. |
+| POST | `/admin/api/conversations/{workspace_id}/{conversation_id}/executions` | Start an Agent execution for a Conversation. |
+| POST | `/admin/api/conversations/{workspace_id}/{conversation_id}/turns` | Send a turn to the selected execution. |
+| POST | `/admin/api/conversations/{workspace_id}/{conversation_id}/resume` | Resume a detached or recoverable execution. |
+| POST | `/admin/api/conversations/{workspace_id}/{conversation_id}/close` | Close the selected execution. |
+| POST | `/admin/api/conversations/{workspace_id}/{conversation_id}/approvals/{approval_id}` | Approve, deny, or cancel a pending approval. |
+| POST | `/admin/api/conversations/{workspace_id}/{conversation_id}/validation` | Run a structured validation recipe and record bounded evidence. |
+| GET | `/admin/api/conversations/{workspace_id}/{conversation_id}/continuation` | Read the deterministic latest-attempt continuation projection. |
+| GET | `/admin/api/conversations/{workspace_id}/{conversation_id}/handoff` | Read the bounded handoff brief. |
 
 OAuth collections are `clients`, `grants`, `tokens`, `refresh-families`, `signing-keys`, and `audit`. Supported actions are Client `enable`/`disable`, Grant/Token/Refresh Family `revoke`, and Signing Key `activate`/`retire`/`revoke`.
 
@@ -144,7 +146,31 @@ allowed Workspace. Existing Grants and Tokens retain their stored Workspace.
 
 ## Chat and session persistence
 
-Conversation lists are summary-only and paginated. Message and context content is returned only by the explicit conversation-detail endpoint. Every request that addresses stored content includes a registered Workspace ID; unknown or disabled Workspaces are rejected.
+The legacy `/admin/api/chat/*` routes remain for transcript import and maintenance. Conversation Center uses the unified `/admin/api/conversations/*` routes instead. Conversation lists are summary-only and paginated. Message and context content is returned only by an explicit detail request. Every request that addresses stored content includes a registered Workspace ID; unknown or disabled Workspaces are rejected.
+
+Admin execution actions operate through the existing Agent Session ownership boundary without rewriting historical owners. A privileged Admin action still requires the Workspace to be registered and authorized; it does not make an ambiguous historical Conversation claimable by an MCP principal.
+
+`GET /admin/api/conversations` returns a bounded `progress` object on every
+summary. It is projected from the same current-attempt evidence as the detail
+route and contains changed/explored path counts, validation status, unresolved
+failure count, active job count, pending approval count, and explicit
+truncation/overflow indicators. An Admin may therefore inspect transcript-only,
+zero-message, historical non-Admin-owned, and multi-execution Conversations
+without changing durable ownership.
+
+The detail route accepts independent `message_page`, `message_page_size`,
+`context_page`, and `context_page_size` query parameters. Each paginated
+collection includes its requested page, bounded page size, total, and navigation
+state; changing one collection's page does not alter the other. Conversation
+actions refresh the selected detail and its list summary after execution create,
+turn, resume, close, approval, and validation responses.
+
+Approval decisions require an explicit `session_id` in the request body. Pending
+approval projection includes that owning Agent Session ID, and the server rejects
+a missing, cross-Workspace, cross-Conversation, or non-pending Session/approval
+pair. It never routes an approval to the latest execution merely because it is
+newer. Projection failures remain structured Admin errors so the browser can
+render a bounded retry action rather than treating missing progress as zero.
 
 Codex scan roots are relative to the selected Workspace. The API rejects absolute paths, `..`, and escapes through symlinks or reparse points. Scan requests may set bounded `max_depth`, `max_files`, `max_file_bytes`, `max_total_bytes`, and `max_messages` values. Malformed or partially written JSONL records appear as item errors while other candidates remain available.
 

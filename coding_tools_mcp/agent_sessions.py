@@ -300,6 +300,107 @@ class AgentSessionService:
         except AgentSessionStoreError as exc:
             raise self._store_error(exc) from exc
 
+    def list_workspace_sessions(
+        self,
+        workspace_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentSessionRecord]:
+        """List all owners in one already-admin-authorized Workspace."""
+
+        self._workspace(workspace_id)
+        try:
+            return self.store.list_workspace(workspace_id, limit=limit)
+        except AgentSessionStoreError as exc:
+            raise self._store_error(exc) from exc
+
+    def admin_get_session(self, session_id: str, workspace_id: str) -> AgentSessionRecord:
+        self._workspace(workspace_id)
+        try:
+            return self.store.admin_get(session_id, workspace_id)
+        except AgentSessionNotFoundError as exc:
+            raise AgentSessionServiceError("AGENT_SESSION_NOT_FOUND", "Agent Session was not found.") from exc
+        except AgentSessionStoreError as exc:
+            raise self._store_error(exc) from exc
+
+    def admin_resume_session(self, session_id: str, workspace_id: str) -> AgentSessionRecord:
+        record = self.admin_get_session(session_id, workspace_id)
+        if record.status == "closed":
+            raise AgentSessionServiceError("AGENT_SESSION_CLOSED", "Agent Session is closed.")
+        workspace = self._workspace(workspace_id)
+        if record.backend_thread_id is None:
+            raise AgentSessionServiceError(
+                "AGENT_SESSION_NOT_READY",
+                "Agent Session does not have a durable backend thread.",
+            )
+        with self._lock:
+            existing = self._backends.get(record.session_id)
+        if existing is not None and existing.health().available:
+            return record
+        if existing is not None:
+            self._detach_backend(record.session_id, existing)
+        backend = None
+        try:
+            backend = self.backend_factory(workspace, record.backend_kind)
+            backend.resume_thread(record.backend_thread_id, instructions=record.explicit_instructions or None)
+            resumed = self.store.admin_update_state(record.session_id, workspace_id, status="ready")
+            with self._lock:
+                self._backends[record.session_id] = backend
+            return resumed
+        except AgentBackendError as exc:
+            if backend is not None:
+                backend.close()
+            self._admin_mark_status(record, "unavailable" if exc.retryable else "failed")
+            raise self._backend_error(exc) from exc
+
+    def admin_send_turn(self, session_id: str, workspace_id: str, message: str) -> AgentSessionRecord:
+        record = self.admin_resume_session(session_id, workspace_id)
+        with self._lock:
+            backend = self._backends.get(session_id)
+        if backend is None:
+            raise AgentSessionServiceError("AGENT_SESSION_DETACHED", "Agent Session is not attached.", retryable=True)
+        try:
+            turn = backend.send_turn(record.backend_thread_id, message)
+            return self.store.admin_update_state(
+                session_id,
+                workspace_id,
+                status="running",
+                last_turn_id=turn.turn_id,
+            )
+        except AgentBackendError as exc:
+            self._admin_mark_status(record, "unavailable" if exc.retryable else "failed")
+            raise self._backend_error(exc) from exc
+
+    def admin_approve(self, session_id: str, workspace_id: str, approval_id: str, decision: str) -> AgentSessionRecord:
+        record = self.admin_resume_session(session_id, workspace_id)
+        with self._lock:
+            backend = self._backends.get(session_id)
+        if backend is None:
+            raise AgentSessionServiceError("AGENT_SESSION_DETACHED", "Agent Session is not attached.", retryable=True)
+        try:
+            backend.approve(approval_id, decision)
+            return self.store.admin_update_state(session_id, workspace_id, status="running")
+        except AgentBackendError as exc:
+            self._admin_mark_status(record, "unavailable" if exc.retryable else "failed")
+            raise self._backend_error(exc) from exc
+
+    def admin_close_session(self, session_id: str, workspace_id: str) -> AgentSessionRecord:
+        record = self.admin_get_session(session_id, workspace_id)
+        with self._lock:
+            backend = self._backends.pop(session_id, None)
+        if backend is not None:
+            try:
+                if record.backend_thread_id is not None:
+                    backend.close_thread(record.backend_thread_id)
+            except AgentBackendError:
+                pass
+            finally:
+                backend.close()
+        try:
+            return self.store.admin_close(session_id, workspace_id)
+        except AgentSessionStoreError as exc:
+            raise self._store_error(exc) from exc
+
     def get_session(
         self,
         session_id: str,
@@ -489,6 +590,12 @@ class AgentSessionService:
                 record.owner_principal_id,
                 status=status,
             )
+        except AgentSessionStoreError:
+            pass
+
+    def _admin_mark_status(self, record: AgentSessionRecord, status: str) -> None:
+        try:
+            self.store.admin_update_state(record.session_id, record.workspace_id, status=status)
         except AgentSessionStoreError:
             pass
 

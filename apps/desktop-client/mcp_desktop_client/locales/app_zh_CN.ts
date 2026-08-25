@@ -541,6 +541,49 @@ This removes it from the desktop client but does not delete the directory.</sour
         <source>Unrestricted</source>
         <translation>完全放开</translation>
     </message>
+    <message>
+        <location filename="../app.py" line="+183"/>
+        <source>Copy mobile onboarding</source>
+        <translation>复制移动端接入说明</translation>
+    </message>
+    <message>
+        <location line="+530"/>
+        <source>Mobile onboarding copied</source>
+        <translation>移动端接入说明已复制</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Runner</source>
+        <translation>运行器</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Runner: unknown</source>
+        <translation>运行器：未知</translation>
+    </message>
+    <message>
+        <location line="+1"/>
+        <source>Runner: {status}</source>
+        <translation>运行器：{status}</translation>
+    </message>
+</context>
+<context>
+    <name>Connectivity</name>
+    <message>
+        <location filename="../connectivity.py" line="+44"/>
+        <source>{field} must be an HTTPS URL containing only a domain and no credentials.</source>
+        <translation>{field} 必须是仅包含域名且不含凭据的 HTTPS URL。</translation>
+    </message>
+    <message>
+        <location line="+140"/>
+        <source>Unsupported Cloudflare tunnel mode.</source>
+        <translation>不支持的 Cloudflare 隧道模式。</translation>
+    </message>
+    <message>
+        <location line="+78"/>
+        <source>Unsupported tunnel provider: {provider}</source>
+        <translation>不支持的隧道提供商：{provider}</translation>
+    </message>
 </context>
 <context>
     <name>Models</name>
@@ -590,12 +633,6 @@ Command: {command}</source>
         <translation>未知</translation>
     </message>
     <message>
-        <location line="-119"/>
-        <location line="+386"/>
-        <source>Only FRP and Cloudflare are currently supported.</source>
-        <translation>当前仅支持 FRP 和 Cloudflare。</translation>
-    </message>
-    <message>
         <location line="-302"/>
         <location line="+1"/>
         <source>Stopped</source>
@@ -627,11 +664,6 @@ Command: {command}</source>
         <translation>Cloudflare 隧道未建立</translation>
     </message>
     <message>
-        <location line="+8"/>
-        <source>{url} (an external FRP client must remain running)</source>
-        <translation>{url}（需外部 FRP 客户端保持运行）</translation>
-    </message>
-    <message>
         <location line="+3"/>
         <source>Waiting for Cloudflare to assign a public URL</source>
         <translation>等待 Cloudflare 分配公网地址</translation>
@@ -650,21 +682,6 @@ Command: {command}</source>
         <location line="+12"/>
         <source>The MCP runtime started, but the process listening on port {port} could not be identified.</source>
         <translation>MCP 运行时已经启动，但无法识别端口 {port} 对应的进程。</translation>
-    </message>
-    <message>
-        <location line="+12"/>
-        <source>cloudflared was not found. Install the Cloudflare Tunnel CLI before using Cloudflare mode.</source>
-        <translation>未找到 cloudflared。请先安装 Cloudflare Tunnel CLI，再使用 Cloudflare 模式。</translation>
-    </message>
-    <message>
-        <location line="+6"/>
-        <source>Cloudflare named-tunnel mode requires a Tunnel Token.</source>
-        <translation>Cloudflare 命名隧道模式需要填写隧道令牌。</translation>
-    </message>
-    <message>
-        <location line="+4"/>
-        <source>Cloudflare named-tunnel mode requires a fixed public URL.</source>
-        <translation>Cloudflare 命名隧道模式需要填写固定公网地址。</translation>
     </message>
     <message>
         <location line="+34"/>
@@ -729,11 +746,6 @@ Windows 可执行：winget install Cloudflare.cloudflared</translation>
         <translation>Cloudflare 固定域名模式需要填写公网地址。</translation>
     </message>
     <message>
-        <location line="+21"/>
-        <source>The Cloudflare public URL must be an HTTPS URL containing only a domain.</source>
-        <translation>Cloudflare 公网地址必须是仅包含域名的 HTTPS 地址。</translation>
-    </message>
-    <message>
         <location line="+17"/>
         <source>The custom command is invalid: {error}</source>
         <translation>自定义命令格式无效：{error}</translation>
@@ -742,6 +754,21 @@ Windows 可执行：winget install Cloudflare.cloudflared</translation>
         <location line="+5"/>
         <source>The custom command cannot be empty.</source>
         <translation>自定义命令不能为空。</translation>
+    </message>
+    <message>
+        <location filename="../runtime.py" line="+247"/>
+        <source>{url} (external ingress must remain available)</source>
+        <translation>{url}（外部入口必须保持可用）</translation>
+    </message>
+    <message>
+        <location line="+217"/>
+        <source>No-auth mode cannot be exposed through a public tunnel. Choose OAuth or Bearer Token.</source>
+        <translation>无认证模式不能通过公网隧道暴露。请选择 OAuth 或 Bearer Token。</translation>
+    </message>
+    <message>
+        <location line="+4"/>
+        <source>Unsupported authentication mode.</source>
+        <translation>不支持的认证模式。</translation>
     </message>
     <message>
         <location line="+15"/>

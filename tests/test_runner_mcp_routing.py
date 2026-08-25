@@ -15,6 +15,7 @@ from coding_tools_mcp.runner.routing import (
     RemoteMcpRouteState,
     RemoteMcpRouteStore,
     RunnerMcpRouter,
+    RunnerMcpSessionRecord,
     RunnerMcpSessionHost,
     authorization_key_digest,
 )

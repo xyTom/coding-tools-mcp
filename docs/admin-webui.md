@@ -17,7 +17,7 @@ through authorized service APIs. There is no separate `/app` or Operator login.
 
 ## Authentication
 
-The self-contained page contains no server data or credentials until sign-in. The user enters a dedicated Admin token, which is kept in page memory and sent in the `Authorization` header only to `/admin/api`. It is not written to a URL, browser persistent storage, logs, Settings, or Gateway configuration. Ordinary MCP bearer and OAuth access tokens do not grant Admin authority.
+The self-contained page contains no server data or credentials until sign-in. The user enters a dedicated Admin token once; the page exchanges it at `POST /admin/api/session` and then uses a server-side HttpOnly session cookie plus a CSRF header for writes. The original token is cleared and is not written to a URL, browser persistent storage, logs, Settings, or Gateway configuration. Ordinary MCP bearer and OAuth access tokens do not grant Admin authority.
 
 ## Settings and Gateway
 
@@ -56,6 +56,17 @@ not rewrite the Workspace identity stored on existing Grants or Tokens.
 ## Conversation rendering
 
 Conversation lists call the summary endpoint. Full messages and context are loaded only after an explicit selection through the paginated detail endpoint. Transcript, message, context, Workspace labels, OAuth metadata, and server errors are treated as untrusted text and rendered with DOM node creation and `textContent`; the source contains no `innerHTML` path.
+
+Conversation summaries show execution state and bounded progress counts for changes, exploration, validation, failures, active jobs, and pending approvals. Detail renders a structured **Work / Progress** section from the latest attempt, including paths, validation and failures, collapsed job/approval state, checkpoints, and suggested actions. Handoff JSON is a secondary diagnostic view. Execution controls cover start, send, resume, close, and structured validation; pending approvals expose explicit decisions. Continuation and handoff failures render inline retry controls instead of silently hiding projection errors.
+
+The selected Conversation retains its list page while actions refresh the list
+summary and detail together. Message and context pagers are independent and
+append their `message_page`/`context_page` parameters to the detail request.
+Approval buttons use the owning execution's Session ID returned by the detail
+projection, including when an older execution has a pending approval; the WebUI
+does not infer ownership from the latest execution. On a projection or API
+failure, the visible error retains a retry action instead of showing an
+all-zero progress summary.
 
 ## Accessibility
 
