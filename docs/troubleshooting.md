@@ -28,7 +28,7 @@ If the result returns `status: "running"`, poll with `write_stdin` using empty `
 
 ## Permission Elicitation Is Unsupported
 
-If `request_permissions` returns `ELICITATION_UNSUPPORTED`, the MCP client cannot show approval prompts. For dependency downloads and local development, prefer `--permission-mode trusted`; it allows network-looking commands, shell expansion, and inline scripts while keeping secret filtering and destructive-command checks. For isolated containers or VMs, use `--permission-mode dangerous` to disable `exec_command` permission gates.
+If `request_permissions` returns `ELICITATION_UNSUPPORTED`, the MCP client cannot show native approval prompts. For outside read paths, operators can enable `--outside-read-policy request`; the server then returns a manual `PERMISSION_REQUIRED` request so the agent asks the user, but access remains denied until an approved `--read-root` is configured and the server restarts. For dependency downloads and local development, prefer `--permission-mode trusted`; it allows network-looking commands, shell expansion, and inline scripts while keeping secret filtering and destructive-command checks. For isolated containers or VMs, use `--permission-mode dangerous` to disable `exec_command` permission gates.
 
 ## Missing Toolchain Environment
 

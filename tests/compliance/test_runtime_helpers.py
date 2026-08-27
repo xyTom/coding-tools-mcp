@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import os
 import signal
 import shutil
@@ -1063,6 +1064,43 @@ Maven home: /usr/share/maven
             model_text = self.agent_text(result)
             self.assertIn("Status: running", model_text)
             self.assertIn('write_stdin(command_id="', model_text)
+
+    def test_mutating_tool_writes_durable_redacted_receipt(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            target = workspace / "receipt-test.txt"
+            target.write_text("before\n", encoding="utf-8")
+            runtime = Runtime(workspace, permission_mode="trusted")
+            result = runtime.call_tool(
+                "apply_patch",
+                {
+                    "patch": (
+                        "*** Begin Patch\n"
+                        "*** Update File: receipt-test.txt\n"
+                        "@@\n"
+                        "-before\n"
+                        "+after-secret-marker\n"
+                        "*** End Patch"
+                    )
+                },
+            )
+            self.assertIs(result.get("isError"), False, result)
+            receipt_file = workspace / ".coding-tools-mcp" / "mutation-receipts.jsonl"
+            lines = [json.loads(line) for line in receipt_file.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([line["phase"] for line in lines], ["started", "finished"])
+            self.assertEqual(lines[0]["receipt_id"], lines[1]["receipt_id"])
+            self.assertEqual(lines[0]["args_sha256"], lines[1]["args_sha256"])
+            self.assertEqual(lines[1]["affected_files"], ["receipt-test.txt"])
+            self.assertTrue(lines[1]["ok"])
+            self.assertNotIn("after-secret-marker", receipt_file.read_text(encoding="utf-8"))
+
+    def test_http_transport_caps_sync_wait_without_shortening_command_timeout(self) -> None:
+        with TemporaryDirectory() as tmp:
+            http_runtime = Runtime(Path(tmp), permission_mode="trusted", transport="http")
+            stdio_runtime = Runtime(Path(tmp), permission_mode="trusted", transport="stdio")
+            self.assertEqual(http_runtime._bounded_sync_wait_ms(30_000), server_module.HTTP_SYNC_WAIT_CAP_MS)
+            self.assertEqual(http_runtime._bounded_sync_wait_ms(1_000), 1_000)
+            self.assertEqual(stdio_runtime._bounded_sync_wait_ms(30_000), 30_000)
 
     def test_read_file_truncation_is_visible_with_continuation(self) -> None:
         with TemporaryDirectory() as tmp:

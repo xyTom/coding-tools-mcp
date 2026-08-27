@@ -220,9 +220,10 @@ and bounded by file-count, scan-count, depth, per-file, and total-byte limits.
 - One server runtime owns one canonical workspace root and serves every client
   of it. Concurrent clients share the command pool, the retained output, and
   the patch baselines; this is a single trust domain by design.
-- Direct path inputs are workspace-relative and always resolve against the
-  workspace root. Absolute paths, `..` traversal, NUL bytes, and symlink
-  escapes are rejected.
+- Write, Git, and command working-directory paths are workspace-relative and
+  always resolve against the workspace root. Direct read tools additionally
+  accept absolute paths under explicitly configured read roots. Other
+  absolute paths, `..` traversal, NUL bytes, and symlink escapes are rejected.
 - `apply_patch` parses and validates every operation before committing, under a
   lock that spans every client, so two clients patching one file cannot lose
   an update: the later one is answered with a conflict rather than silently
@@ -396,7 +397,7 @@ Annotations: `{"title":"Read file","readOnlyHint":true,"destructiveHint":false,"
 
 Reads UTF-8 ranges as a stream, reports full file line/byte metadata, rejects
 binary content, and returns continuation metadata when bounded. The
-continuation repeats the workspace-relative path it was given.
+continuation repeats the workspace-relative or configured absolute path it was given.
 
 ### list_dir
 
@@ -527,8 +528,10 @@ Inputs: `"tool_name"`, `"permission"`, `"reason"`, `"arguments"`, `"scope"`, `"t
 
 Annotations: `{"title":"Request permissions","readOnlyHint":true,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}`.
 
-The current server does not advertise MCP elicitation. This tool therefore
-returns `ELICITATION_UNSUPPORTED`, except that dangerous mode reports the
+The current server does not advertise MCP elicitation. A `filesystem_read`
+request in manual outside-read request mode returns `PERMISSION_REQUIRED` with
+`status: user_confirmation_required`; it does not grant access. Other requests
+return `ELICITATION_UNSUPPORTED`, except that dangerous mode reports the
 operator's explicit auto-grant policy. It never silently escalates safe mode.
 
 ### view_image

@@ -176,6 +176,7 @@ PERMISSION_MODE_CAPABILITIES: dict[str, ModeCapabilities] = {
     ),
 }
 PERMISSION_MODE_CHOICES = tuple(PERMISSION_MODE_CAPABILITIES)
+OUTSIDE_READ_POLICY_CHOICES = ("deny", "request")
 # Documented kill_command status enum; guarded by test_schema_drift.
 KILL_COMMAND_STATUSES = ("terminated", "killed", "exited", "terminating", "not_found")
 POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM"}
@@ -194,10 +195,23 @@ DESTRUCTIVE_RE = re.compile(
 )
 MAX_HTTP_REQUEST_BYTES = 1_048_576
 EXEC_PREVIEW_BYTES = 4096
+HTTP_SYNC_WAIT_CAP_MS = 3000
 MAX_ACTIVE_COMMANDS = 16
 MAX_RETAINED_OUTPUT_COMMANDS = 32
 COMPLETED_COMMAND_TTL_SECONDS = 300
 MAX_RUNTIME_OUTPUT_BYTES = 16 * 1024 * 1024
+MUTATION_RECEIPT_MAX_BYTES = 5 * 1024 * 1024
+MUTATING_TOOL_NAMES = frozenset(
+    {
+        "apply_patch",
+        "exec_command",
+        "write_stdin",
+        "kill_command",
+        "computer_mouse",
+        "computer_keyboard",
+        "computer_launch",
+    }
+)
 _COMMAND_RECOVERY_HINT = (
     "This command_id has expired or never existed; a finished command keeps its"
     f" output for {COMPLETED_COMMAND_TTL_SECONDS} seconds and only the last"
@@ -336,6 +350,7 @@ class RuntimePolicy:
     permission_mode: str
     shell_env_policy: ShellEnvPolicy
     allow_network: bool
+    outside_read_policy: str
     fake_readonly_annotations: bool = False
 
 
@@ -492,6 +507,29 @@ def shell_env_policy_from_args(args: argparse.Namespace) -> ShellEnvPolicy:
     )
 
 
+def read_roots_from_args(args: argparse.Namespace) -> list[Path]:
+    configured = [
+        str(item).strip()
+        for item in (getattr(args, "read_root", None) or [])
+        if str(item).strip()
+    ]
+    env_value = os.environ.get(f"{ENV_PREFIX}_READ_ROOTS") or ""
+    configured.extend(item.strip() for item in env_value.split(os.pathsep) if item.strip())
+    return [Path(item) for item in configured]
+
+
+def outside_read_policy_from_args(args: argparse.Namespace) -> str:
+    policy = (
+        getattr(args, "outside_read_policy", None)
+        or os.environ.get(f"{ENV_PREFIX}_OUTSIDE_READ_POLICY")
+        or "deny"
+    ).strip().lower()
+    if policy not in OUTSIDE_READ_POLICY_CHOICES:
+        supported = ", ".join(OUTSIDE_READ_POLICY_CHOICES)
+        raise ValueError(f"outside read policy must be one of: {supported}")
+    return policy
+
+
 def permission_mode_from_args(args: argparse.Namespace) -> str:
     skip_all = bool(getattr(args, "dangerously_skip_all_permissions", False)) or truthy_env(
         os.environ.get(f"{ENV_PREFIX}_DANGEROUSLY_SKIP_ALL_PERMISSIONS")
@@ -530,6 +568,7 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
         permission_mode=permission_mode,
         shell_env_policy=shell_env_policy_from_args(args),
         allow_network=allow_network,
+        outside_read_policy=outside_read_policy_from_args(args),
         fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
     )
 
@@ -582,25 +621,25 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "read_file": ToolSpec(
         title="Read file",
-        description="Read a UTF-8 text file slice inside the configured workspace.",
+        description="Read a UTF-8 text file slice inside the workspace or an explicitly configured read root.",
         read_only=True,
         idempotent=True,
     ),
     "list_dir": ToolSpec(
         title="List directory",
-        description="List directory entries inside the configured workspace.",
+        description="List directory entries inside the workspace or an explicitly configured read root.",
         read_only=True,
         idempotent=True,
     ),
     "list_files": ToolSpec(
         title="List files",
-        description="List workspace files using glob filters.",
+        description="List files in the workspace or an explicitly configured read root using glob filters.",
         read_only=True,
         idempotent=True,
     ),
     "search_text": ToolSpec(
         title="Search text",
-        description="Search UTF-8 workspace files for text or regex matches.",
+        description="Search UTF-8 files in the workspace or an explicitly configured read root.",
         read_only=True,
         idempotent=True,
     ),
@@ -688,7 +727,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "view_image": ToolSpec(
         title="View image",
-        description="Return a workspace image as MCP image content.",
+        description="Return an image from the workspace or an explicitly configured read root.",
         read_only=True,
         idempotent=True,
         content_builder=_image_content,
@@ -1081,7 +1120,13 @@ class ResolvedPath:
 
 
 class Workspace:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        read_roots: list[Path] | tuple[Path, ...] = (),
+        outside_read_policy: str = "deny",
+    ) -> None:
         self.root = root.expanduser().resolve(strict=True)
         if not self.root.is_dir():
             raise ToolFailure("INVALID_ARGUMENT", "Workspace root must be a directory.", category="validation")
@@ -1092,7 +1137,38 @@ class Workspace:
             pass
         if str(self.root) in unsafe_roots:
             raise ToolFailure("INVALID_ARGUMENT", "Unsafe workspace root rejected.", category="security")
+        if outside_read_policy not in OUTSIDE_READ_POLICY_CHOICES:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                f"Unknown outside read policy: {outside_read_policy}",
+                category="validation",
+                details={"supported": list(OUTSIDE_READ_POLICY_CHOICES)},
+            )
+        self.outside_read_policy = outside_read_policy
+        configured_read_roots: list[Path] = []
+        for configured_root in read_roots:
+            read_root = configured_root.expanduser().resolve(strict=True)
+            if not read_root.is_dir():
+                raise ToolFailure("INVALID_ARGUMENT", "Read root must be a directory.", category="validation")
+            if read_root == Path(read_root.anchor) or str(read_root) in unsafe_roots:
+                raise ToolFailure("INVALID_ARGUMENT", "Unsafe read root rejected.", category="security")
+            if is_relative_to(read_root, self.root):
+                continue
+            if read_root not in configured_read_roots:
+                configured_read_roots.append(read_root)
+        self.read_roots = tuple(configured_read_roots)
         self.git_path = shutil.which("git")
+
+    def read_access_root(self, path: Path) -> Path | None:
+        if is_relative_to(path, self.root):
+            return self.root
+        matches = [root for root in self.read_roots if is_relative_to(path, root)]
+        return max(matches, key=lambda item: len(item.parts), default=None)
+
+    def display_read_path(self, path: Path) -> str:
+        if is_relative_to(path, self.root):
+            return normalize_rel_display(path, self.root)
+        return str(path)
 
     def _reject_unsafe_text(self, raw_path: str) -> PurePosixPath:
         if not isinstance(raw_path, str) or not raw_path:
@@ -1117,6 +1193,40 @@ class Workspace:
             code = "SYMLINK_ESCAPE" if candidate.is_symlink() else "PATH_OUTSIDE_WORKSPACE"
             raise ToolFailure(code, "Path escapes the configured workspace.", category="security")
         return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True)
+
+    def resolve_for_read(self, raw_path: str = ".") -> ResolvedPath:
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ToolFailure("INVALID_ARGUMENT", "Path must be a non-empty string.", category="validation")
+        if "\x00" in raw_path:
+            raise ToolFailure("INVALID_ARGUMENT", "Path contains a NUL byte.", category="validation")
+        is_absolute = Path(raw_path).is_absolute() or re.match(r"^[A-Za-z]:[\\/]", raw_path) is not None
+        if not is_absolute:
+            return self.resolve_existing(raw_path)
+        candidate = Path(raw_path)
+        try:
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise ToolFailure("NOT_FOUND", f"Path not found: {raw_path}", category="not_found") from exc
+        if self.read_access_root(resolved) is None:
+            if self.outside_read_policy == "request":
+                raise ToolFailure(
+                    "PERMISSION_REQUIRED",
+                    "Read access is outside the configured roots and requires explicit user approval.",
+                    category="permission",
+                    retryable=True,
+                    details={
+                        "permission": "filesystem_read",
+                        "requested_path": raw_path,
+                        "access": "read_only",
+                        "approval": "Ask the user before an operator adds an approved --read-root and restarts the server.",
+                    },
+                )
+            raise ToolFailure(
+                "ABSOLUTE_PATH_DENIED",
+                "Absolute path is outside the configured workspace and read roots.",
+                category="security",
+            )
+        return ResolvedPath(self.display_read_path(resolved), resolved, True)
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
         pure = self._reject_unsafe_text(raw_path)
@@ -1155,12 +1265,14 @@ class Workspace:
         self,
         path: Path,
         *,
+        access_root: Path | None = None,
         include_hidden: bool = False,
         include_ignored: bool = False,
         git_ignored: set[str] | None = None,
     ) -> bool:
+        root = access_root or self.root
         try:
-            rel = path.relative_to(self.root)
+            rel = path.relative_to(root)
         except ValueError:
             return True
         parts = rel.parts
@@ -1171,19 +1283,23 @@ class Workspace:
         if include_ignored:
             return False
         rel_text = rel.as_posix()
-        if rel_text in (git_ignored if git_ignored is not None else self.git_ignored_paths([rel_text])):
+        if rel_text in (
+            git_ignored if git_ignored is not None else self.git_ignored_paths([rel_text], access_root=root)
+        ):
             return True
         return False
 
-    def is_safe_existing_path(self, path: Path) -> bool:
+    def is_safe_existing_path(self, path: Path, *, access_root: Path | None = None) -> bool:
         try:
             resolved = path.resolve(strict=True)
-        except FileNotFoundError:
+        except OSError:
             return False
-        return is_relative_to(resolved, self.root)
+        return is_relative_to(resolved, access_root or self.root)
 
-    def git_ignored_paths(self, rel_paths: list[str]) -> set[str]:
+    def git_ignored_paths(self, rel_paths: list[str], *, access_root: Path | None = None) -> set[str]:
         if not rel_paths:
+            return set()
+        if access_root is not None and access_root != self.root:
             return set()
         git = self.git_path
         if not git:
@@ -1268,6 +1384,8 @@ class Runtime:
         self,
         workspace: Path,
         *,
+        read_roots: list[Path] | tuple[Path, ...] = (),
+        outside_read_policy: str = "deny",
         enable_view_image: bool = True,
         permission_mode: str = "safe",
         shell_env_policy: ShellEnvPolicy | None = None,
@@ -1279,7 +1397,11 @@ class Runtime:
         transport: str = "stdio",
         command_manager: WorkspaceCommandManager | None = None,
     ) -> None:
-        self.workspace = Workspace(workspace)
+        self.workspace = Workspace(
+            workspace,
+            read_roots=read_roots,
+            outside_read_policy=outside_read_policy,
+        )
         self.enable_view_image = enable_view_image
         self._exposed_tool_names = [
             name
@@ -1295,6 +1417,7 @@ class Runtime:
                 details={"supported": list(PERMISSION_MODE_CHOICES)},
             )
         self.permission_mode = permission_mode
+        self.transport = transport
         self.capabilities = PERMISSION_MODE_CAPABILITIES[permission_mode]
         self.dangerously_skip_all_permissions = self.capabilities.skip_all_permissions
         # Faking annotations is only defensible where the caller has already
@@ -1336,6 +1459,7 @@ class Runtime:
         self.patch_baselines: dict[str, str | None] = {}
         self.patch_lock = threading.Lock()
         self.patch_committer = AtomicPatchCommitter()
+        self.mutation_receipt_lock = threading.Lock()
         # ProjectContext is frozen and derived only from the workspace tree, so
         # an embedder that builds several runtimes over one workspace can reuse
         # the discovery (git ls-files / directory walk) result.
@@ -1484,8 +1608,26 @@ class Runtime:
             "protocolVersion": protocol_version,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": self.server_identity(),
-            "instructions": self.project_context.server_instructions(),
+            "instructions": self.server_instructions(),
         }
+
+    def server_instructions(self) -> str:
+        instructions = self.project_context.server_instructions()
+        if self.workspace.read_roots:
+            roots = "\n".join(f"- {root}" for root in self.workspace.read_roots)
+            instructions += (
+                "\n\nRead-only paths outside the workspace are available to read_file, list_dir, list_files, "
+                "search_text, and view_image. Use absolute paths under these configured roots:\n"
+                f"{roots}"
+            )
+        if self.workspace.outside_read_policy == "request":
+            instructions += (
+                "\n\nIf a direct read returns PERMISSION_REQUIRED for filesystem_read, ask the user for "
+                "explicit approval. Do not retry, widen a root, or claim access before an operator adds the "
+                "approved --read-root and restarts the server. request_permissions records the manual request; "
+                "it does not grant access."
+            )
+        return instructions
 
     def discover_payload(self) -> dict[str, Any]:
         """Tell a client that never handshakes what this server can do.
@@ -1501,7 +1643,7 @@ class Runtime:
         return {
             "supportedVersions": list(MODERN_PROTOCOL_VERSIONS),
             "capabilities": {"tools": {"listChanged": False}},
-            "instructions": self.project_context.server_instructions(),
+            "instructions": self.server_instructions(),
         }
 
     def server_identity(self) -> dict[str, Any]:
@@ -1548,16 +1690,97 @@ class Runtime:
     def _exec_environment_summary(self) -> dict[str, Any]:
         return {
             "workspace": str(self.workspace.root),
+            "read_roots": [str(root) for root in self.workspace.read_roots],
+            "outside_read_policy": self.workspace.outside_read_policy,
             "permission_mode": self.permission_mode,
             "network_allowed": self.allow_network,
             "runtime_dir": str(self.runtime_dir),
             "home": str(self.command_home_dir()),
             "tmpdir": str(self.command_tmp_dir()),
             "cache_dir": str(self.cache_dir),
+            "mutation_receipt_file": str(self._mutation_receipt_file()),
         }
+
+    def _mutation_receipt_file(self) -> Path:
+        """Durable local evidence for calls whose upstream response may be lost."""
+        return self.workspace.root / ".coding-tools-mcp" / "mutation-receipts.jsonl"
+
+    @staticmethod
+    def _mutation_args_hash(name: str, args: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            {"tool": name, "arguments": args},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _append_mutation_receipt(
+        self,
+        *,
+        receipt_id: str,
+        phase: str,
+        tool: str,
+        args_hash: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Append a bounded receipt without ever making the tool itself fail."""
+        path = self._mutation_receipt_file()
+        event: dict[str, Any] = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "receipt_id": receipt_id,
+            "phase": phase,
+            "tool": tool,
+            "args_sha256": args_hash,
+            "server_instance_id": self.server_instance_id,
+        }
+        if payload is not None:
+            error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+            affected = payload.get("affected_files")
+            event.update(
+                {
+                    "ok": bool(payload.get("ok")),
+                    "status": payload.get("status"),
+                    "error_code": error.get("code"),
+                    "command_id": payload.get("command_id"),
+                    "affected_files": [
+                        item.get("path")
+                        for item in affected
+                        if isinstance(item, dict) and isinstance(item.get("path"), str)
+                    ]
+                    if isinstance(affected, list)
+                    else None,
+                }
+            )
+        try:
+            with self.mutation_receipt_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    if path.stat().st_size >= MUTATION_RECEIPT_MAX_BYTES:
+                        rotated = path.with_name(path.name + ".1")
+                        if rotated.exists():
+                            rotated.unlink()
+                        os.replace(path, rotated)
+                except FileNotFoundError:
+                    pass
+                with path.open("a", encoding="utf-8", newline="\n") as stream:
+                    stream.write(json.dumps(event, ensure_ascii=True, sort_keys=True) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        except OSError:
+            # Evidence must be best effort; a full/read-only disk cannot turn a
+            # valid user operation into an unrelated MCP failure.
+            return
 
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
         return bool(landlock.get("available")) and self.landlock_enabled()
+
+    def _bounded_sync_wait_ms(self, requested_ms: int) -> int:
+        requested = max(0, requested_ms)
+        if self.transport == "http":
+            return min(requested, HTTP_SYNC_WAIT_CAP_MS)
+        return requested
 
     def server_info_payload(self) -> dict[str, Any]:
         tools = self.exposed_tool_names()
@@ -1613,9 +1836,33 @@ class Runtime:
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         spec = TOOL_REGISTRY[name]
         validate_arguments(name, args)
+        receipt_id: str | None = None
+        receipt_hash: str | None = None
+        if name in MUTATING_TOOL_NAMES:
+            receipt_id = secrets.token_urlsafe(12)
+            receipt_hash = self._mutation_args_hash(name, args)
+            self._append_mutation_receipt(
+                receipt_id=receipt_id,
+                phase="started",
+                tool=name,
+                args_hash=receipt_hash,
+            )
         try:
             payload = handler(args)
             payload.setdefault("ok", True)
+            if receipt_id is not None and receipt_hash is not None:
+                payload["mutation_receipt"] = {
+                    "receipt_id": receipt_id,
+                    "args_sha256": receipt_hash,
+                    "path": str(self._mutation_receipt_file()),
+                }
+                self._append_mutation_receipt(
+                    receipt_id=receipt_id,
+                    phase="finished",
+                    tool=name,
+                    args_hash=receipt_hash,
+                    payload=payload,
+                )
             self.emit_tool_trace(name, args, payload, started_at, context=context)
             content = spec.content_builder(payload) if spec.content_builder else None
             return make_tool_result(name, payload, is_error=payload.get("ok") is False, content=content)
@@ -1645,6 +1892,19 @@ class Runtime:
                 }
             if exc.code == "ELICITATION_UNSUPPORTED":
                 payload["status"] = "unsupported"
+            if receipt_id is not None and receipt_hash is not None:
+                payload["mutation_receipt"] = {
+                    "receipt_id": receipt_id,
+                    "args_sha256": receipt_hash,
+                    "path": str(self._mutation_receipt_file()),
+                }
+                self._append_mutation_receipt(
+                    receipt_id=receipt_id,
+                    phase="finished",
+                    tool=name,
+                    args_hash=receipt_hash,
+                    payload=payload,
+                )
             self.emit_tool_trace(name, args, payload, started_at, context=context)
             return make_tool_result(name, payload, is_error=True)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured
@@ -1660,6 +1920,19 @@ class Runtime:
             }
             if spec.error_status:
                 payload["status"] = spec.error_status
+            if receipt_id is not None and receipt_hash is not None:
+                payload["mutation_receipt"] = {
+                    "receipt_id": receipt_id,
+                    "args_sha256": receipt_hash,
+                    "path": str(self._mutation_receipt_file()),
+                }
+                self._append_mutation_receipt(
+                    receipt_id=receipt_id,
+                    phase="finished",
+                    tool=name,
+                    args_hash=receipt_hash,
+                    payload=payload,
+                )
             self.emit_tool_trace(name, args, payload, started_at, context=context)
             return make_tool_result(name, payload, is_error=True)
 
@@ -1726,7 +1999,7 @@ class Runtime:
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
         requested_path = str(args.get("path", ""))
-        resolved = self.resolve_existing(requested_path)
+        resolved = self.workspace.resolve_for_read(requested_path)
         if resolved.path.is_dir():
             raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
         max_bytes = int(args.get("max_bytes", 131072))
@@ -1814,9 +2087,11 @@ class Runtime:
         return result
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
-        resolved = self.resolve_existing(str(args.get("path", ".")))
+        resolved = self.workspace.resolve_for_read(str(args.get("path", ".")))
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
+        access_root = self.workspace.read_access_root(resolved.path)
+        assert access_root is not None
         recursive = bool(args.get("recursive", False))
         max_depth = int(args.get("max_depth", 1))
         max_entries = int(args.get("max_entries", 1000))
@@ -1834,17 +2109,26 @@ class Runtime:
                 children = list(directory.iterdir())
             except OSError:
                 return
-            child_rel_paths = [normalize_rel_display(child, self.workspace.root) for child in children]
-            ignored = set() if include_ignored else self.workspace.git_ignored_paths(child_rel_paths)
+            child_rel_paths = [normalize_rel_display(child, access_root) for child in children]
+            ignored = (
+                set()
+                if include_ignored
+                else self.workspace.git_ignored_paths(child_rel_paths, access_root=access_root)
+            )
             for child in children:
+                if not self.workspace.is_safe_existing_path(child, access_root=access_root):
+                    continue
                 if self.workspace.is_ignored_path(
                     child,
+                    access_root=access_root,
                     include_hidden=include_hidden,
                     include_ignored=include_ignored,
                     git_ignored=ignored,
                 ):
                     continue
-                entries.append(entry_for_path(child, self.workspace.root))
+                item = entry_for_path(child, access_root)
+                item["path"] = self.workspace.display_read_path(child)
+                entries.append(item)
                 if len(entries) >= max_entries:
                     truncated = True
                     return
@@ -1861,9 +2145,11 @@ class Runtime:
         }
 
     def list_files(self, args: dict[str, Any]) -> dict[str, Any]:
-        resolved = self.resolve_existing(str(args.get("path", ".")))
+        resolved = self.workspace.resolve_for_read(str(args.get("path", ".")))
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
+        access_root = self.workspace.read_access_root(resolved.path)
+        assert access_root is not None
         patterns_arg = args.get("patterns")
         glob_arg = args.get("glob")
         if isinstance(patterns_arg, list) and patterns_arg:
@@ -1889,25 +2175,30 @@ class Runtime:
             return fast_result
         files: list[dict[str, Any]] = []
         truncated = False
-        for batch in path_batches(walk_files(resolved.path), 256):
+        for batch in path_batches(walk_files(resolved.path, access_root=access_root), 256):
             # Filter by glob first so git check-ignore only sees candidates.
             candidates = [
                 (path, rel)
-                for path, rel in ((path, normalize_rel_display(path, self.workspace.root)) for path in batch)
+                for path, rel in ((path, normalize_rel_display(path, access_root)) for path in batch)
                 if matches_any_glob(rel, patterns) and not matches_any_glob(rel, exclude_patterns)
             ]
-            ignored = set() if include_ignored else self.workspace.git_ignored_paths([rel for _, rel in candidates])
+            ignored = (
+                set()
+                if include_ignored
+                else self.workspace.git_ignored_paths([rel for _, rel in candidates], access_root=access_root)
+            )
             for path, rel in candidates:
-                if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
+                if not self.workspace.is_safe_existing_path(path, access_root=access_root):
                     continue
                 if self.workspace.is_ignored_path(
                     path,
+                    access_root=access_root,
                     include_hidden=include_hidden,
                     include_ignored=include_ignored,
                     git_ignored=ignored,
                 ):
                     continue
-                files.append(file_entry(path, rel, path.lstat()))
+                files.append(file_entry(path, self.workspace.display_read_path(path), path.lstat()))
                 if len(files) >= max_results:
                     truncated = True
                     break
@@ -1935,6 +2226,9 @@ class Runtime:
         fd = cached_which("fd", "fdfind")
         if not fd or not resolved.path.is_dir():
             return None
+        access_root = self.workspace.read_access_root(resolved.path)
+        if access_root is None:
+            return None
         args_base = [
             fd,
             "--glob",
@@ -1957,7 +2251,7 @@ class Runtime:
         for pattern in exclude_patterns:
             args_base.extend(["--exclude", pattern])
 
-        paths: dict[str, Path] = {}
+        paths: dict[str, tuple[Path, str]] = {}
         for pattern in patterns:
             effective = pattern
             args = list(args_base)
@@ -1984,21 +2278,26 @@ class Runtime:
                 if not rel_to_search:
                     continue
                 path = resolved.path / rel_to_search
-                if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
+                if not self.workspace.is_safe_existing_path(path, access_root=access_root):
                     continue
-                rel = normalize_rel_display(path, self.workspace.root)
+                rel = normalize_rel_display(path, access_root)
                 if matches_any_glob(rel, exclude_patterns):
                     continue
-                paths[rel] = path
+                paths[self.workspace.display_read_path(path)] = (path, rel)
                 if len(paths) >= max_results:
                     break
             if len(paths) >= max_results:
                 break
-        ignored = set() if include_ignored else self.workspace.git_ignored_paths(list(paths))
+        ignored = (
+            set()
+            if include_ignored
+            else self.workspace.git_ignored_paths([rel for _, rel in paths.values()], access_root=access_root)
+        )
         files: list[dict[str, Any]] = []
-        for rel, path in paths.items():
+        for display, (path, rel) in paths.items():
             if self.workspace.is_ignored_path(
                 path,
+                access_root=access_root,
                 include_hidden=include_hidden,
                 include_ignored=include_ignored,
                 git_ignored=ignored,
@@ -2008,7 +2307,7 @@ class Runtime:
                 stat = path.lstat()
             except OSError:
                 continue
-            files.append(file_entry(path, rel, stat))
+            files.append(file_entry(path, display, stat))
         files.sort(key=lambda item: item["modified"] if sort_key == "modified" else item["path"])
         truncated = len(paths) >= max_results
         return {
@@ -2023,7 +2322,7 @@ class Runtime:
         query = str(args.get("query", ""))
         if not query:
             raise ToolFailure("INVALID_ARGUMENT", "query is required.", category="validation")
-        resolved = self.resolve_existing(str(args.get("path", ".")))
+        resolved = self.workspace.resolve_for_read(str(args.get("path", ".")))
         regex = bool(args.get("regex", False))
         case_sensitive = bool(args.get("case_sensitive", False))
         include_globs = [str(item) for item in args.get("include_globs", [])]
@@ -2046,6 +2345,8 @@ class Runtime:
         )
         if fast_result is not None:
             return fast_result
+        access_root = self.workspace.read_access_root(resolved.path)
+        assert access_root is not None
         matches: list[dict[str, Any]] = []
         total = 0
         flags = 0 if case_sensitive else re.IGNORECASE
@@ -2055,7 +2356,7 @@ class Runtime:
             raise ToolFailure("INVALID_ARGUMENT", f"Invalid regex: {exc}", category="validation") from exc
         needle = query if case_sensitive else query.lower()
 
-        roots = [resolved.path] if resolved.path.is_file() else walk_files(resolved.path)
+        roots = [resolved.path] if resolved.path.is_file() else walk_files(resolved.path, access_root=access_root)
         for batch in path_batches(roots, 256):
             # Filter by glob first so git check-ignore runs once per batch of
             # candidates instead of once per walked file.
@@ -2063,17 +2364,17 @@ class Runtime:
             for path in batch:
                 if path.is_dir():
                     continue
-                if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
+                if not self.workspace.is_safe_existing_path(path, access_root=access_root):
                     continue
-                rel = normalize_rel_display(path, self.workspace.root)
+                rel = normalize_rel_display(path, access_root)
                 if include_globs and not matches_any_glob(rel, include_globs):
                     continue
                 if matches_any_glob(rel, exclude_globs):
                     continue
                 candidates.append((path, rel))
-            ignored = self.workspace.git_ignored_paths([rel for _, rel in candidates])
+            ignored = self.workspace.git_ignored_paths([rel for _, rel in candidates], access_root=access_root)
             for path, rel in candidates:
-                if self.workspace.is_ignored_path(path, git_ignored=ignored):
+                if self.workspace.is_ignored_path(path, access_root=access_root, git_ignored=ignored):
                     continue
                 try:
                     data = path.read_bytes()
@@ -2101,7 +2402,17 @@ class Runtime:
                         continue
                     before = lines[max(0, index - context_lines) : index]
                     after = lines[index + 1 : index + 1 + context_lines]
-                    matches.append(search_match_item(rel, index + 1, column, line, before, after, max_preview_bytes))
+                    matches.append(
+                        search_match_item(
+                            self.workspace.display_read_path(path),
+                            index + 1,
+                            column,
+                            line,
+                            before,
+                            after,
+                            max_preview_bytes,
+                        )
+                    )
         return {
             "query": query,
             "matches": matches,
@@ -2137,12 +2448,13 @@ class Runtime:
             args.extend(["--glob", pattern])
         for pattern in exclude_globs:
             args.extend(["--glob", f"!{pattern}"])
-        search_path = resolved.display if resolved.display != "." else "."
+        search_cwd = resolved.path if resolved.path.is_dir() else resolved.path.parent
+        search_path = "." if resolved.path.is_dir() else resolved.path.name
         args.extend(["--", query, search_path])
         try:
             process = subprocess.Popen(
                 args,
-                cwd=str(self.workspace.root),
+                cwd=str(search_cwd),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -2185,24 +2497,30 @@ class Runtime:
                     truncated = True
                     process.terminate()
                     break
-                rel = normalize_rel_display((self.workspace.root / path_text).resolve(), self.workspace.root)
+                matched_path = (search_cwd / path_text).resolve()
+                access_root = self.workspace.read_access_root(matched_path)
+                if access_root is None:
+                    continue
+                display = self.workspace.display_read_path(matched_path)
                 submatches = data.get("submatches") if isinstance(data.get("submatches"), list) else []
                 first_submatch = submatches[0] if submatches and isinstance(submatches[0], dict) else {}
                 column = int(first_submatch.get("start", 0)) + 1
                 sanitized = str(line_text).replace("\r\n", "\n").replace("\r", "").rstrip("\n")
                 lines: list[str] = []
                 if context_lines > 0:
-                    lines = file_cache.get(rel, [])
-                    if rel not in file_cache:
+                    lines = file_cache.get(display, [])
+                    if display not in file_cache:
                         try:
-                            lines = (self.workspace.root / rel).read_text(encoding="utf-8").splitlines()
+                            lines = matched_path.read_text(encoding="utf-8").splitlines()
                         except OSError:
                             lines = []
-                        file_cache[rel] = lines
+                        file_cache[display] = lines
                 index = line_number - 1
                 before = lines[max(0, index - context_lines) : index] if lines else []
                 after = lines[index + 1 : index + 1 + context_lines] if lines else []
-                matches.append(search_match_item(rel, line_number, column, sanitized, before, after, max_preview_bytes))
+                matches.append(
+                    search_match_item(display, line_number, column, sanitized, before, after, max_preview_bytes)
+                )
         finally:
             timeout.cancel()
             try:
@@ -2359,7 +2677,8 @@ class Runtime:
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
         self._check_command_policy(cmd, args)
         timeout_ms = int(args.get("timeout_ms", 30000))
-        yield_ms = int(args.get("yield_time_ms", 10000))
+        requested_yield_ms = int(args.get("yield_time_ms", 10000))
+        yield_ms = self._bounded_sync_wait_ms(requested_yield_ms)
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
@@ -2414,10 +2733,17 @@ class Runtime:
                 tty=tty,
                 popen_kwargs=popen_extra,
             )
+            sync_wait_warning = None
+            if yield_ms < requested_yield_ms:
+                sync_wait_warning = (
+                    f"HTTP transport caps synchronous command waits at {HTTP_SYNC_WAIT_CAP_MS}ms; "
+                    "the process is still running and should be polled by command_id."
+                )
+            command_warnings = [warning for warning in (landlock_warning, sync_wait_warning) if warning]
             command = self._make_command(
                 process,
                 timeout_at=deadline,
-                warnings=[landlock_warning] if landlock_warning else None,
+                warnings=command_warnings or None,
                 pty_master_fd=pty_master_fd,
             )
             with self.commands_lock:
@@ -2805,7 +3131,7 @@ class Runtime:
                 "arguments": {
                     "command_id": command.command_id,
                     "chars": "",
-                    "yield_time_ms": 10000,
+                    "yield_time_ms": self._bounded_sync_wait_ms(10000),
                 },
             }
         output_refs = {
@@ -3004,7 +3330,9 @@ class Runtime:
             return self._format_command_output(command, payload, args)
         if chars:
             command.write_input(chars.encode("utf-8"))
-        wait_until = time.time() + (int(args.get("yield_time_ms", 10000)) / 1000.0)
+        requested_yield_ms = int(args.get("yield_time_ms", 10000))
+        yield_ms = self._bounded_sync_wait_ms(requested_yield_ms)
+        wait_until = time.time() + (yield_ms / 1000.0)
         first_output_at: float | None = None
         while time.time() < wait_until and command.process.poll() is None:
             time.sleep(0.02)
@@ -3018,6 +3346,12 @@ class Runtime:
                     if time.time() - first_output_at >= 0.05:
                         break
         payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
+        if yield_ms < requested_yield_ms:
+            warnings = list(payload.get("warnings", []))
+            warnings.append(
+                f"HTTP transport caps synchronous polling waits at {HTTP_SYNC_WAIT_CAP_MS}ms; poll again if needed."
+            )
+            payload["warnings"] = warnings
         return self._format_command_output(command, payload, args)
 
     def _wait_for_command_exit(self, command: CommandRun, wait_seconds: float) -> bool:
@@ -3410,6 +3744,31 @@ class Runtime:
                     "dangerously-skip-all-permissions is enabled; permission-gated operations are auto-granted"
                 ],
             }
+        if args.get("permission") == "filesystem_read":
+            return {
+                "ok": False,
+                "status": "user_confirmation_required",
+                "grant_id": None,
+                "expires_at": None,
+                "permission_request": {
+                    "tool_name": args.get("tool_name"),
+                    "permission": "filesystem_read",
+                    "reason": args.get("reason"),
+                    "arguments": args.get("arguments", {}),
+                    "scope": args.get("scope", "once"),
+                    "status": "required",
+                },
+                "error": {
+                    "code": "PERMISSION_REQUIRED",
+                    "message": (
+                        "Ask the user for explicit approval. Access remains denied until an operator adds the "
+                        "approved read root to server configuration and restarts the server."
+                    ),
+                    "category": "permission",
+                    "retryable": True,
+                    "details": {"requested": args},
+                },
+            }
         return {
             "ok": False,
             "status": "unsupported",
@@ -3425,7 +3784,7 @@ class Runtime:
         }
 
     def view_image(self, args: dict[str, Any]) -> dict[str, Any]:
-        resolved = self.resolve_existing(str(args.get("path", "")))
+        resolved = self.workspace.resolve_for_read(str(args.get("path", "")))
         max_bytes = int(args.get("max_bytes", 5_242_880))
         max_width = int(args.get("max_width", IMAGE_RESIZE_MAX_DIMENSION))
         max_height = int(args.get("max_height", IMAGE_RESIZE_MAX_DIMENSION))
@@ -3466,13 +3825,29 @@ class Runtime:
         return payload
 
 
-def walk_files(root: Path) -> Iterator[Path]:
+def path_resolves_within(path: Path, root: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return False
+    return is_relative_to(resolved, root)
+
+
+def walk_files(root: Path, *, access_root: Path | None = None) -> Iterator[Path]:
     if root.is_file() or root.is_symlink():
         yield root
         return
     for current, dirs, files in os.walk(root, followlinks=False):
-        dirs[:] = [name for name in dirs if name not in DEFAULT_EXCLUDED_NAMES]
         current_path = Path(current)
+        dirs[:] = [
+            name
+            for name in dirs
+            if name not in DEFAULT_EXCLUDED_NAMES
+            and (
+                access_root is None
+                or path_resolves_within(current_path / name, access_root)
+            )
+        ]
         for name in files:
             yield current_path / name
 
@@ -4731,7 +5106,18 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "request_permissions": object_schema(
             {
-                "tool_name": {**string, "enum": ["exec_command", "apply_patch"]},
+                "tool_name": {
+                    **string,
+                    "enum": [
+                        "exec_command",
+                        "apply_patch",
+                        "read_file",
+                        "list_dir",
+                        "list_files",
+                        "search_text",
+                        "view_image",
+                    ],
+                },
                 "permission": {
                     **string,
                     "enum": [
@@ -4743,6 +5129,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                         INLINE_SCRIPT_PERMISSION,
                         "privileged_executable",
                         "write_generated_or_ignored",
+                        "filesystem_read",
                     ],
                 },
                 "reason": {**string, "minLength": 1},
@@ -5530,6 +5917,8 @@ def build_runtime(
     workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
     runtime = Runtime(
         workspace,
+        read_roots=read_roots_from_args(args),
+        outside_read_policy=runtime_policy.outside_read_policy,
         enable_view_image=args.enable_view_image,
         permission_mode=runtime_policy.permission_mode,
         shell_env_policy=runtime_policy.shell_env_policy,
@@ -5705,6 +6094,24 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {__version__}",
     )
     parser.add_argument("--workspace", help="workspace root; defaults to CODING_TOOLS_MCP_WORKSPACE or cwd")
+    parser.add_argument(
+        "--read-root",
+        action="append",
+        default=[],
+        help=(
+            "additional read-only root for read_file, list_dir, list_files, search_text, and view_image; "
+            f"repeatable; {ENV_PREFIX}_READ_ROOTS uses the platform path separator"
+        ),
+    )
+    parser.add_argument(
+        "--outside-read-policy",
+        choices=OUTSIDE_READ_POLICY_CHOICES,
+        default=None,
+        help=(
+            "behavior for direct reads outside configured roots: deny or return a manual permission request; "
+            f"defaults to {ENV_PREFIX}_OUTSIDE_READ_POLICY or deny"
+        ),
+    )
     parser.add_argument(
         "--host",
         default=os.environ.get(f"{ENV_PREFIX}_HOST") or "127.0.0.1",

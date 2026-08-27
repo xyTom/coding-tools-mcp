@@ -4,7 +4,8 @@ Coding Tools MCP exposes primitives, not an agent workflow engine.
 
 The boundary is:
 
-- direct file tools accept workspace-relative paths only
+- direct file tools accept workspace-relative paths plus absolute reads under explicitly configured read roots
+- write, Git mutation, and command working-directory paths remain workspace-confined
 - `exec_command` starts in a workspace cwd
 - safe/trusted modes filter secrets and loader/startup env
 - safe/trusted modes block destructive commands

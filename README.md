@@ -26,8 +26,9 @@ workspace, gated by permission modes.
 - **It turns a chat app into a coding agent.** Claude Desktop — or any MCP
   chat client — gets real repo access with the subscription you already have.
   No extra product required.
-- **Safety is the product, not an afterthought.** One workspace root per
-  server. Absolute paths, `..` traversal, and symlink escapes are rejected.
+- **Safety is the product, not an afterthought.** One writable workspace root
+  per server. Optional absolute read paths must resolve under explicitly
+  configured read roots; `..` traversal and symlink escapes are rejected.
   Permission modes gate network access, shell expansion, inline scripts, and
   destructive commands. On Linux, [Landlock](docs/security-boundary.md) adds
   kernel-level filesystem confinement.

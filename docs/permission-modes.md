@@ -92,3 +92,19 @@ On Windows, the parent is the platform temp directory instead of `/tmp`. The ser
 The server does not create workspace-local `.coding-tools/` directories by default. Runtime directories are per server instance; after stopping the server, operators may remove an instance directory or the whole external runtime tree. Normal OS temp cleanup may also remove stale directories.
 
 Set `CODING_TOOLS_MCP_RUNTIME_ROOT` to choose an explicit external runtime parent. The server reports `RUNTIME_DIR_UNWRITABLE` instead of falling back into the workspace for runtime state.
+
+## Additional Read Roots
+
+Direct read tools can be granted permanent access to specific directories outside the writable workspace:
+
+```powershell
+coding-tools-mcp --workspace D:/ --permission-mode trusted `
+  --read-root C:/Users/example/.zcode `
+  --read-root C:/Users/example/AppData
+```
+
+`--read-root` is repeatable. `CODING_TOOLS_MCP_READ_ROOTS` provides the same list using the platform path separator (`;` on Windows and `:` on POSIX).
+
+The additional roots apply only to `read_file`, `list_dir`, `list_files`, `search_text`, and `view_image`. Absolute paths must resolve inside the workspace or one of these roots. They do not expand `apply_patch`, Git mutation, or `exec_command` working-directory access, and symlinks or junctions that resolve outside the selected root remain blocked. `server_info.read_roots` reports the effective configuration.
+
+For clients without native MCP permission elicitation, `--outside-read-policy request` changes an unconfigured absolute read from `ABSOLUTE_PATH_DENIED` to a structured `PERMISSION_REQUIRED` response. The response tells the agent to ask the user and includes the requested path. `request_permissions` can record the manual request, but it never grants access. After explicit approval, an operator must add the approved directory with `--read-root` and restart the server; until then, retries remain denied.
