@@ -38,15 +38,19 @@ from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
     OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,
+    OAUTH_GRANT_TYPE_REFRESH_TOKEN,
     OAUTH_GRANT_TYPES_SUPPORTED,
     OAUTH_MAX_BODY_BYTES,
     OAUTH_RESPONSE_TYPES_SUPPORTED,
     MAX_PENDING_CODES,
     OAUTH_TOKEN_TTL_SECONDS,
+    OAUTH_REFRESH_TOKEN_TTL_SECONDS,
     OAuthConfig,
     create_access_token,
+    create_refresh_token,
     valid_pkce_challenge,
     validate_access_token,
+    validate_refresh_token,
     verify_pkce,
 )
 from .patching import (
@@ -5399,14 +5403,34 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
 
+        refresh_token = _p("refresh_token")
+        if grant_type == OAUTH_GRANT_TYPE_REFRESH_TOKEN:
+            server_url = (resource or self.oauth_base_url()).rstrip("/")
+            if not server_url or not refresh_token:
+                _err("invalid_grant", "refresh_token and resource are required")
+                return
+            refresh_data = validate_refresh_token(refresh_token, cfg, server_url)
+            if refresh_data is None:
+                _err("invalid_grant", "Invalid or expired refresh_token")
+                return
+            refresh_client_id, refresh_exp = refresh_data
+            if client_id and not secrets.compare_digest(client_id, refresh_client_id):
+                _err("invalid_client", "client_id mismatch")
+                return
+            client_id = refresh_client_id
+            if cfg.registry.get(client_id) is None or not cfg.registry.authenticates(client_id, client_secret, presented_auth_method):
+                _err("invalid_client", "Invalid client credentials")
+                return
+            access_token = create_access_token(cfg, server_url, client_id=client_id)
+            rotated_refresh = create_refresh_token(cfg, server_url, client_id=client_id, expires_at=refresh_exp)
+            self.send_json({"access_token": access_token, "refresh_token": rotated_refresh, "token_type": "Bearer", "expires_in": cfg.token_ttl})
+            return
+
         if grant_type != OAUTH_GRANT_TYPE_AUTHORIZATION_CODE:
-            _err("unsupported_grant_type", "Only authorization_code is supported")
+            _err("unsupported_grant_type", "Supported grants: authorization_code, refresh_token")
             return
-        if cfg.registry.get(client_id) is None:
-            _err("invalid_client", "Unknown client_id")
-            return
-        if not cfg.registry.authenticates(client_id, client_secret, presented_auth_method):
-            _err("invalid_client", "Invalid client_secret")
+        if cfg.registry.get(client_id) is None or not cfg.registry.authenticates(client_id, client_secret, presented_auth_method):
+            _err("invalid_client", "Invalid client credentials")
             return
         if not code:
             _err("invalid_grant", "code is required")
@@ -5417,18 +5441,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
         with cfg.pending_codes_lock:
             code_data = cfg.pending_codes.pop(code, None)
-
-        if code_data is None:
-            _err("invalid_grant", "Unknown or already-used authorization code")
+        if code_data is None or time.time() > code_data["expires_at"]:
+            _err("invalid_grant", "Unknown, used, or expired authorization code")
             return
-        if time.time() > code_data["expires_at"]:
-            _err("invalid_grant", "Authorization code expired")
-            return
-        if not secrets.compare_digest(code_data["client_id"], client_id):
-            _err("invalid_grant", "client_id mismatch")
-            return
-        if not secrets.compare_digest(code_data["redirect_uri"], redirect_uri):
-            _err("invalid_grant", "redirect_uri mismatch")
+        if not secrets.compare_digest(code_data["client_id"], client_id) or not secrets.compare_digest(code_data["redirect_uri"], redirect_uri):
+            _err("invalid_grant", "authorization code binding mismatch")
             return
         if not resource or not secrets.compare_digest(str(code_data.get("resource") or ""), resource):
             _err("invalid_target", "resource mismatch")
@@ -5439,7 +5456,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
         server_url = resource
         access_token = create_access_token(cfg, server_url, client_id=client_id)
-        self.send_json({"access_token": access_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
+        refresh_token = create_refresh_token(cfg, server_url, client_id=client_id)
+        self.send_json({"access_token": access_token, "refresh_token": refresh_token, "token_type": "Bearer", "expires_in": cfg.token_ttl})
 
     def handle_oauth_register(self) -> None:
         cfg = self.runtime.oauth_config
@@ -5612,11 +5630,20 @@ def run_http(args: argparse.Namespace) -> int:
         if not 60 <= token_ttl <= 604_800:
             print(f"ERROR: {ENV_PREFIX}_OAUTH_TOKEN_TTL must be between 60 and 604800 seconds.", file=sys.stderr)
             return 2
+        try:
+            refresh_token_ttl = int(os.environ.get(f"{ENV_PREFIX}_OAUTH_REFRESH_TOKEN_TTL") or OAUTH_REFRESH_TOKEN_TTL_SECONDS)
+        except ValueError:
+            print(f"ERROR: {ENV_PREFIX}_OAUTH_REFRESH_TOKEN_TTL must be an integer.", file=sys.stderr)
+            return 2
+        if not 3600 <= refresh_token_ttl <= 7_776_000:
+            print(f"ERROR: {ENV_PREFIX}_OAUTH_REFRESH_TOKEN_TTL must be between 3600 and 7776000 seconds.", file=sys.stderr)
+            return 2
         oauth_config = OAuthConfig(
             password=password,
             server_url=server_url,
             token_secret=token_secret,
             token_ttl=token_ttl,
+            refresh_token_ttl=refresh_token_ttl,
         )
         if client_id:
             raw_redirects = os.environ.get(f"{ENV_PREFIX}_OAUTH_REDIRECT_URIS") or "http://127.0.0.1/callback"
