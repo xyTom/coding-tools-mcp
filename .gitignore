@@ -1,3 +1,7 @@
+# Local OAuth runtime state (never commit credentials or client registry data)
+.coding-tools-mcp/
+oauth_clients.json
+
 .reference/
 .venv/
 __pycache__/

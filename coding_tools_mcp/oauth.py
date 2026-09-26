@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import os
 import re
 import secrets
 import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -15,12 +18,11 @@ import jwt
 
 OAUTH_CODE_TTL_SECONDS = 300
 OAUTH_TOKEN_TTL_SECONDS = 24 * 60 * 60
+OAUTH_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 OAUTH_MAX_BODY_BYTES = 8_192
 OAUTH_GRANT_TYPE_AUTHORIZATION_CODE = "authorization_code"
-# Advertised in AS metadata and used to narrow DCR requests. The token endpoint
-# implements authorization_code only — adding an entry here requires a matching
-# branch in handle_oauth_token, not just a wider check.
-OAUTH_GRANT_TYPES_SUPPORTED = (OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,)
+OAUTH_GRANT_TYPE_REFRESH_TOKEN = "refresh_token"
+OAUTH_GRANT_TYPES_SUPPORTED = (OAUTH_GRANT_TYPE_AUTHORIZATION_CODE, OAUTH_GRANT_TYPE_REFRESH_TOKEN)
 OAUTH_RESPONSE_TYPES_SUPPORTED = ("code",)
 MAX_REDIRECT_URIS = 10
 MAX_REGISTERED_CLIENTS = 1_024
@@ -53,6 +55,32 @@ class OAuthClientRegistry:
     def __init__(self) -> None:
         self._clients: dict[str, OAuthClient] = {}
         self._lock = threading.Lock()
+        configured = os.environ.get("CODING_TOOLS_MCP_OAUTH_CLIENT_REGISTRY", "").strip()
+        self._storage_path = Path(configured) if configured else Path.home() / ".coding-tools-mcp" / "oauth_clients.json"
+        self._load_persisted()
+
+    def _load_persisted(self) -> None:
+        try:
+            payload = json.loads(self._storage_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return
+        for item in payload.get("clients", []):
+            try:
+                client = OAuthClient(client_id=str(item["client_id"]), redirect_uris=validate_redirect_uris(list(item["redirect_uris"])), token_endpoint_auth_method=str(item.get("token_endpoint_auth_method") or "none"), client_name=item.get("client_name") or None, secret_digest=item.get("secret_digest") or None, issued_at=int(item.get("issued_at") or time.time()))
+            except (KeyError, TypeError, ValueError):
+                continue
+            self._clients[client.client_id] = client
+
+    def _persist_locked(self) -> None:
+        payload = {"clients": [{"client_id": c.client_id, "redirect_uris": list(c.redirect_uris), "token_endpoint_auth_method": c.token_endpoint_auth_method, "client_name": c.client_name, "secret_digest": c.secret_digest, "issued_at": c.issued_at} for c in self._clients.values()]}
+        self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._storage_path.with_suffix(self._storage_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(self._storage_path)
+        try:
+            os.chmod(self._storage_path, 0o600)
+        except OSError:
+            pass
 
     def add_preregistered(
         self,
@@ -71,6 +99,7 @@ class OAuthClientRegistry:
         )
         with self._lock:
             self._clients[client_id] = client
+            self._persist_locked()
 
     def register(self, metadata: dict[str, Any]) -> dict[str, Any]:
         redirects = validate_redirect_uris(metadata.get("redirect_uris"))
@@ -108,6 +137,7 @@ class OAuthClientRegistry:
                 secret_digest=_secret_digest(client_secret) if client_secret is not None else None,
             )
             self._clients[client_id] = client
+            self._persist_locked()
         response: dict[str, Any] = {
             "client_id": client.client_id,
             "client_id_issued_at": client.issued_at,
@@ -146,6 +176,7 @@ class OAuthConfig:
     server_url: str | None
     token_secret: bytes
     token_ttl: int = OAUTH_TOKEN_TTL_SECONDS
+    refresh_token_ttl: int = OAUTH_REFRESH_TOKEN_TTL_SECONDS
     registry: OAuthClientRegistry = field(default_factory=OAuthClientRegistry)
     pending_codes: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_codes_lock: threading.Lock = field(default_factory=threading.Lock)
@@ -197,6 +228,7 @@ def create_access_token(config: OAuthConfig, server_url: str, *, client_id: str)
             "iat": now,
             "exp": now + config.token_ttl,
             "scope": "mcp",
+            "token_use": "access",
         },
         config.token_secret,
         algorithm="HS256",
@@ -215,7 +247,40 @@ def validate_access_token(token: str, config: OAuthConfig, server_url: str) -> b
     except jwt.PyJWTError:
         return False
     client_id = claims.get("client_id")
-    return isinstance(client_id, str) and config.registry.get(client_id) is not None
+    return (
+        claims.get("token_use") == "access"
+        and isinstance(client_id, str)
+        and config.registry.get(client_id) is not None
+    )
+
+
+def create_refresh_token(
+    config: OAuthConfig, server_url: str, *, client_id: str, expires_at: int | None = None
+) -> str:
+    now = int(time.time())
+    absolute_exp = min(expires_at or (now + config.refresh_token_ttl), now + config.refresh_token_ttl)
+    return jwt.encode(
+        {
+            "iss": server_url, "aud": server_url, "sub": client_id, "client_id": client_id,
+            "iat": now, "exp": absolute_exp, "scope": "mcp", "token_use": "refresh",
+            "jti": secrets.token_urlsafe(16),
+        },
+        config.token_secret, algorithm="HS256",
+    )
+
+
+def validate_refresh_token(token: str, config: OAuthConfig, server_url: str) -> tuple[str, int] | None:
+    try:
+        claims = jwt.decode(token, config.token_secret, algorithms=["HS256"], audience=server_url, issuer=server_url)
+    except jwt.PyJWTError:
+        return None
+    client_id = claims.get("client_id")
+    exp = claims.get("exp")
+    if claims.get("token_use") != "refresh" or not isinstance(client_id, str) or not isinstance(exp, int):
+        return None
+    if config.registry.get(client_id) is None:
+        return None
+    return client_id, exp
 
 
 def _secret_digest(secret: str) -> str:

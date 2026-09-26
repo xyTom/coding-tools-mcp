@@ -62,12 +62,17 @@ Registration rules:
 - Supported token authentication methods are `none`, `client_secret_post`, and
   `client_secret_basic`. A client must use the method it registered.
 - Client secrets are stored as digests. Public clients rely on mandatory PKCE.
-- Registrations and authorization codes are process-local. A restart requires
-  dynamic clients to register again.
+- Dynamic client registrations are persisted by default in
+  `~/.coding-tools-mcp/oauth_clients.json`, so a server restart does not force
+  clients to register again. Authorization codes remain process-local and
+  single-use.
 
-Authorization codes are single-use and expire after five minutes. Access tokens
-default to 24 hours and are bound to the registered client and exact MCP
-resource URL.
+Authorization codes expire after five minutes. Access tokens default to 24
+hours. OAuth refresh tokens default to 30 days and can obtain replacement
+access tokens without another interactive authorization. Refreshing rotates the
+refresh token but preserves its original absolute expiry, so it does not extend
+the 30-day authorization window indefinitely. Tokens are bound to the
+registered client and exact MCP resource URL.
 
 ## OAuth configuration
 
@@ -83,7 +88,19 @@ CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET=<hex-key>
 
 # Optional token lifetime in seconds; default 86400:
 CODING_TOOLS_MCP_OAUTH_TOKEN_TTL=86400
+
+# Optional refresh-token lifetime in seconds; default 2592000 (30 days):
+CODING_TOOLS_MCP_OAUTH_REFRESH_TOKEN_TTL=2592000
+
+# Optional dynamic-client registry path. The default is shown here:
+CODING_TOOLS_MCP_OAUTH_CLIENT_REGISTRY=~/.coding-tools-mcp/oauth_clients.json
 ```
+
+For refresh tokens to remain usable after a server restart,
+`CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` must remain stable across restarts. If it
+is omitted, the server generates a new signing key for that process and tokens
+issued by the previous process can no longer be validated. The bundled desktop
+client persists its OAuth token-signing secret in its private profile storage.
 
 With an ephemeral tunnel, omit `CODING_TOOLS_MCP_SERVER_URL`; the server derives
 the external origin from the request. For a stable hostname, pin it so issuer,

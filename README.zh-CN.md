@@ -18,6 +18,64 @@ Coding Tools MCP 是一个**模型中立的编程运行时**，通过
 Cursor、Cline、VS Code、Windsurf、Gemini CLI，或你自己写的 agent，拿到的
 都是默认目录中久经考验的 18 个工具：限定在单一工作区内，由权限模式层层把关。
 
+## 本分支的 OAuth 改动
+
+`oauth-refresh-persistence` 分支基于上游 `v0.3.0`。除下面的 OAuth 改进外，
+其余功能保持原项目行为：
+
+- **RFC 7591 动态客户端注册持久化。** 动态注册的 OAuth 客户端默认保存到
+  `~/.coding-tools-mcp/oauth_clients.json`。MCP 服务重启后，不再因为内存中的
+  注册信息丢失而要求客户端重新获取新的 `client_id`。
+- **增加 OAuth refresh token。** Authorization code 换取 token 时，现在会同时
+  返回 access token 和 refresh token。Access token 默认有效 24 小时，refresh
+  token 默认有效 30 天。
+- **固定授权窗口。** refresh token 轮换时保留最初的绝对过期时间，不会因为每次
+  刷新而把 30 天有效期无限向后延长。
+- **区分 access / refresh token。** JWT 中加入不同的 `token_use`，避免 refresh
+  token 被误当作 MCP access token 使用。
+
+新增两个可选环境变量：
+
+```bash
+CODING_TOOLS_MCP_OAUTH_REFRESH_TOKEN_TTL=2592000
+CODING_TOOLS_MCP_OAUTH_CLIENT_REGISTRY=~/.coding-tools-mcp/oauth_clients.json
+```
+
+如果希望 refresh token 在 MCP 服务重启后仍然有效，
+`CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` 也必须在每次启动之间保持不变。项目提供的
+桌面客户端会在其私有 profile 存储中保存这个签名密钥。完整 OAuth 配置见
+[docs/remote-mcp.md](docs/remote-mcp.md)。
+
+### 修改版源码与获取地址
+
+这个修改分支发布在贡献者自己的 Fork：
+
+- Fork：`https://github.com/QingMu-Aoki/coding-tools-mcp`
+- 分支：`oauth-refresh-persistence`
+- 源码页面：`https://github.com/QingMu-Aoki/coding-tools-mcp/tree/oauth-refresh-persistence`
+
+可以直接克隆修改后的分支：
+
+```bash
+git clone --branch oauth-refresh-persistence --single-branch https://github.com/QingMu-Aoki/coding-tools-mcp.git
+cd coding-tools-mcp
+```
+
+上述链接需要先将 `oauth-refresh-persistence` 分支 push 到该 Fork 后才会生效。
+
+### 如何测试这个分支
+
+下面“快速开始”中的 PyPI/npm 命令安装的是上游已经发布的正式版本。在这些改动
+被上游合并之前，请从源码分支进行测试：
+
+```bash
+python -m pip install -e ".[desktop]"
+coding-tools-mcp-desktop
+```
+
+如果只需要服务器而不需要 GUI，可以使用 `python -m pip install -e .`，然后像原版
+一样启动 `coding-tools-mcp`。已有 OAuth 客户端只需要重新授权一次以拿到 refresh
+token，之后在 refresh token 的绝对有效期内可以续发新的 access token。
 [![观看演示](https://img.youtube.com/vi/N9lQaXt1eqQ/maxresdefault.jpg)](https://youtu.be/N9lQaXt1eqQ?si=LyEwvzzQF6QjUxR0)
 
 ## 为什么用它

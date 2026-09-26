@@ -19,6 +19,67 @@ Claude Code, Codex, Cursor, Cline, VS Code, Windsurf, Gemini CLI, or an agent
 you build yourself gets the default catalog of 18 battle-tested tools, confined
 to one workspace and gated by permission modes.
 
+## OAuth changes in this branch
+
+The `oauth-refresh-persistence` branch is based on upstream `v0.3.0` and keeps
+the original project behavior except for the OAuth improvements below:
+
+- **Persistent RFC 7591 client registration.** Dynamic OAuth clients are saved
+  to `~/.coding-tools-mcp/oauth_clients.json` by default, so restarting the MCP
+  server no longer forces a previously registered client to obtain a new
+  `client_id`.
+- **OAuth refresh-token grant.** Authorization-code exchange now returns both
+  an access token and a refresh token. Access tokens default to 24 hours;
+  refresh tokens default to 30 days.
+- **Fixed authorization window.** Refresh-token rotation preserves the original
+  refresh-token expiry instead of extending the 30-day window indefinitely.
+- **Token separation.** Access and refresh JWTs carry different `token_use`
+  values so a refresh token cannot be accepted as an MCP access token.
+
+Two additional environment variables are available:
+
+```bash
+CODING_TOOLS_MCP_OAUTH_REFRESH_TOKEN_TTL=2592000
+CODING_TOOLS_MCP_OAUTH_CLIENT_REGISTRY=~/.coding-tools-mcp/oauth_clients.json
+```
+
+For refresh tokens to remain valid across server restarts,
+`CODING_TOOLS_MCP_OAUTH_TOKEN_SECRET` must also remain stable. The bundled
+desktop client already persists this signing secret in its private profile
+storage. See [docs/remote-mcp.md](docs/remote-mcp.md) for the full OAuth setup.
+
+### Modified source and download
+
+This modified branch is published from the contributor fork:
+
+- Fork: `https://github.com/QingMu-Aoki/coding-tools-mcp`
+- Branch: `oauth-refresh-persistence`
+- Source: `https://github.com/QingMu-Aoki/coding-tools-mcp/tree/oauth-refresh-persistence`
+
+Clone the modified branch directly:
+
+```bash
+git clone --branch oauth-refresh-persistence --single-branch https://github.com/QingMu-Aoki/coding-tools-mcp.git
+cd coding-tools-mcp
+```
+
+These links become available after the branch has been pushed to the fork.
+
+### Testing this branch
+
+The PyPI/npm commands in the normal Quickstart below install the upstream
+published release. Until these changes are merged upstream, test this branch
+from a source checkout instead:
+
+```bash
+python -m pip install -e ".[desktop]"
+coding-tools-mcp-desktop
+```
+
+For a server-only install, use `python -m pip install -e .` and start
+`coding-tools-mcp` normally. Existing OAuth clients only need to authorize once
+to receive a refresh token; subsequent access-token renewal can use the refresh
+token until its absolute expiry.
 [![Watch the demo](https://img.youtube.com/vi/N9lQaXt1eqQ/maxresdefault.jpg)](https://youtu.be/N9lQaXt1eqQ?si=LyEwvzzQF6QjUxR0)
 
 ## Why people use it
