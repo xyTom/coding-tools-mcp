@@ -62,6 +62,9 @@ class PatchHunk:
 
     lines: list[str]
     scope: str | None = None
+    # Earlier `@@` lines written directly above this hunk's own header. Each is
+    # found in turn, moving the forward cursor, before `scope` is searched.
+    outer_scopes: tuple[str, ...] = ()
 
 
 @dataclass
@@ -84,6 +87,7 @@ class ParsedHunk:
     new_sources: list[int | None] = field(default_factory=list)
     scope: str | None = None
     eof_anchor: bool = False
+    outer_scopes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -374,6 +378,7 @@ def _fsync_directory(directory: Path) -> None:
 
 
 def parse_patch(patch: str) -> list[PatchOperation]:
+    """Parse an enveloped patch into file operations, retaining ordered hunk anchors."""
     # split("\n") rather than splitlines(): a context line carrying a form feed
     # or U+2028 must stay one patch line so it can match the file line it came
     # from. The envelope closes on the last non-empty line because the patch
@@ -416,6 +421,7 @@ def parse_patch(patch: str) -> list[PatchOperation]:
             hunks: list[PatchHunk] = []
             current: list[str] = []
             current_scope: str | None = None
+            outer_scopes: list[str] = []
             # `*** End of File` is the one `*** ` line that belongs to a hunk
             # rather than terminating the file block: it anchors the hunk at
             # EOF. Every other `*** ` line starts the next operation.
@@ -424,7 +430,12 @@ def parse_patch(patch: str) -> list[PatchOperation]:
             ):
                 if lines[i].startswith("@@"):
                     if current:
-                        hunks.append(PatchHunk(current, current_scope))
+                        hunks.append(PatchHunk(current, current_scope, tuple(outer_scopes)))
+                        outer_scopes = []
+                    elif current_scope is not None:
+                        # `@@ class A:` directly followed by `@@ def run(self):`
+                        # narrows in two steps rather than dropping the first.
+                        outer_scopes.append(current_scope)
                     current = []
                     current_scope = _header_scope(lines[i])
                 elif lines[i].rstrip() == END_OF_FILE_MARKER:
@@ -433,7 +444,7 @@ def parse_patch(patch: str) -> list[PatchOperation]:
                     current.append(lines[i])
                 i += 1
             if current:
-                hunks.append(PatchHunk(current, current_scope))
+                hunks.append(PatchHunk(current, current_scope, tuple(outer_scopes)))
             operations.append(PatchOperation("update", path, hunks=hunks, move_to=move_to))
             continue
         raise ToolFailure("PATCH_FAILED", f"Unrecognized patch line: {line}", category="validation")
@@ -626,16 +637,23 @@ def _locate_hunk(
 
     ``@@ <context>`` is a text anchor, not a language scope. When present it
     must be found at or after ``cursor`` and moves the search start to the line
-    after the anchor. A successful old-text match advances the cursor past the
-    matched block. Pure additions still append at EOF, matching Codex, but the
-    anchor is validated first.
+    after the anchor; consecutive ``@@`` lines are found in turn. As in Codex,
+    an anchored hunk takes the first match after its anchor — the anchor is
+    how a caller picks between repeated blocks. An unanchored hunk with more
+    than one match after the cursor is still reported as ambiguous rather than
+    resolved to the first. A successful old-text match advances the cursor
+    past the matched block. Pure additions still append at EOF, matching
+    Codex, but the anchor is validated first. ``*** End of File`` requires the
+    match to end at the file's tail.
     """
 
     search_start = cursor
-    if hunk.scope is not None:
-        anchor = _find_anchor(lines, hunk.scope, cursor)
+    anchor_line: int | None = None
+    for scope in (*hunk.outer_scopes, *([hunk.scope] if hunk.scope is not None else [])):
+        anchor = _find_anchor(lines, scope, search_start)
         if anchor is None:
-            raise _anchor_not_found_failure(lines, hunk, index, path, cursor)
+            raise _anchor_not_found_failure(lines, hunk, index, path, search_start, scope)
+        anchor_line = anchor
         search_start = anchor + 1
 
     if not hunk.old:
@@ -646,6 +664,8 @@ def _locate_hunk(
         if not candidates:
             continue
         selected = _filter_by_eof(lines, candidates, hunk) if hunk.eof_anchor else candidates
+        if anchor_line is not None:
+            selected = selected[:1]
         if len(selected) == 1:
             start = selected[0]
             new_lines = _rebuild_new_lines(lines, start, hunk, grade)
@@ -665,7 +685,7 @@ def _locate_hunk(
             )
         if len(selected) > 1:
             raise _ambiguous_failure(lines, selected, hunk, index, path, grade)
-    already_applied_at = _already_applied(lines, hunk, search_start)
+    already_applied_at = _already_applied(lines, hunk, search_start, anchor_line)
     if already_applied_at is not None:
         return None, already_applied_at + len(hunk.new)
     raise _not_found_failure(lines, hunk, index, path)
@@ -692,16 +712,15 @@ def _collapse_whitespace(value: str) -> str:
 
 
 def _filter_by_eof(lines: list[str], candidates: list[int], hunk: ParsedHunk) -> list[int]:
-    """Prefer the placement that reaches the end of the file.
+    """Keep only placements that reach the end of the file.
 
-    `*** End of File` is the dialect's way of saying "this is the tail"; used
-    as a locator it disambiguates a repeated block whose last occurrence is
-    the intended one.
+    `*** End of File` is the dialect's way of saying "this is the tail". As in
+    Codex it is a requirement, not a preference: a block that matches only
+    somewhere else does not satisfy it.
     """
 
     limit = _eof_insert_index(lines)
-    at_eof = [candidate for candidate in candidates if candidate + len(hunk.old) >= limit]
-    return at_eof or candidates
+    return [candidate for candidate in candidates if candidate + len(hunk.old) >= limit]
 
 
 def _rebuild_new_lines(lines: list[str], start: int, hunk: ParsedHunk, grade: str) -> list[str] | None:
@@ -763,7 +782,23 @@ def _shift_indent(value: str, shift: tuple[str, int]) -> str:
     return prefix + value
 
 
-def _already_applied(lines: list[str], hunk: ParsedHunk, start: int) -> int | None:
+_PUNCTUATION_ONLY = frozenset("{}()[];,")
+
+
+def _is_evidence(line: str) -> bool:
+    """Whether a line says anything about where it is.
+
+    A blank line or a lone ``}`` occurs all over a file, so finding one proves
+    nothing about whether a particular edit happened.
+    """
+
+    text = line.strip()
+    return bool(text) and not set(text) <= _PUNCTUATION_ONLY
+
+
+def _already_applied(
+    lines: list[str], hunk: ParsedHunk, start: int, anchor_line: int | None = None
+) -> int | None:
     """Return the unique location of an already-present hunk result.
 
     "Already applied" turns a miss into a success, so the evidence for it is
@@ -783,17 +818,24 @@ def _already_applied(lines: list[str], hunk: ParsedHunk, start: int) -> int | No
       before that point is not evidence.
     - A pure-context hunk has identical old and new text, so "already applied"
       would be indistinguishable from "never applied" and is not claimed.
+    - Blank and punctuation-only lines are never evidence. The located result
+      needs two evidence lines — the ``@@`` anchor counts as one when the
+      result sits directly below it — and a hunk that adds lines must add at
+      least one evidence line. A lone ``timeout = 30`` found after a section
+      header is a coincidence, not proof that this hunk ran.
+
+    Codex has no "already applied" notion: every case this function accepts
+    is one Codex would have failed. It only ever turns such a failure into a
+    success when the evidence is strong.
     """
 
     if hunk.old == hunk.new or not hunk.new:
         return None
-    # A blank line is present in every newline-terminated file because
-    # split("\n") retains the trailing empty element. It cannot prove that a
-    # deletion whose result contains only blank context ever happened.
-    if not any(line.strip() for line in hunk.new):
+    added = [value for value, source in zip(hunk.new, hunk.new_sources) if source is None]
+    if added and not any(_is_evidence(line) for line in added):
         return None
-    anchored = any(source is not None for source in hunk.new_sources)
-    if not anchored and len(hunk.new) < 2:
+    evidence = sum(_is_evidence(line) for line in hunk.new)
+    if evidence == 0:
         return None
     for grade in ALREADY_APPLIED_GRADES:
         candidates = find_subsequence_all(lines, hunk.new, grade=grade, start=start)
@@ -806,7 +848,11 @@ def _already_applied(lines: list[str], hunk: ParsedHunk, start: int) -> int | No
                 candidate for candidate in selected if candidate + len(hunk.new) >= eof
             ]
         if len(selected) == 1:
-            return selected[0]
+            located = selected[0]
+            below_anchor = anchor_line is not None and located == anchor_line + 1
+            if evidence + below_anchor < 2:
+                return None
+            return located
         if selected:
             # A looser grade can only add candidates, never make this result
             # unique.
@@ -815,10 +861,10 @@ def _already_applied(lines: list[str], hunk: ParsedHunk, start: int) -> int | No
 
 
 def _anchor_not_found_failure(
-    lines: list[str], hunk: ParsedHunk, index: int, path: str, cursor: int
+    lines: list[str], hunk: ParsedHunk, index: int, path: str, cursor: int, scope: str
 ) -> ToolFailure:
-    assert hunk.scope is not None
-    near = _best_near_miss(lines[cursor:], [hunk.scope])
+    """Build a retryable anchor-miss error with nearby text and the search start line."""
+    near = _best_near_miss(lines[cursor:], [scope])
     position = cursor + near[0] if near is not None else min(cursor, max(0, len(lines) - 1))
     return ToolFailure(
         "PATCH_CONTEXT_NOT_FOUND",
@@ -830,7 +876,7 @@ def _anchor_not_found_failure(
             "hunk_index": index,
             "match_count": 0,
             "match_quality": None,
-            "scope": hunk.scope,
+            "scope": scope,
             "search_start_line": cursor + 1,
             "total_lines": len(lines),
             "nearby_text": _numbered_excerpt(lines, position, 1),
@@ -939,8 +985,10 @@ def _numbered_excerpt(lines: list[str], position: int, span: int) -> str:
 
 
 def parse_update_hunk(hunk: PatchHunk | list[str]) -> ParsedHunk:
+    """Parse hunk lines into old/new text, source indexes, and anchor metadata."""
     raw_lines = hunk.lines if isinstance(hunk, PatchHunk) else list(hunk)
     scope = hunk.scope if isinstance(hunk, PatchHunk) else None
+    outer_scopes = hunk.outer_scopes if isinstance(hunk, PatchHunk) else ()
     old: list[str] = []
     new: list[str] = []
     new_sources: list[int | None] = []
@@ -969,7 +1017,14 @@ def parse_update_hunk(hunk: PatchHunk | list[str]) -> ParsedHunk:
             new.append(value)
         else:
             raise ToolFailure("PATCH_FAILED", "Update lines must start with space, '-' or '+'.", category="validation")
-    return ParsedHunk(old=old, new=new, new_sources=new_sources, scope=scope, eof_anchor=eof_anchor)
+    return ParsedHunk(
+        old=old,
+        new=new,
+        new_sources=new_sources,
+        scope=scope,
+        eof_anchor=eof_anchor,
+        outer_scopes=outer_scopes,
+    )
 
 
 def _grade_key(grade: str) -> Callable[[str], str]:

@@ -1,5 +1,67 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Repeated tool failures now add a nonblocking, model-visible warning instead
+  of refusing the third call. External changes and other clients can recover
+  immediately; normal permission, path, schema, revision, and resource checks
+  still apply. Diagnostic details use `recent_identical_failures` and
+  `repeat_warning`, not the old consecutive-failure/blocking wording.
+  Actual repeated executions retain their original errors and telemetry counts.
+
+- Windows process-tree cleanup uses the absolute System32 `taskkill.exe` with
+  a system working directory and minimal environment, avoiding workspace/PATH
+  executable lookup and inheritance of server credentials.
+- Byte-limited `read_file` pages use physical LF, CRLF, or CR line boundaries,
+  keeping numbered text, reported ranges, and continuation lines consistent.
+
+- Dry runs from both write tools label their proposed revision as
+  `would_be_revision`. Invalid `tools/call` argument values, including empty
+  arrays, are rejected rather than treated as `{}`. Missing or `null` arguments
+  retain their existing empty-object behavior.
+  `read_output` text includes eviction warnings even on the final page.
+- **`apply_patch` no longer reports success it did not earn, and follows
+  Codex's locating rules.** A hunk counts as already applied only on strong
+  evidence: blank or punctuation-only lines (the stray blank context line, a
+  lone `}`) never count, so `@@ [server]` / `-timeout = 20` /
+  `+timeout = 30` no longer "succeeds" because `timeout = 30` appears under
+  `[client]`. As in Codex, an anchored hunk takes the first match after its
+  `@@` anchor (0.5.0 reported `PATCH_CONTEXT_AMBIGUOUS` and told the caller to
+  add the anchor it already had), consecutive `@@` lines are found in turn
+  (0.5.0 silently kept only the last), and `*** End of File` must match at the
+  tail. Additions/removals exclude skipped hunks. The 0.3 → 0.5 behavior
+  changes are now listed in [docs/migration-0.5.md](docs/migration-0.5.md).
+- **`apply_changes` contract is followable.** A revision may come from
+  `read_file` or the last write's result; `REVISION_MISMATCH` no longer hands
+  back the new revision (pasting it with stale line numbers edited the wrong
+  line); malformed revisions are `INVALID_ARGUMENT`; `read_file` gains
+  `line_numbers`; `line`/`start_line` shorthands are accepted where
+  unambiguous; an identical `create` is an idempotent success; untouched lines
+  keep their original line endings; no-op replaces report +0 -0.
+- **Interactive stdin works without a TTY.** `exec_command` gains
+  `keep_stdin_open`; writing to a command whose stdin is closed explains why
+  (`details.reason`) and how to recover. `output_refs` are always returned,
+  `read_output` accepts a bare command id plus `stream` and reports `status`
+  and `exit_code`. Retention TTL starts when a client first observes the
+  terminal state. Killing an exited command reports no signal. On Windows,
+  kill/timeout terminates the whole process tree, and backslash/drive paths in
+  commands are checked against the workspace boundary.
+- **Repeat-failure advice** ignores `INTERNAL_ERROR`, resets after a
+  successful writing `exec_command`/`kill_command`, and forgets history after
+  60 s. Idempotency replays ignore arguments equal to their schema default.
+- **Telemetry**: events carry `install` and `build` (source hash) so modified
+  copies can be told apart from the published wheel; schema rejections are
+  counted as `err_INVALID_PARAMS` (unknown tool names only in
+  `unknown_tool_calls`); `tool_summary` gains `already_applied`; a deliberate
+  kill is outcome `killed`, not a failure, and `running` is no longer counted
+  as an outcome; benchmarks and `make` targets default telemetry off.
+- **Legacy breaker telemetry remains separate.** Historical
+  `REPEATED_CALL_BLOCKED` refusals count only as `breaker_blocks`; current
+  Runtime emits advice instead and counts every real execution normally.
+  See [docs/telemetry.md](docs/telemetry.md) for cross-version comparisons.
+
 ## 0.5.0 - 2026-09-14
 
 The v0.5.0 reliability work. Migration notes:

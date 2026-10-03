@@ -1,4 +1,7 @@
 PYTHON ?= python3
+# Local runs (tests, benchmarks, dogfood, agent evals) must never send product
+# telemetry; `make CODING_TOOLS_MCP_TELEMETRY=on ...` overrides it explicitly.
+export CODING_TOOLS_MCP_TELEMETRY ?= off
 PROJECT_VERSION := $(shell $(PYTHON) -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
 RELEASE_TAG ?= v$(PROJECT_VERSION)
 COMPLIANCE_RUNNER := PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m tests.compliance.runner

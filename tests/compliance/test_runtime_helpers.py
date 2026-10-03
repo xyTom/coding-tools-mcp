@@ -143,11 +143,16 @@ class RuntimeHelperTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "COMMAND_SPAWN_FAILED")
 
     def test_windows_process_termination_distinguishes_graceful_and_force(self) -> None:
+        """Verify both Windows termination modes kill the full tree without console signals."""
         class FakeProcess:
             pid = 123
 
             def __init__(self) -> None:
                 self.calls: list[object] = []
+
+            def poll(self) -> None:
+                """Simulate a process that is still running when tree cleanup starts."""
+                return None
 
             def send_signal(self, value: object) -> None:
                 self.calls.append(("send_signal", value))
@@ -167,10 +172,19 @@ class RuntimeHelperTests(unittest.TestCase):
                 return False
             return builtins.hasattr(value, name)
 
+        tree_kills: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            """Capture tree-kill arguments and simulate successful taskkill completion."""
+            tree_kills.append(argv)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+
         with (
             patch.object(processes_module.os, "name", "nt"),
+            patch.dict(os.environ, {"SystemRoot": r"C:\Windows"}),
             patch.object(processes_module, "hasattr", side_effect=fake_hasattr, create=True),
             patch.object(processes_module.signal, "CTRL_BREAK_EVENT", 999, create=True),
+            patch.object(processes_module.subprocess, "run", side_effect=fake_run),
         ):
             graceful = FakeProcess()
             processes_module.terminate_process_group(  # type: ignore[arg-type]
@@ -184,8 +198,11 @@ class RuntimeHelperTests(unittest.TestCase):
                 force=True,
             )
 
-        self.assertEqual(graceful.calls, [("send_signal", 999), ("wait", 1)])
-        self.assertEqual(forced.calls, ["kill", ("wait", 1)])
+        # CTRL_BREAK needs a shared console and terminate() only ends the
+        # shell, so both paths kill the whole tree with taskkill instead.
+        self.assertEqual(tree_kills, [[r"C:\Windows\System32\taskkill.exe", "/T", "/F", "/PID", "123"]] * 2)
+        self.assertEqual(graceful.calls, [("wait", 1)])
+        self.assertEqual(forced.calls, [("wait", 1)])
 
     def test_atomic_patch_commit_rolls_back_all_files_after_mid_commit_failure(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -2710,11 +2727,11 @@ class ErrorTextTerminalityTests(unittest.TestCase):
         text = self.error_text("COMMAND_NOT_FOUND", "Command not found.")
         self.assertEqual(text.splitlines()[0], "COMMAND_NOT_FOUND: Command not found.")
 
-    def test_terminal_failure_says_so_and_forbids_a_bare_retry(self) -> None:
+    def test_nonretryable_failure_requires_a_changed_condition(self) -> None:
         text = self.error_text("COMMAND_NOT_FOUND", "Command not found.", category="not_found")
         self.assertIn("Category: not_found.", text)
         self.assertIn("Retryable: no.", text)
-        self.assertIn("Do not repeat this call unchanged.", text)
+        self.assertIn("Do not repeat this call unchanged unless the underlying condition has changed.", text)
 
     def test_retryable_failure_is_not_told_to_stop(self) -> None:
         text = self.error_text(
@@ -2751,7 +2768,7 @@ class ErrorTextTerminalityTests(unittest.TestCase):
             text.splitlines(),
             [
                 "COMMAND_NOT_FOUND: Command not found.",
-                "Category: not_found. Retryable: no. Do not repeat this call unchanged.",
+                "Category: not_found. Retryable: no. Do not repeat this call unchanged unless the underlying condition has changed.",
                 "Retry: Start over with exec_command.",
             ],
         )
@@ -2774,7 +2791,7 @@ class ErrorTextTerminalityTests(unittest.TestCase):
                     )
                     self.assertIn("COMMAND_NOT_FOUND", text)
                     self.assertIn("Retryable: no", text)
-                    self.assertIn("Do not repeat this call unchanged.", text)
+                    self.assertIn("Do not repeat this call unchanged unless the underlying condition has changed.", text)
                     self.assertIn("exec_command", text)
                     self.assertIn(str(server_module.COMPLETED_COMMAND_TTL_SECONDS), text)
                     self.assertIn(str(server_module.MAX_RETAINED_OUTPUT_COMMANDS), text)

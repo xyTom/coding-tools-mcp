@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
 import shutil
 import socket
@@ -21,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmarks.mcp_http import McpHttpClient, connect_with_retry  # noqa: E402
+from benchmarks.mcp_http import McpHttpClient, connect_with_retry, local_server_env  # noqa: E402
 
 
 @dataclass
@@ -72,12 +71,13 @@ def prepare_workspace(root: Path) -> Path:
 
 
 def start_server(command: str, workspace: Path, port: int) -> subprocess.Popen[bytes]:
+    """Launch the formatted latency server command with telemetry disabled by default."""
     rendered = command.format(
         python=shlex.quote(sys.executable),
         workspace=shlex.quote(str(workspace)),
         port=port,
     )
-    env = os.environ.copy()
+    env = local_server_env()
     env["CODING_TOOLS_MCP_WORKSPACE"] = str(workspace)
     return subprocess.Popen(
         shlex.split(rendered),

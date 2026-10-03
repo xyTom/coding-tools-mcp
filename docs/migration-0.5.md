@@ -53,6 +53,9 @@ truncation wording and the continuation hint are unchanged.
 A client that compared `read_file` text to file bytes must strip the first line
 or read `structuredContent.content` instead, which is unchanged.
 
+An optional `line_numbers: true` argument additionally prefixes each text line
+with `<n>\t`, the numbering `apply_changes` uses; the default text is as above.
+
 ### `exec_command` default process lifetime is 300s
 
 `timeout_ms` defaults to 300000 instead of 30000. It always meant total process
@@ -64,38 +67,67 @@ maximum is unchanged at 600000.
 Set `timeout_ms` explicitly if you relied on the old default to bound runaway
 commands.
 
+## `apply_patch` behavior changes since 0.3
+
+These changes shipped in 0.5.0 without being listed as breaking. When
+migrating clients or prompts from 0.3:
+
+- Check destination paths before additions or moves if overwriting would be
+  a mistake; 0.3 refused those overwrites.
+- Include context when an insertion belongs somewhere other than EOF;
+  pure additions no longer go at the top of the file.
+- Combine all hunks for a file into one update block and order them from top
+  to bottom. Repeated primary paths are rejected rather than chained.
+- Replace ignored or abbreviated `@@` labels with real whole-line anchors.
+  Recheck patches that relied on unrestricted searches or ignored EOF markers.
+- Inspect matching warnings, and use `idempotency_key` for safe retries after
+  a lost response. A successful result no longer guarantees a write happened;
+  check `already_applied`.
+
+See the authoritative [patch behavior reference](tools-and-schemas.md#patch-behavior)
+for locating, overwrite, whitespace-matching, and already-applied rules,
+including the intentional differences from Codex.
+
 ## New behavior you may want to adopt
 
 ### `apply_changes`
 
 A new tool for line-addressed editing: you name an action (`create`, `write`,
-`edit`, `delete`, `move`, `copy`) and a path. Existing files also use the
-`revision` `read_file` reported. Nothing has to match textually, and a file
-that changed since you read it is refused with `REVISION_MISMATCH` rather than
-silently overwritten.
+`edit`, `delete`, `move`, `copy`) and a path. Existing files also need a
+`revision`: the one `read_file` reported, or the one the latest
+`apply_changes`/`apply_patch` result printed for that path, with line numbers
+from that same version. Nothing has to match textually, and a file that changed
+since is refused with `REVISION_MISMATCH` rather than silently overwritten; the
+error does not repeat the new revision, so re-read the file to get it with its
+current line numbers. A malformed revision (a placeholder or abbreviated hash)
+is `INVALID_ARGUMENT`.
 
 `write` remains an upsert: it requires `revision` when its path exists and may
 omit it when creating a missing path. `create` rejects `revision` and asserts
 absence; `edit`, `delete`, `move`, and `copy` require it. A path may appear once
 per call; put several line edits for one file in that file's single `edit`
-change. Replacement content may use LF, CRLF, or CR separators; they are
-normalized before the file's existing line-ending convention is restored.
+change. Replacement content may use LF, CRLF, or CR separators; untouched
+lines keep their own line endings byte-for-byte, including in mixed or bare-CR
+files. A `create` that repeats a file's exact current content is an
+`already_applied` no-op.
 See the contract for the full semantics, including the line-content rules
 (`""` is zero lines; a trailing newline adds a blank line) and the
 `insert_after` / `insert_before` boundaries.
 
 ### `apply_patch` recovery
 
-- `@@ <context>` is a forward text anchor, not a language scope. The anchor
-  must be found at or after the current search cursor, and the hunk body is
-  matched only after it. This prevents fallback to an earlier identical block
-  without trying to infer Python indentation, JavaScript braces, or any other
-  language structure. A missing anchor is `PATCH_CONTEXT_NOT_FOUND`.
+- `@@ <context>` is a text anchor, not a language scope. As in Codex, it
+  moves a forward search cursor and the hunk takes the first match after it;
+  consecutive `@@` lines are found in turn. A missing anchor is
+  `PATCH_CONTEXT_NOT_FOUND`. An unanchored hunk that matches more than once
+  after the cursor is `PATCH_CONTEXT_AMBIGUOUS`; add an `@@` line to pick the
+  copy. The full rules are in
+  [tools-and-schemas.md](tools-and-schemas.md#locating-a-hunk).
 - A pure-addition update hunk validates any `@@ <context>` first and then
   appends at EOF, matching Codex's current placement semantics. Anchorless
   pure additions also append at EOF.
 - `*** End of File` participates in locating non-empty old/context blocks
-  instead of being ignored.
+  instead of being ignored: the placement must reach the end of the file.
 - Matching is graded: exact, then ignoring trailing whitespace, then ignoring
   indentation width. The grade actually used is reported in `match_quality`,
   so a downgrade is visible rather than silent.
@@ -105,15 +137,19 @@ See the contract for the full semantics, including the line-content rules
 - Failure returns the hunk index, nearby numbered text, and candidate match
   positions, so the next attempt can be aimed rather than guessed.
 - A patch whose changes are already present reports `already_applied` instead
-  of failing, provided the hunk's result is locatable: an exact or
-  trailing-whitespace match of a block that carries a context line, or a
-  multi-line addition. A context-free single line found somewhere in the file
-  is a coincidence and still fails. Evidence must also be non-blank, unique,
-  and inside the same forward anchor/cursor window and EOF constraints.
+  of failing, provided the hunk's post-image is located uniquely, by the same
+  rules as a normal placement, with non-trivial evidence (blank and
+  punctuation-only lines never count). A context-free single line found
+  somewhere in the file is a coincidence and still fails, and so does a patch
+  in which any hunk is neither applicable nor provably applied. The exact
+  evidence rules are in
+  [tools-and-schemas.md](tools-and-schemas.md#primary-paths-overwrites-and-idempotency).
 - `apply_patch` and `apply_changes` accept an optional `idempotency_key`. A
   replay of the same key with the same arguments returns the recorded result
   instead of doing the work twice; reusing the key for different arguments is
-  `IDEMPOTENCY_KEY_REUSED`, and a `dry_run` result is never recorded.
+  `IDEMPOTENCY_KEY_REUSED`, and a `dry_run` result is never recorded. An
+  argument spelled out at its schema default (`"dry_run": false`) is the same
+  request as one that omits it.
   Concurrent duplicates under the same tool and key wait for the first call
   and replay its successful result.
 - `apply_patch` now matches Codex path semantics: an operation's resolved
@@ -154,20 +190,12 @@ installed for `exec_command`.
 
 ## Behavior changes that need no action
 
-- **Repeat-failure circuit breaker.** The third byte-identical call that would
-  produce the same deterministic error is refused with `REPEATED_CALL_BLOCKED`
-  instead of failing the same way again. Changing an argument gives that call a
-  fresh budget. A successful non-dry-run `apply_patch` or `apply_changes` clears
-  the breaker only when it wrote, moved, copied, or deleted something;
-  `already_applied` results do not clear it. The first terminal observation of
-  each command from `exec_command`, `write_stdin`, `read_output`, or
-  `kill_command` also clears it whenever that command could write: in
-  unrestricted mode, through a structured-only write path, when
-  structured-only is not actually enforced, or when Landlock setup failed open
-  for that launch. Re-polling the same completed command does not clear it
-  again. A failure that began before one of these resets is not counted as a
-  strike in the new post-reset generation.
-  `IDEMPOTENCY_KEY_REUSED` does not count because its recovery is a new key.
+- **Repeated failures now produce advice, not a hard block.** The third and
+  later identical calls run normally and return their actual result. Clients
+  should use the original error and the visible `repeat_warning`, rather than
+  expecting `REPEATED_CALL_BLOCKED`. Task-level loop budgets belong in the
+  agent host. See [repeated-failure advice](runtime-contract-v0.3.md#repeated-failure-advice)
+  for diagnostic counters, expiration, and compatibility details.
 - **Telemetry counts operations truthfully.** A command that exits nonzero,
   times out, or dies on a signal is no longer recorded as a successful tool
   call, and its terminal outcome is counted once however many times the command

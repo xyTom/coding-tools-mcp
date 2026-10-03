@@ -29,7 +29,8 @@ example:
 ```
 
 Calling `write_stdin` with empty `chars` means “wait/poll”; non-empty `chars`
-interacts with the process. `read_output` is for paging retained stdout/stderr
+interacts with the process, which requires starting it with
+`keep_stdin_open: true` (or `tty: true` on POSIX). `read_output` is for paging retained stdout/stderr
 when a result explicitly says output was truncated (or when compact verbosity
 was requested). It is not an extra step for every command.
 

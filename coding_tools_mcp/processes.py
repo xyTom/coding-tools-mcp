@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 import os
 import signal
 import subprocess
@@ -17,13 +18,46 @@ COMMAND_BUFFER_BYTES = 524_288
 # transport-level "the tool call executed". A build that exits 1 is a
 # successful tool call and a failed operation; counting it as a success is how
 # telemetry came to report failed builds as wins.
-COMMAND_OUTCOMES = ("exited_0", "exited_nonzero", "timeout", "signal", "spawn_error", "running")
+# `killed` is a command a client deliberately stopped with kill_command: the
+# stop was the requested operation, so it is not a failure.
+COMMAND_OUTCOMES = ("exited_0", "exited_nonzero", "timeout", "signal", "spawn_error", "running", "killed")
 # Fraction of the per-stream budget frozen as the head segment. The head keeps
 # the earliest output (command echo, first error) that a tail-only rolling
 # buffer would lose first, mirroring the head+tail retention used by other
 # agent runtimes.
 COMMAND_HEAD_BUFFER_DIVISOR = 8
 HARD_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
+WINDOWS_TREE_KILL_TIMEOUT_SECONDS = 5
+
+
+def _kill_windows_process_tree(pid: int) -> None:
+    """Kill a Windows process and every descendant.
+
+    Windows has no process groups to signal: terminating the shell leaves its
+    children running and holding the output pipes open. ``taskkill /T`` walks
+    the parent/child tree. Failures are ignored; the caller falls back to
+    terminating the direct child.
+    """
+
+    try:
+        # SystemRoot belongs to the server environment, not exec_command's
+        # caller-supplied env. Never search the workspace or PATH for cleanup.
+        system_root = os.environ.get("SystemRoot", "")
+        if not ntpath.isabs(system_root) or not ntpath.splitdrive(system_root)[0]:
+            return
+        system_dir = ntpath.join(system_root, "System32")
+        subprocess.run(
+            [ntpath.join(system_dir, "taskkill.exe"), "/T", "/F", "/PID", str(pid)],
+            cwd=system_dir,
+            env={"SystemRoot": system_root, "WINDIR": system_root},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=WINDOWS_TREE_KILL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except Exception:
+        pass
 
 
 def terminate_process_group(
@@ -32,16 +66,19 @@ def terminate_process_group(
     *,
     force: bool = False,
 ) -> None:
+    """Stop a process tree or group, escalating or falling back to direct-child cleanup."""
+    if os.name == "nt":
+        # CTRL_BREAK needs a console shared with the child, which a stdio
+        # server usually lacks, and process.terminate() only ends cmd.exe.
+        # Kill the whole tree first, then make sure the direct child is gone.
+        if process.poll() is None:
+            _kill_windows_process_tree(process.pid)
+        try:
+            process.wait(timeout=1)
+            return
+        except Exception:
+            pass
     if not hasattr(os, "killpg"):
-        if os.name == "nt" and not force:
-            event = getattr(signal, "CTRL_BREAK_EVENT", None)
-            if event is not None:
-                try:
-                    process.send_signal(event)
-                    process.wait(timeout=1)
-                    return
-                except Exception:
-                    pass
         try:
             if force:
                 process.kill()
@@ -161,7 +198,21 @@ class CommandRun:
     terminating: bool = False
     pty_master_fd: int | None = None
     on_evict: Any = None
+    # Set by kill_command before it signals a live process, so the terminal
+    # outcome is attributed to the deliberate stop rather than a failure.
+    killed_by_client: bool = False
+    # When a client response first reported this command's terminal state.
+    # Retention TTL counts from here, not from process exit, so a command that
+    # finished unobserved is never expired before anyone saw its result.
+    observed_at: float | None = None
     _stdin_closed: bool = False
+
+    @property
+    def stdin_closed(self) -> bool:
+        """Return whether piped stdin is unavailable; an attached PTY remains writable."""
+        return self.pty_master_fd is None and (
+            self._stdin_closed or self.process.stdin is None or self.process.stdin.closed
+        )
 
     @property
     def head_buffer_limit(self) -> int:
@@ -242,6 +293,7 @@ class CommandRun:
                 pass
 
     def snapshot_since_cursor(self, max_output_bytes: int) -> dict[str, Any]:
+        """Advance output cursors and return bounded stream tails with status and loss metadata."""
         self.refresh_status()
         with self.lock:
             stdout_omitted = max(0, self.stdout_start_offset - self.stdout_cursor)
@@ -254,14 +306,7 @@ class CommandRun:
             self.stderr_cursor = self.stderr_total_bytes
         stdout_truncation = truncate_output_bytes_tail(stdout_bytes, max_output_bytes)
         stderr_truncation = truncate_output_bytes_tail(stderr_bytes, max_output_bytes)
-        if self.timed_out:
-            status = "timeout"
-        elif self.terminating and self.process.poll() is None:
-            status = "running"
-        elif self.signal_name is not None:
-            status = "terminated"
-        else:
-            status = "running" if self.process.poll() is None else "exited"
+        status = self.status()
         payload: dict[str, Any] = {
             "command_id": self.command_id,
             "status": status,
@@ -291,7 +336,7 @@ class CommandRun:
             # The tool call itself executed; whether the command succeeded is
             # `operation_outcome`, and only that is what telemetry counts.
             "ok": True,
-            "operation_outcome": command_outcome(status, self.exit_code, self.signal_name, self.timed_out),
+            "operation_outcome": self.operation_outcome(status),
         }
         warnings: list[str] = list(self.warnings)
         if stdout_truncation.truncated:
@@ -306,7 +351,30 @@ class CommandRun:
             payload["warnings"] = warnings
         return payload
 
+    def status(self) -> str:
+        """Map process state to running/exited/terminated/timeout."""
+
+        if self.timed_out:
+            return "timeout"
+        if self.terminating and self.process.poll() is None:
+            return "running"
+        if self.signal_name is not None:
+            return "terminated"
+        return "running" if self.process.poll() is None else "exited"
+
+    def operation_outcome(self, status: str | None = None) -> str:
+        """Classify the command outcome, including timeouts and intentional client kills."""
+        status = self.status() if status is None else status
+        return command_outcome(
+            status,
+            self.exit_code,
+            self.signal_name,
+            self.timed_out,
+            killed=self.killed_by_client,
+        )
+
     def refresh_status(self) -> None:
+        """Enforce the deadline and collect exit state, draining readers and closing stdin."""
         if self.timeout_at is not None and not self.timed_out and self.process.poll() is None and time.time() >= self.timeout_at:
             self.timed_out = True
             terminate_process_group(self.process, signal.SIGTERM)
@@ -315,6 +383,8 @@ class CommandRun:
         if code is None:
             return
         self.drain_readers()
+        # A keep_stdin_open pipe has no reader left; release it.
+        self.close_stdin()
         self.exit_code = code
         self.terminating = False
         if code < 0:
@@ -374,13 +444,22 @@ class CommandRun:
         raise ValueError(f"Unknown output stream: {stream}")
 
 
-def command_outcome(status: str, exit_code: int | None, signal_name: str | None, timed_out: bool) -> str:
+def command_outcome(
+    status: str,
+    exit_code: int | None,
+    signal_name: str | None,
+    timed_out: bool,
+    *,
+    killed: bool = False,
+) -> str:
     """Classify one command snapshot into a :data:`COMMAND_OUTCOMES` value."""
 
     if timed_out or status == "timeout":
         return "timeout"
     if status == "running":
         return "running"
+    if killed:
+        return "killed"
     if signal_name is not None or status == "terminated":
         return "signal"
     return "exited_0" if exit_code == 0 else "exited_nonzero"

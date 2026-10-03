@@ -12,7 +12,8 @@ advertises 18:
 - `server_info`: server, workspace, automatic project context, policy, runtime,
   auth, protocol, and fixed-catalog metadata.
 - `check_exec_environment`: lightweight execution policy and Landlock status.
-- `read_file`: stream a bounded UTF-8 range without loading the whole file.
+- `read_file`: stream a bounded UTF-8 range without loading the whole file;
+  `line_numbers: true` numbers the text lines for `apply_changes`.
 - `list_dir`: list immediate or bounded-recursive directory entries.
 - `list_files`: iterate files with glob, ignore, hidden-file, sort, and cap
   controls.
@@ -102,25 +103,37 @@ final newline is an ordinary line the hunk can add or remove.
 
 ### Locating a hunk
 
-A hunk has no line numbers; it finds itself by its context. Matching proceeds
-from a forward-only cursor, so later hunks cannot silently jump back to an
-earlier occurrence. Two locators affect placement:
+A hunk has no line numbers; it finds itself by its context. Locating follows
+Codex's `apply_patch`: hunks are placed in file order from a forward-only
+cursor, and each successful match moves the cursor past the matched block, so
+a later hunk is never matched above an earlier one.
 
+- No `@@` anchor — the old/context block is searched from the cursor to the
+  end of the file. Exactly one match is used; more than one is
+  `PATCH_CONTEXT_AMBIGUOUS` (the one place this server is stricter than Codex,
+  which would take the first); none is `PATCH_CONTEXT_NOT_FOUND`.
 - `@@ <context>` — the text after `@@` is a language-agnostic text anchor, not
-  a parsed function/class/block scope. It must occur at or after the current
-  cursor; once found, old/context lines are searched only after that anchor.
-  Missing anchors fail with `PATCH_CONTEXT_NOT_FOUND`. This is intentionally
-  syntax-agnostic: Python indentation, braces, and other language constructs
-  do not define a search boundary. A unified-diff position header
-  (`@@ -1,4 +1,4 @@`) names line numbers this dialect does not use and reads as
-  no text anchor.
-- `*** End of File` — placed on its own line inside a hunk, it prefers the
-  placement that reaches the end of the file.
+  a parsed function/class/block scope. It must match a whole line (at the same
+  grades as context below) at or after the cursor; the first such line moves
+  the cursor just below it, and the hunk takes its **first** match after that.
+  The anchor is how a caller picks between repeated blocks: `@@ def
+  greet(name):` selects the copy under `greet` even when `farewell` has an
+  identical body. Python indentation, braces, and other language constructs
+  do not define a search boundary, so the first match may lie beyond the
+  function the anchor names.
+- Nested anchors — consecutive `@@` lines with no body between them are found
+  in turn, each after the previous one, and the hunk is matched after the
+  last. Every anchor must be found; a missing one at any level is
+  `PATCH_CONTEXT_NOT_FOUND`.
+- A unified-diff position header (`@@ -1,4 +1,4 @@`) names line numbers this
+  dialect does not use and reads as no text anchor.
+- `*** End of File` — placed on its own line inside a hunk, it requires the
+  placement to reach the end of the file, as in Codex.
 
 A hunk containing only added lines has no old/context block to locate. As in
-Codex, its `@@ <context>` anchor is still validated first, then the new lines
-are appended at EOF. Without an anchor, a pure-addition hunk simply appends at
-EOF.
+Codex, its `@@ <context>` anchors are still validated first, then the new
+lines are appended at EOF. Without an anchor, a pure-addition hunk simply
+appends at EOF.
 
 A blank context line may be written as `""` or as a single space; both mean the
 same empty line.
@@ -137,8 +150,10 @@ produces candidates decides the outcome:
 | indentation width | `strip()`, plus a uniform indent delta | `match_quality: "indent"` |
 
 Every downgrade is labeled in `match_quality` and repeated as a warning; none
-is silent. Ambiguity is checked at each grade — a fuzzy grade that matches two
-places is `PATCH_CONTEXT_AMBIGUOUS`, never a guess. Context lines are
+is silent. For an unanchored hunk, ambiguity is checked at each grade — a fuzzy
+grade that matches two places is `PATCH_CONTEXT_AMBIGUOUS`, never a guess; an
+anchored hunk takes the first match after its anchor at the first grade that
+matches. Context lines are
 reinstated from the file rather than from the patch, so a tolerated whitespace
 difference is preserved instead of being rewritten; added lines under the
 `indent` grade are re-indented by the block's uniform delta, and a delta that
@@ -165,25 +180,35 @@ state and an explicit `delete` record for the source path. This keeps the
 machine-readable evidence faithful even when a later operation makes the
 destination's final bytes equal to its original baseline.
 
-A hunk whose result is already in the file is skipped rather than failing, so
-replaying an envelope after a lost response returns success with
-`already_applied: true` and an `unchanged` operation. An update that changes
+A hunk that cannot be placed but whose result is provably already in the file
+is skipped rather than failing; if every hunk is skipped the result is success
+with `already_applied: true` and an `unchanged` operation. Codex has no such
+notion — it would fail — so this only ever turns a failure into a success, and
+only on strong evidence. An update that changes
 nothing is committed as a baseline assertion, so it does not touch the file's
 mtime. `*** Move to:` is still a write when it relocates the file, even if all
 of that block's hunks were already present; such a result reports
 `already_applied: false` and an operation of `move`.
 
-That claim turns a miss into a success, so it takes locatable evidence: the
-hunk's `new` block has to be found at the `exact` or `trailing_ws` grade, and
-the hunk must carry either a context line — which sits inside `new` and so
-anchors the block where the hunk belonged — or a multi-line addition. A hunk
-with no context whose single added line is some common line (`pass`,
-`return None`) is not evidence of anything, and fails with
-`PATCH_CONTEXT_NOT_FOUND` and its repair data instead. The evidence must be
-unique inside the same forward anchor/cursor window and `*** End of File`
-constraint. A result made only of blank lines is never evidence: every
-newline-terminated file has a trailing empty element in the patcher's line
-model.
+That claim turns a miss into a success, so it takes locatable evidence. The
+hunk's post-image (its context plus added lines) is located by the same rules
+as a normal placement — after the cursor and any `@@` anchors, `*** End of
+File` at EOF — at the `exact` or `trailing_ws` grade only, and must be unique. Blank and punctuation-only lines
+(`}`, `)`, `];`) are never evidence. A hunk that adds lines must add at least
+one evidence line, and the located post-image must hold at least two evidence
+lines; an anchor line directly above it counts as one. So `@@ [server]` with
+`-timeout = 20` / `+timeout = 30` and a blank context line is not "already
+applied" just because `timeout = 30` occurs further down in `[client]`, and a
+context-free single added line (`pass`, `x = 2`) is a coincidence, not a
+completed edit; both fail with `PATCH_CONTEXT_NOT_FOUND` and repair data. A
+pure deletion is already applied only when evidence-bearing context locates
+uniquely and the removed lines are no longer there. A hunk whose pre-image
+still matches is applied, exactly as Codex would: resending `@@` /
+` import os` / `+import sys` adds a second `import sys`, and a context-free
+pure addition appends again. Send `idempotency_key` to make a resend after a
+lost response safe. If any hunk is neither applicable nor provably already
+applied, the whole patch fails. Skipped hunks do not count toward `additions`
+or `removals`.
 
 `idempotency_key` goes further: the runtime keeps one 64-entry
 least-recently-used cache across both write tools, keyed by `(tool, key)`, and
@@ -194,7 +219,8 @@ An evicted key does the work again. A key names one request. It is recorded
 with a fingerprint of the arguments that produced it, and reusing it for
 anything else — a different patch, a different `dry_run` — is
 `IDEMPOTENCY_KEY_REUSED` rather than a replay of work that was never done for
-those arguments. Failures are never recorded, and neither is a dry run: it
+those arguments. Arguments equal to their schema default are left out of that
+fingerprint, so a retry that adds an explicit `"dry_run": false` replays. Failures are never recorded, and neither is a dry run: it
 changed nothing, so it must never answer a later real apply.
 
 ### Success and failure fields
@@ -235,6 +261,17 @@ Terminate that command when needed:
 {"command_id":"abc","signal":"KILL"}
 ```
 
+Edit lines by number with the `revision` from `read_file` (or from the latest
+`apply_changes`/`apply_patch` result for that path), using line numbers from
+that same version of the file. Combine every edit to one file into one change:
+
+```json
+{"changes":[{"action":"edit","path":"app.py","revision":"<64 hex characters>","edits":[{"op":"replace","start_line":10,"end_line":12,"content":"new line"},{"op":"insert_after","line":20,"content":"added"}]}]}
+```
+
+The full `apply_changes` semantics are in the
+[runtime contract](runtime-contract-v0.3.md#apply_changes).
+
 Page a truncated stream using the returned reference:
 
 ```json
@@ -259,8 +296,9 @@ lifetime expires, at which point the runtime kills its process group and the
 command reports `status: "timeout"`.
 
 Only truncated terminal output returns a `read_output` next action by default.
-`output_ref` values are `command:<id>:stdout` or `command:<id>:stderr`; offsets
-are stream-specific absolute byte positions. Runtime limits bound active
+Every command result still carries `output_refs`; `output_ref` values are
+`command:<id>:stdout` or `command:<id>:stderr` (a bare command id plus `stream`
+is accepted too); offsets are stream-specific absolute byte positions. Runtime limits bound active
 commands, retained completed commands, per-command output, total output, and
 retention time.
 
@@ -274,7 +312,9 @@ budget, redirect it to a file (`cmd > out.log 2>&1`) and page it with
 
 Use `tty: true` only when a program requires a terminal. POSIX receives a real
 PTY (`isatty()` is true). This build returns `TTY_UNSUPPORTED` on Windows rather
-than labeling pipes as a TTY.
+than labeling pipes as a TTY. To send input with `write_stdin` without a TTY
+(including on Windows), start the command with `keep_stdin_open: true`; by
+default stdin is closed after the optional `stdin` text so readers get EOF.
 
 ## Permission modes
 

@@ -52,7 +52,7 @@ from .oauth import (
     validate_access_token,
     verify_pkce,
 )
-from .breaker import RepeatFailureBreaker, argument_fingerprint
+from .breaker import REPEATED_CALL_BLOCKED, RepeatFailureBreaker, argument_fingerprint
 from .changes import (
     CHANGE_ACTIONS,
     EDIT_OPERATIONS,
@@ -60,6 +60,7 @@ from .changes import (
     MAX_EDITS_PER_CHANGE,
     ChangeRequest,
     apply_line_edits,
+    normalize_revision,
     parse_changes,
     reject_duplicate_paths,
 )
@@ -80,7 +81,6 @@ from .processes import (
     COMMAND_HEAD_BUFFER_DIVISOR,
     COMMAND_OUTCOMES,
     CommandRun,
-    command_outcome,
     spawn_process,
     start_reader_threads,
     start_command_watchdog,
@@ -232,13 +232,17 @@ IDEMPOTENT_TOOLS = frozenset({"apply_patch", "apply_changes"})
 # The write primitives. A success here changes the tree every other tool reads,
 # which is what makes a previously deterministic failure worth re-attempting.
 WORKSPACE_WRITE_TOOLS = frozenset({"apply_patch", "apply_changes"})
+# Starting or killing a command that may write changes the tree just as
+# surely, only at a moment the server cannot observe. Polling tools
+# (write_stdin, read_output) are deliberately absent: a loop on those must
+# still be stoppable.
+BREAKER_RESET_COMMAND_TOOLS = frozenset({"exec_command", "kill_command"})
 IDEMPOTENCY_CACHE_ENTRIES = 64
 IDEMPOTENCY_KEY_MAX_LENGTH = 128
 # Command ids remembered only to keep one finished command from being counted
 # as a failed operation once per poll. Comfortably larger than the retained
 # command set, so a command cannot outlive its own ledger entry.
 COUNTED_OUTCOME_LEDGER_ENTRIES = 512
-REPEATED_CALL_BLOCKED = "REPEATED_CALL_BLOCKED"
 IDEMPOTENCY_KEY_REUSED = "IDEMPOTENCY_KEY_REUSED"
 IDEMPOTENCY_KEY_DESCRIPTION = (
     "Names this exact request so a retry after a lost response replays the recorded result "
@@ -249,12 +253,17 @@ IDEMPOTENCY_KEY_DESCRIPTION = (
     f"{IDEMPOTENCY_CACHE_ENTRIES} most recently used keys are kept across all tools."
 )
 _COMMAND_RECOVERY_HINT = (
-    "This command_id has expired or never existed; a finished command keeps its"
-    f" output for {COMPLETED_COMMAND_TTL_SECONDS} seconds and only the last"
-    f" {MAX_RETAINED_OUTPUT_COMMANDS} commands are retained. Retrying with the"
+    "This command_id is not retained. It never existed, or it was dropped: a"
+    f" finished command is kept for {COMPLETED_COMMAND_TTL_SECONDS} seconds after a"
+    " response first reported its exit, finished commands are evicted beyond the"
+    f" last {MAX_RETAINED_OUTPUT_COMMANDS} or {MAX_RUNTIME_OUTPUT_BYTES // (1024 * 1024)} MB"
+    " of retained output, and a server restart drops them all. Retrying with the"
     " same command_id cannot succeed. Start the work again with exec_command and"
     " use the command_id it returns."
 )
+# Statuses with which a response reports that a command has finished. A
+# kill_command `terminating` result is not one: the process is still alive.
+TERMINAL_COMMAND_STATUSES = frozenset({"exited", "terminated", "timeout", "killed"})
 SHELL_CONTROL_TOKENS = {"|", "||", "&", "&&", ";", "(", ")"}
 REDIRECTION_TOKENS = {">", ">>", "<", "<>", ">&", "<&", "&>", "&>>"}
 HEREDOC_TOKENS = {"<<", "<<<"}
@@ -766,7 +775,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "read_file": ToolSpec(
         title="Read file",
-        description="Read a UTF-8 text file slice inside the configured workspace.",
+        description=(
+            "Read a UTF-8 text file slice inside the configured workspace. The result text opens with a "
+            "banner carrying the file's revision (the token apply_changes needs). Pass "
+            "line_numbers=true to prefix each line with its number and a tab in the text, which is the "
+            "numbering apply_changes edits use."
+        ),
         read_only=True,
         idempotent=True,
     ),
@@ -792,10 +806,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Apply patch",
         description=(
             "Stage, validate, and atomically apply a V4A patch envelope. Hunks are located from a "
-            "forward-only search cursor. `@@ <context>` is a language-agnostic text anchor that advances "
-            "that cursor; it does not name a function or block. A missing anchor fails rather than falling "
-            "back before it. A pure-addition hunk validates its anchor, if any, then appends at EOF. "
-            "`*** End of File` can disambiguate a non-empty hunk at the tail. A blank context line may be "
+            "forward-only search cursor, in file order. `@@ <context>` is a language-agnostic text anchor "
+            "that advances that cursor; it does not name a function or block. An anchored hunk takes the "
+            "first match after its anchor, so use `@@` to pick between repeated blocks; consecutive `@@` "
+            "lines are found in turn. An unanchored hunk that matches more than once after the cursor is "
+            "PATCH_CONTEXT_AMBIGUOUS. A missing anchor fails rather than falling back before it. A "
+            "pure-addition hunk validates its anchor, if any, then appends at EOF. `*** End of File` "
+            "requires the hunk to match at the tail. A blank context line may be "
             "written as \"\" or as a single space. Matching is "
             "graded exact, then ignoring trailing whitespace, then ignoring indentation width, and the "
             "grade actually used comes back as match_quality. Success returns each file's revision, "
@@ -812,14 +829,21 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description=(
             "Apply line-addressed file changes atomically. Prefer this over apply_patch when you know "
             "the line numbers: nothing has to match. Each change names an action (create, write, edit, "
-            "delete, move, copy), and a path. write is an upsert: it needs the revision read_file reported "
-            "when the path exists, but may omit it when creating a missing path. edit, delete, move, and "
-            "copy always need that revision; create rejects it and asserts absence. edit takes line "
-            "operations (replace, delete, insert_after, insert_before) whose numbers all refer to the "
-            "file as read, not to the result of earlier edits in the same call. content is whole lines: "
-            "\"\" is zero lines and a trailing newline adds a blank line. One path per call; combine "
-            "multiple line edits for one file into that file's single edit change. Example: {\"changes\":[{\"action\":\"edit\","
-            "\"path\":\"app.py\",\"revision\":\"<from read_file>\",\"edits\":[{\"op\":\"replace\","
+            "delete, move, copy), and a path. revision is the 64-hex value from read_file, or from the "
+            "latest apply_changes/apply_patch result for that path (its text prints path: revision=...); "
+            "a dry run's would_be_revision is not written and cannot be used. Line numbers must come "
+            "from the same version of the file as the revision: after any write, use the new revision "
+            "with the new line numbers, or re-read (read_file line_numbers=true shows them). write is an "
+            "upsert: it needs the revision when the path exists, but may omit it when creating a missing "
+            "path. edit, delete, move, and copy always need it; create rejects it and asserts absence "
+            "(re-sending identical content is a no-op). edit takes line operations: replace and delete "
+            "use start_line and optional end_line (or line for one line); insert_after and "
+            "insert_before use line. All numbers refer to the file as read, not to the result of "
+            "earlier edits in the same call. content is whole lines: \"\" is zero lines and a trailing "
+            "newline adds a blank line. A path may appear once per call: combine all line edits for "
+            "one file into that file's single edit change. Example, with revision set to the value "
+            "read_file printed: {\"changes\":[{\"action\":\"edit\",\"path\":\"app.py\","
+            "\"revision\":\"<64-hex revision from read_file>\",\"edits\":[{\"op\":\"replace\","
             "\"start_line\":10,\"end_line\":12,\"content\":\"new line\"}]}]}"
         ),
         destructive=True,
@@ -830,7 +854,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "Run a bounded command under runtime policy. Pass workdir explicitly for reconnect-safe paths. "
             "yield_time_ms is only how long this call waits (default 10s); timeout_ms is the total process "
             "lifetime (default 300s). A command still running when the call returns keeps running under its "
-            "command_id; poll it with write_stdin or read_output. Example: "
+            "command_id; poll it with write_stdin (chars=\"\"), or page output with read_output using the "
+            "returned output_refs. stdin is closed after the optional stdin text unless keep_stdin_open=true. "
+            "Example: "
             "{\"cmd\":\"pytest -q\",\"workdir\":\".\",\"yield_time_ms\":30000}. "
             "Retained output is bounded per stream; for very large output redirect to a file "
             "(cmd > out.log 2>&1) and page it with read_file or search_text."
@@ -843,7 +869,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Write stdin",
         description=(
             "Poll or interact with a running command by command_id. Empty chars wait for output; non-empty "
-            "chars writes to stdin. Example: {\"command_id\":\"abc\",\"chars\":\"\",\"yield_time_ms\":10000}."
+            "chars writes to stdin, which requires a command started with keep_stdin_open=true or tty=true "
+            "(POSIX only). Example: {\"command_id\":\"abc\",\"chars\":\"\",\"yield_time_ms\":10000}."
         ),
     ),
     "kill_command": ToolSpec(
@@ -857,7 +884,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "read_output": ToolSpec(
         title="Read output",
         description=(
-            "Read retained command output using an output_ref returned by exec_command/write_stdin. "
+            "Read retained command output and the command's status/exit_code. output_ref is a ref from "
+            "output_refs (command:<id>:stdout), or a bare command_id / command:<id> with stream "
+            "(default stdout). "
             "Each stream retains the earliest output (head) plus the most recent output (rolling tail); "
             "bytes between them may be evicted and are reported via evicted_gap_bytes. "
             "Example: {\"output_ref\":\"command:abc:stdout\",\"offset\":0,\"limit\":4096}."
@@ -1058,6 +1087,11 @@ def truncation_fields(truncation: TextTruncation) -> dict[str, Any]:
         "output_lines": truncation.output_lines,
         "output_bytes": truncation.output_bytes,
     }
+
+
+def command_output_refs(command_id: str) -> dict[str, str]:
+    """Return stable stdout and stderr paging references for a command."""
+    return {stream: f"command:{command_id}:{stream}" for stream in ("stdout", "stderr")}
 
 
 def read_output_action(output_ref: str, *, offset: int = 0, limit: int | None = None) -> dict[str, Any]:
@@ -2047,28 +2081,34 @@ class Runtime:
         *,
         context: RequestContext | None = None,
     ) -> dict[str, Any]:
+        """Validate and dispatch a tool call with idempotency, breaker, and telemetry handling."""
         started_at = time.time()
         args = arguments or {}
         handler = self._tool_handlers.get(name) if self._is_callable_tool(name) else None
         if handler is None:
+            self.record_rejected_tool_call(name, started_at=started_at, context=context)
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         spec = TOOL_REGISTRY[name]
-        validate_arguments(name, args)
+        try:
+            validate_arguments(name, args)
+        except JsonRpcError:
+            self.record_rejected_tool_call(name, started_at=started_at, context=context)
+            raise
         fingerprint = argument_fingerprint(args)
         idempotency_slot = self._idempotency_slot(name, args)
+        idempotency_fingerprint = (
+            argument_fingerprint(_drop_schema_defaults(name, args)) if idempotency_slot else fingerprint
+        )
         self._begin_idempotent_call(idempotency_slot)
         breaker_generation = self.breaker.generation
         try:
             # Inside the try: a key reused for different work is a tool error
             # the model can act on, not an exception that escapes the envelope.
-            replayed = self._recorded_result(idempotency_slot, fingerprint)
+            replayed = self._recorded_result(idempotency_slot, idempotency_fingerprint)
             if replayed is not None:
                 self.emit_tool_trace(name, args, replayed, started_at, context=context)
                 content = spec.content_builder(dict(replayed)) if spec.content_builder else None
                 return make_tool_result(name, replayed, is_error=replayed.get("ok") is False, content=content)
-            blocked = self.breaker.blocked_error_code(name, fingerprint)
-            if blocked is not None:
-                raise self._repeat_failure_error(name, blocked)
             payload = handler(args)
             workspace_mutated = payload.pop("_workspace_mutated", None)
             payload.setdefault("ok", True)
@@ -2085,7 +2125,9 @@ class Runtime:
                 self.breaker.reset()
             else:
                 self._reset_breaker_after_terminal_command(payload)
-            self._record_result(idempotency_slot, fingerprint, payload)
+                if name in BREAKER_RESET_COMMAND_TOOLS:
+                    self._reset_breaker_on_command_lifecycle(payload)
+            self._record_result(idempotency_slot, idempotency_fingerprint, payload)
             self.emit_tool_trace(name, args, payload, started_at, context=context)
             content = spec.content_builder(payload) if spec.content_builder else None
             return make_tool_result(name, payload, is_error=payload.get("ok") is False, content=content)
@@ -2137,6 +2179,33 @@ class Runtime:
         finally:
             self._finish_idempotent_call(idempotency_slot)
 
+    def record_rejected_tool_call(
+        self,
+        name: Any,
+        *,
+        started_at: float | None = None,
+        context: RequestContext | None = None,
+    ) -> None:
+        """Count a tools/call refused with -32602 before any handler ran.
+
+        A known tool is recorded as one failed call with ``INVALID_PARAMS``.
+        An unknown name only bumps a session counter: the name is whatever
+        the client sent, and must not become a per-tool statistic.
+        """
+
+        if isinstance(name, str) and self._is_callable_tool(name) and name in self._tool_handlers:
+            duration_ms = int((time.time() - started_at) * 1000) if started_at is not None else 0
+            self.telemetry.record_tool_call(
+                name,
+                ok=False,
+                error_code="INVALID_PARAMS",
+                duration_ms=max(duration_ms, 0),
+                truncated=False,
+                context=context,
+            )
+        else:
+            self.telemetry.record_unknown_tool_call()
+
     def _record_breaker_failure(
         self,
         name: str,
@@ -2163,10 +2232,11 @@ class Runtime:
             details = raw_details if isinstance(raw_details, dict) else {}
             error["details"] = {
                 **details,
-                "consecutive_identical_failures": repeats,
-                "breaker": (
-                    f"This exact call has now failed {repeats} times. "
-                    "Repeating it unchanged will be refused."
+                "recent_identical_failures": repeats,
+                "repeat_warning": (
+                    f"The server recently observed {repeats} failures of this request with {code}. "
+                    "Check the current state or adjust the request before retrying. "
+                    "Repeated failures do not block execution."
                 ),
             }
 
@@ -2178,26 +2248,6 @@ class Runtime:
         # client that already knows about it, so removing it from the catalog
         # never turns a working call into "unknown tool".
         return spec is not None and spec.callable_when_hidden
-
-    def _repeat_failure_error(self, name: str, error_code: str) -> ToolFailure:
-        return ToolFailure(
-            REPEATED_CALL_BLOCKED,
-            (
-                f"This exact {name} call already failed {self.breaker.limit} times with {error_code}"
-                " and is refused until its arguments change."
-            ),
-            category="validation",
-            retryable=False,
-            details={
-                "tool": name,
-                "error_code": error_code,
-                "attempts": self.breaker.limit,
-                "retry_hint": (
-                    "Do not resend these arguments. Read the current state (read_file, git_status,"
-                    " list_dir) and construct a different call."
-                ),
-            },
-        )
 
     def _idempotency_slot(self, name: str, args: dict[str, Any]) -> tuple[str, str] | None:
         if name not in IDEMPOTENT_TOOLS:
@@ -2374,6 +2424,7 @@ class Runtime:
         *,
         context: RequestContext | None = None,
     ) -> None:
+        """Record call telemetry and optionally emit a trace with redacted arguments."""
         raw_error = payload.get("error")
         error = raw_error if isinstance(raw_error, dict) else {}
         duration_ms = int((time.time() - started_at) * 1000)
@@ -2389,6 +2440,7 @@ class Runtime:
             truncated=bool(payload.get("truncated")),
             context=context,
             outcome=outcome,
+            already_applied=bool(payload.get("ok")) and payload.get("already_applied") is True,
         )
         if os.environ.get(f"{ENV_PREFIX}_TRACE") != "1":
             return
@@ -2407,6 +2459,39 @@ class Runtime:
         }
         print(json.dumps(event, sort_keys=True, separators=(",", ":")), file=sys.stderr, flush=True)
 
+    def _command_may_write(self, command_id: str | None) -> bool:
+        """Whether this command (or, unknown, any command) could write the tree."""
+
+        command = None
+        if command_id:
+            with self.commands_lock:
+                command = self.commands.get(command_id) or self.output_commands.get(command_id)
+        if command is not None:
+            # This launch-specific fact handles a Landlock ruleset install
+            # that failed open even when the host still advertises support.
+            return bool(command.workspace_may_write)
+        # Synthetic/embedder-provided command payloads have no retained
+        # CommandRun. Conservatively fall back to the advertised policy.
+        mutation = self.workspace_mutation_payload()
+        return (
+            not self.workspace_mutation.structured_only
+            or mutation.get("enforced") is not True
+            or bool(self._workspace_write_path_roots)
+        )
+
+    def _reset_breaker_on_command_lifecycle(self, payload: dict[str, Any]) -> None:
+        """Invalidate verdicts when a command that may write starts or is killed.
+
+        A background command can create the file a failed call was looking
+        for at any moment after it starts, and a kill can leave its partial
+        writes behind; neither is a terminal observation the breaker would
+        otherwise see in time.
+        """
+
+        command_id = payload.get("command_id")
+        if self._command_may_write(command_id if isinstance(command_id, str) else None):
+            self.breaker.reset()
+
     def _reset_breaker_after_terminal_command(self, payload: dict[str, Any]) -> None:
         """Invalidate stale verdicts once when a command could have written."""
 
@@ -2416,22 +2501,7 @@ class Runtime:
         command_id = payload.get("command_id")
         if not isinstance(command_id, str) or not command_id:
             return
-        with self.commands_lock:
-            command = self.commands.get(command_id) or self.output_commands.get(command_id)
-        if command is not None:
-            # This launch-specific fact handles a Landlock ruleset install
-            # that failed open even when the host still advertises support.
-            commands_may_write = command.workspace_may_write
-        else:
-            # Synthetic/embedder-provided command payloads have no retained
-            # CommandRun. Conservatively fall back to the advertised policy.
-            mutation = self.workspace_mutation_payload()
-            commands_may_write = (
-                not self.workspace_mutation.structured_only
-                or mutation.get("enforced") is not True
-                or bool(self._workspace_write_path_roots)
-            )
-        if not commands_may_write:
+        if not self._command_may_write(command_id):
             return
         with self._breaker_reset_commands_lock:
             if command_id in self._breaker_reset_commands:
@@ -2449,15 +2519,16 @@ class Runtime:
         later observer reports that same outcome again, so the command id is
         claimed once. When a poll wins the claim, its own successful call is
         recorded without the command outcome and the outcome is attached to
-        the earlier ``exec_command`` summary. ``running`` remains an
-        observation of the current call and is never claimed.
+        the earlier ``exec_command`` summary. ``running`` is not an outcome:
+        it is never counted, so each command contributes exactly one terminal
+        outcome however many calls it took to finish.
         """
 
         outcome = payload.get("operation_outcome")
         if not isinstance(outcome, str):
             return None
         if outcome == "running":
-            return outcome
+            return None
         command_id = payload.get("command_id")
         if not isinstance(command_id, str) or not command_id:
             return outcome
@@ -2473,6 +2544,7 @@ class Runtime:
         return outcome
 
     def read_file(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Read a bounded UTF-8 line range with its file revision and continuation metadata."""
         requested_path = str(args.get("path", ""))
         resolved = self.resolve_existing(requested_path)
         if resolved.path.is_dir():
@@ -2501,6 +2573,8 @@ class Runtime:
         selected_bytes = 0
         total_lines = 0
         selection_complete = False
+        truncated_by = None
+        first_line_exceeds_limit = False
         # The revision is folded into the pass that already walks every line,
         # so it names the bytes this call decoded rather than whatever a second
         # open would have found a moment later.
@@ -2516,27 +2590,36 @@ class Runtime:
                         continue
                     if selection_complete:
                         continue
-                    selected_parts.append(line)
-                    selected_bytes += len(line_bytes)
-                    if len(selected_parts) > DEFAULT_MAX_LINES or selected_bytes > max_bytes:
+                    if len(selected_parts) >= DEFAULT_MAX_LINES:
+                        truncated_by = "lines"
                         selection_complete = True
+                    elif selected_bytes + len(line_bytes) > max_bytes:
+                        truncated_by = "bytes"
+                        selection_complete = True
+                        if not selected_parts:
+                            # Preserve the existing oversized-first-line preview.
+                            # All other pages end at a physical line boundary.
+                            preview = truncate_text_head(line, max_bytes=max_bytes)
+                            selected_parts.append(preview.content)
+                            first_line_exceeds_limit = True
+                    else:
+                        selected_parts.append(line)
+                        selected_bytes += len(line_bytes)
         except UnicodeDecodeError as exc:
             raise ToolFailure("UNSUPPORTED_ENCODING", "File is not valid utf-8.", category="validation") from exc
         selected = "".join(selected_parts)
-        truncation = truncate_text_head(selected, max_lines=DEFAULT_MAX_LINES, max_bytes=max_bytes)
-        selected = truncation.content
-        truncated = truncation.truncated or selection_complete
+        truncated = selection_complete
         end = requested_end if requested_end is not None else total_lines
         if end < start_line:
             selected = ""
         actual_end = min(end, total_lines)
-        if truncated and truncation.output_lines > 0:
-            actual_end = min(total_lines, start_line + truncation.output_lines - 1)
-        next_start_line = actual_end + 1 if truncated and actual_end < total_lines else None
+        if truncated and selected_parts:
+            actual_end = min(total_lines, start_line + len(selected_parts) - 1)
+        next_start_line = actual_end + 1 if truncated and actual_end < min(end, total_lines) else None
         warnings = []
         if truncated:
             warnings.append("content truncated")
-        if truncation.first_line_exceeds_limit:
+        if first_line_exceeds_limit:
             warnings.append("first selected line exceeds max_bytes")
         result = {
             "path": resolved.display,
@@ -2551,22 +2634,28 @@ class Runtime:
             "total_bytes": total_bytes,
             "bytes_read": len(selected.encode("utf-8")),
             "truncated": truncated,
-            "truncated_by": truncation.truncated_by or ("bytes" if selection_complete else None),
-            "first_line_exceeds_limit": truncation.first_line_exceeds_limit,
-            "output_lines": truncation.output_lines,
-            "output_bytes": truncation.output_bytes,
+            "truncated_by": truncated_by,
+            "first_line_exceeds_limit": first_line_exceeds_limit,
+            "output_lines": len(selected_parts),
+            "output_bytes": len(selected.encode("utf-8")),
             "next_start_line": next_start_line,
             "warnings": warnings,
         }
+        if args.get("line_numbers") is True:
+            # Echoed so the text renderer can number lines; content itself
+            # stays the file's bytes.
+            result["line_numbers"] = True
         if next_start_line is not None:
-            result["next_action"] = {
-                "tool": "read_file",
-                "arguments": {
-                    "path": requested_path,
-                    "start_line": next_start_line,
-                    "max_bytes": max_bytes,
-                },
+            continuation: dict[str, Any] = {
+                "path": requested_path,
+                "start_line": next_start_line,
+                "max_bytes": max_bytes,
             }
+            if requested_end is not None:
+                continuation["end_line"] = requested_end
+            if result.get("line_numbers"):
+                continuation["line_numbers"] = True
+            result["next_action"] = {"tool": "read_file", "arguments": continuation}
         return result
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2985,6 +3074,7 @@ class Runtime:
         }
 
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Validate and stage patch operations, committing atomically unless this is a dry run."""
         patch = str(args.get("patch", ""))
         dry_run = bool(args.get("dry_run", False))
         with self.patch_lock:
@@ -3085,7 +3175,12 @@ class Runtime:
                     operation_already_applied = (
                         outcome.applied_hunks == 0 and bool(outcome.already_applied_hunks)
                     )
-                    for hunk in op.hunks:
+                    # Skipped (already-applied) hunks wrote nothing, so they
+                    # contribute no additions or removals.
+                    skipped_hunks = set(outcome.already_applied_hunks)
+                    for hunk_index, hunk in enumerate(op.hunks):
+                        if hunk_index in skipped_hunks:
+                            continue
                         for line in hunk.lines:
                             additions += line.startswith("+")
                             removals += line.startswith("-")
@@ -3271,21 +3366,42 @@ class Runtime:
     def _stage_written_file(
         self, change: ChangeRequest, staged: dict[str, StagedFile]
     ) -> tuple[dict[str, Any], str, int, int]:
+        """Stage a create or revision-checked write and return file evidence and line counts."""
         target = self.workspace.resolve_for_write(change.path)
         content = change.content or ""
-        if change.action == "create" and target.existed:
+        if target.existed and target.path.is_dir():
             raise ToolFailure(
                 "PATCH_FAILED",
-                f"Cannot create {target.display}: it already exists. Use action \"write\" to replace it.",
+                f"Cannot {change.action} {target.display}: it is a directory. create and write "
+                "only produce files; choose a file path inside it instead.",
                 category="validation",
+                details={"path": target.display, "is_directory": True},
             )
         baseline = FileBaseline.capture(target.path)
-        if target.existed:
+        if change.action == "create" and target.existed:
+            if baseline.data != content.encode("utf-8"):
+                raise ToolFailure(
+                    "PATCH_FAILED",
+                    f"Cannot create {target.display}: it already exists with different content. "
+                    "To replace it, read_file it and send action \"write\" with that revision.",
+                    category="validation",
+                    details={
+                        "path": target.display,
+                        "exists": True,
+                        "next_action": {"tool": "read_file", "arguments": {"path": target.display}},
+                    },
+                )
+            # Byte-identical: most likely a retry after a lost response. The
+            # requested state already holds, so this is an idempotent success
+            # that writes nothing, exactly like any other unchanged change.
+            current = baseline.text(target.display)
+        elif target.existed:
             current = baseline.text(target.display)
             self._check_revision(change, target.display, current)
         else:
             current = None
             if change.revision is not None:
+                normalize_revision(change.revision, f"changes[{change.index}]")
                 raise ToolFailure(
                     "REVISION_MISMATCH",
                     f"{target.display} does not exist, so it has no revision to match.",
@@ -3315,6 +3431,7 @@ class Runtime:
     def _stage_edited_file(
         self, change: ChangeRequest, staged: dict[str, StagedFile]
     ) -> tuple[dict[str, Any], str, int, int]:
+        """Stage revision-checked line edits and report only the lines that actually changed."""
         source = self.workspace.resolve_existing(change.path)
         if source.path.is_dir():
             raise ToolFailure("PATCH_FAILED", "Cannot edit a directory.", category="validation")
@@ -3331,8 +3448,10 @@ class Runtime:
             baseline.mode,
             action="verify" if unchanged else "write",
         )
-        added = sum(len(edit.lines) for edit in change.edits)
-        removed = sum(edit.end - edit.start for edit in change.edits)
+        # Count what actually differs: a replace that rewrites a line with its
+        # own text is +0 -0, not +1 -1.
+        added = sum(item["added_lines"] for item in outcome.changed_ranges)
+        removed = sum(item["removed_lines"] for item in outcome.changed_ranges)
         entry = {
             "path": source.display,
             "operation": "unchanged" if unchanged else "edit",
@@ -3421,20 +3540,25 @@ class Runtime:
                     "next_action": {"tool": "read_file", "arguments": {"path": display}},
                 },
             )
-        if change.revision != actual:
+        expected = normalize_revision(change.revision, f"changes[{change.index}]")
+        if expected != actual:
+            # The current revision is deliberately withheld: pasted back with
+            # line numbers from the old version, it would pass this check and
+            # edit the wrong lines. read_file returns it together with the
+            # line numbers that belong to it.
             raise ToolFailure(
                 "REVISION_MISMATCH",
-                f"{display} changed since revision {change.revision}; it is now {actual}. "
-                "Re-read the file and rebuild the change against its current line numbers.",
+                f"{display} has changed since revision {expected} was read (by another write, or by "
+                "an earlier apply_changes/apply_patch call). Re-read it with read_file, which returns "
+                "the new revision and the current line numbers, and rebuild the change against those.",
                 category="conflict",
                 retryable=True,
                 details={
                     "path": display,
-                    "expected_revision": change.revision,
-                    "current_revision": actual,
+                    "expected_revision": expected,
                     "revision_algorithm": REVISION_ALGORITHM,
                     "total_lines": _count_lines(current),
-                    "next_action": {"tool": "read_file", "arguments": {"path": display}},
+                    "next_action": {"tool": "read_file", "arguments": {"path": display, "line_numbers": True}},
                 },
             )
 
@@ -3458,6 +3582,7 @@ class Runtime:
             )
 
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Start a policy-checked managed command and return output after exit or the yield limit."""
         self._prune_commands()
         cmd = str(args.get("cmd", ""))
         if not cmd:
@@ -3473,6 +3598,7 @@ class Runtime:
         yield_ms = int(args.get("yield_time_ms", DEFAULT_YIELD_MS))
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
+        keep_stdin_open = bool(args.get("keep_stdin_open", False))
         stdin_text = str(args.get("stdin", ""))
         env = self._command_env(args.get("env", {}))
         start = time.time()
@@ -3590,7 +3716,9 @@ class Runtime:
             if process.poll() is None:
                 raise
         finally:
-            if not tty:
+            # Closing stdin gives a command that reads it EOF instead of a
+            # hang; keep_stdin_open is the explicit opt-in to interact.
+            if not tty and not keep_stdin_open:
                 command.close_stdin()
         initial_wait = max(0, min(yield_ms, MAX_YIELD_MS)) / 1000.0
 
@@ -3693,6 +3821,7 @@ class Runtime:
             self._check_command_path_candidate(candidate)
 
     def _check_command_path_candidate(self, candidate: str) -> None:
+        """Reject command path candidates that escape the workspace or cannot be checked safely."""
         candidate = candidate.strip()
         if not candidate or candidate in {"-", "--"}:
             return
@@ -3716,6 +3845,9 @@ class Runtime:
             normalized.startswith("/")
             or normalized.startswith("~")
             or re.match(r"^[A-Za-z]:/", normalized)
+            # Drive-relative `C:file` resolves against that drive's cwd, not
+            # the workspace. UNC `\\server\share` normalizes to `//server`.
+            or (windows_shell_syntax() and re.match(r"^[A-Za-z]:", normalized))
             or any(part == ".." for part in PurePosixPath(normalized).parts)
         ):
             raise escape_failure()
@@ -3908,6 +4040,7 @@ class Runtime:
         self._remember_output_command(command)
 
     def _prune_commands(self) -> None:
+        """Collect completed commands and evict retained output by observation TTL and capacity."""
         with self.commands_lock:
             active = list(self.commands.values())
         for command in active:
@@ -3919,7 +4052,9 @@ class Runtime:
             expired = [
                 command_id
                 for command_id, command in self.output_commands.items()
-                if command.completed_at is not None and command.completed_at < cutoff
+                # TTL starts when a response first reported the exit. A command
+                # nobody has seen finish stays until capacity eviction.
+                if command.observed_at is not None and command.observed_at < cutoff
             ]
             for command_id in expired:
                 self.output_commands.pop(command_id, None)
@@ -3938,10 +4073,18 @@ class Runtime:
             )
         return command
 
+    @staticmethod
+    def _mark_terminal_observed(command: CommandRun, status: Any) -> None:
+        """Start the retention clock when a completed command is first reported as terminal."""
+        if status in TERMINAL_COMMAND_STATUSES and command.completed_at is not None and command.observed_at is None:
+            command.observed_at = time.time()
+
     def _format_command_output(self, command: CommandRun, payload: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        """Attach paging references and continuations, updating command retention on completion."""
         terminal = payload.get("status") != "running"
         if terminal:
             self._complete_command(command)
+        self._mark_terminal_observed(command, payload.get("status"))
         if payload.get("status") == "running":
             payload["next_action"] = {
                 "tool": "write_stdin",
@@ -3951,10 +4094,10 @@ class Runtime:
                     "yield_time_ms": DEFAULT_YIELD_MS,
                 },
             }
-        output_refs = {
-            "stdout": f"command:{command.command_id}:stdout",
-            "stderr": f"command:{command.command_id}:stderr",
-        }
+        output_refs = command_output_refs(command.command_id)
+        # Always present so a client can page either stream with read_output
+        # without first having to hit truncation.
+        payload["output_refs"] = dict(output_refs)
         truncated_streams: list[str] = []
         cursor_skipped_drop = False
         for stream in ("stdout", "stderr"):
@@ -4060,22 +4203,35 @@ class Runtime:
         return " | ".join(parts)
 
     def read_output(self, args: dict[str, Any]) -> dict[str, Any]:
-        output_ref = str(args.get("output_ref", ""))
-        match = re.fullmatch(r"command:([^:]+):(stdout|stderr)", output_ref)
-        if not match:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "output_ref must look like command:<id>:stdout or command:<id>:stderr.",
-                category="validation",
-            )
-        command = self._get_output_command(match.group(1))
-        command.refresh_status()
-        stream = match.group(2)
+        """Page retained command output by byte offset, reporting status and any evicted gaps."""
+        output_ref = str(args.get("output_ref", "")).strip()
         requested_stream = str(args.get("stream", "") or "")
         if requested_stream and requested_stream not in {"stdout", "stderr"}:
             raise ToolFailure("INVALID_ARGUMENT", "stream must be stdout or stderr.", category="validation")
-        if requested_stream and requested_stream != stream:
-            raise ToolFailure("INVALID_ARGUMENT", "stream does not match output_ref.", category="validation")
+        # Accept the full ref, `command:<id>`, or a bare command_id; the last
+        # two take their stream from `stream` (default stdout).
+        match = re.fullmatch(r"command:([^:]+):(stdout|stderr)", output_ref)
+        if match:
+            command_id, stream = match.group(1), match.group(2)
+            if requested_stream and requested_stream != stream:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "stream does not match output_ref.",
+                    category="validation",
+                    details={"output_ref_stream": stream, "stream": requested_stream},
+                )
+        else:
+            bare = re.fullmatch(r"(?:command:)?([^:\s]+)", output_ref)
+            if not bare:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "output_ref must be a command_id, command:<id>, or command:<id>:stdout|stderr.",
+                    category="validation",
+                )
+            command_id, stream = bare.group(1), requested_stream or "stdout"
+            output_ref = f"command:{command_id}:{stream}"
+        command = self._get_output_command(command_id)
+        command.refresh_status()
         head, tail, tail_start_offset, total_stream_bytes, dropped_bytes = command.retained_stream_segments(stream)
         requested_offset = max(0, int(args.get("offset", 0)))
         limit = max(1, min(int(args.get("limit", EXEC_PREVIEW_BYTES)), COMMAND_BUFFER_BYTES))
@@ -4107,20 +4263,13 @@ class Runtime:
             )
         if omitted_bytes:
             self.command_manager.record_omitted_read("read_output")
+        status = command.status()
+        self._mark_terminal_observed(command, status)
         result = {
             "command_id": command.command_id,
-            "operation_outcome": command_outcome(
-                "timeout"
-                if command.timed_out
-                else "running"
-                if command.process.poll() is None
-                else "terminated"
-                if command.signal_name is not None
-                else "exited",
-                command.exit_code,
-                command.signal_name,
-                command.timed_out,
-            ),
+            "status": status,
+            "exit_code": command.exit_code if status != "running" else None,
+            "operation_outcome": command.operation_outcome(status),
             "output_ref": output_ref,
             "stream_output_ref": f"command:{command.command_id}:{stream}",
             "stream": stream,
@@ -4149,17 +4298,39 @@ class Runtime:
         return result
 
     def write_stdin(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Write command input or poll with empty chars, then return the next output snapshot."""
         command_id = str(args.get("command_id", ""))
         command = self._get_command(command_id)
         command.refresh_status()
         chars = str(args.get("chars", ""))
         if command.process.poll() is not None:
             if chars:
-                raise ToolFailure("COMMAND_CLOSED", "Command is closed; stdin write blocked.", category="runtime")
+                self._raise_exited_stdin(command)
             payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
             return self._format_command_output(command, payload, args)
         if chars:
-            command.write_input(chars.encode("utf-8"))
+            if command.stdin_closed:
+                raise ToolFailure(
+                    "COMMAND_CLOSED",
+                    "Command is still running but its stdin was closed at start; input cannot be written.",
+                    category="runtime",
+                    details={
+                        "reason": "stdin_closed",
+                        "command_id": command.command_id,
+                        "retry_hint": (
+                            "To interact, start the command again with exec_command keep_stdin_open=true "
+                            "(or tty=true on POSIX). To stop it, use kill_command. For one-shot input, "
+                            "pass it as exec_command's stdin. Polling with empty chars still works."
+                        ),
+                    },
+                )
+            try:
+                command.write_input(chars.encode("utf-8"))
+            except ToolFailure:
+                command.refresh_status()
+                if command.process.poll() is not None:
+                    self._raise_exited_stdin(command)
+                raise
         wait_until = time.time() + (int(args.get("yield_time_ms", DEFAULT_YIELD_MS)) / 1000.0)
         first_output_at: float | None = None
         while time.time() < wait_until and command.process.poll() is None:
@@ -4176,6 +4347,30 @@ class Runtime:
         payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
         return self._format_command_output(command, payload, args)
 
+    def _raise_exited_stdin(self, command: CommandRun) -> None:
+        """Record terminal observation and reject stdin writes with the command's exit details."""
+        command.refresh_status()
+        status = command.status()
+        self._complete_command(command)
+        self._mark_terminal_observed(command, status)
+        raise ToolFailure(
+            "COMMAND_CLOSED",
+            "Command is closed; stdin write blocked.",
+            category="runtime",
+            details={
+                "reason": "exited",
+                "command_id": command.command_id,
+                "status": status,
+                "exit_code": command.exit_code,
+                "signal": command.signal_name,
+                "operation_outcome": command.operation_outcome(status),
+                "retry_hint": (
+                    "The command has finished; read its remaining output with write_stdin "
+                    "chars=\"\" or read_output."
+                ),
+            },
+        )
+
     def _wait_for_command_exit(self, command: CommandRun, wait_seconds: float) -> bool:
         try:
             command.process.wait(timeout=max(0.0, wait_seconds))
@@ -4186,6 +4381,7 @@ class Runtime:
         return command.process.poll() is not None
 
     def kill_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Terminate a live command with escalation, or report its existing exit without signaling."""
         command_id = str(args.get("command_id", ""))
         command = self._get_command(command_id)
         signal_name = str(args.get("signal", "TERM"))
@@ -4195,12 +4391,16 @@ class Runtime:
             signal.SIGTERM,
         )
         evict = True
+        signal_sent: str | None = None
         if command.process.poll() is None:
             command.terminating = True
+            command.killed_by_client = True
+            signal_sent = "SIGKILL" if force else signal.Signals(signum).name
             terminate_process_group(command.process, signum, force=force)
             exited = self._wait_for_command_exit(command, int(args.get("wait_ms", 5000)) / 1000.0)
             if not exited and not force:
                 force = True
+                signal_sent = "SIGKILL"
                 terminate_process_group(command.process, HARD_KILL_SIGNAL, force=True)
                 exited = self._wait_for_command_exit(command, int(args.get("kill_wait_ms", 2000)) / 1000.0)
             if exited:
@@ -4211,9 +4411,10 @@ class Runtime:
                 evict = False
                 status = "terminating"
         else:
+            # Nothing was sent; exit_code/signal report the exit it already had.
             killed = False
+            command.refresh_status()
             status = "exited"
-        signal_sent = "SIGKILL" if force else signal.Signals(signum).name
         payload = command.snapshot_since_cursor(int(args.get("max_output_bytes", 65536)))
         payload.update({"killed": killed, "status": status, "evicted": evict, "signal_sent": signal_sent})
         payload = self._format_command_output(command, payload, args)
@@ -4719,7 +4920,25 @@ def find_literal(line: str, needle: str, case_sensitive: bool) -> int:
     return haystack.find(needle)
 
 
-def shlex_split(command: str) -> list[str]:
+def windows_shell_syntax() -> bool:
+    """Whether commands run under a Windows shell, where ``\\`` separates paths.
+
+    A function rather than a constant so tests can simulate Windows.
+    """
+
+    return os.name == "nt"
+
+
+def shlex_split(command: str, *, windows: bool | None = None) -> list[str]:
+    """Tokenize shell syntax for policy checks, preserving backslashes on Windows."""
+    if windows is None:
+        windows = windows_shell_syntax()
+    if windows:
+        # Windows shells have no backslash escape, so a POSIX lexer would eat
+        # path separators: `..\..\secret` became `....secret` and slipped
+        # past the workspace check. Doubling each backslash makes the lexer
+        # yield it literally, outside and inside double quotes alike.
+        command = command.replace("\\", "\\\\")
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     return list(lexer)
@@ -5708,6 +5927,7 @@ def tool_output_schema(name: str | None = None) -> dict[str, Any]:
 
 @functools.cache
 def output_schemas() -> dict[str, dict[str, Any]]:
+    """Return the structured result property schemas keyed by tool name."""
     string: dict[str, Any] = {"type": "string"}
     nullable_string: dict[str, Any] = {"type": ["string", "null"]}
     integer: dict[str, Any] = {"type": "integer"}
@@ -5814,6 +6034,7 @@ def output_schemas() -> dict[str, dict[str, Any]]:
             "bytes_read": integer,
             "next_start_line": nullable_integer,
             "first_line_exceeds_limit": boolean,
+            "line_numbers": boolean,
             **truncation,
         },
         "list_dir": {"path": string, "entries": object_array, **truncation},
@@ -5845,6 +6066,8 @@ def output_schemas() -> dict[str, dict[str, Any]]:
         # byte counts are per stream rather than one `total_bytes`.
         "read_output": {
             "command_id": string,
+            "status": {**string, "enum": ["running", "exited", "terminated", "timeout"]},
+            "exit_code": nullable_integer,
             "operation_outcome": {**string, "enum": list(COMMAND_OUTCOMES)},
             "output_ref": string,
             "stream_output_ref": string,
@@ -5889,6 +6112,26 @@ def output_schemas() -> dict[str, dict[str, Any]]:
             "warnings": string_array,
         },
     }
+
+
+def _drop_schema_defaults(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Return ``args`` without top-level arguments equal to their schema default.
+
+    Spelling out a default (``"dry_run": false``) asks for exactly the same
+    work as leaving it out, so the idempotency fingerprint must not tell the
+    two apart. The type must match too: ``0`` is not the default ``false``.
+    """
+
+    properties = input_schemas().get(tool_name, {}).get("properties", {})
+    normalized: dict[str, Any] = {}
+    for key, value in args.items():
+        spec = properties.get(key)
+        if isinstance(spec, dict) and "default" in spec:
+            default = spec["default"]
+            if type(value) is type(default) and value == default:
+                continue
+        normalized[key] = value
+    return normalized
 
 
 def validate_arguments(tool_name: str, args: dict[str, Any]) -> None:
@@ -6020,6 +6263,7 @@ def tool_annotations(name: str, *, fake_readonly: bool = False) -> dict[str, Any
 
 @functools.cache
 def input_schemas() -> dict[str, dict[str, Any]]:
+    """Return cached tool argument schemas; callers must treat the tree as read-only."""
     # Cached: callers only read the returned tree, and rebuilding the full
     # ~190-line schema dict on every tools/call dispatch is measurable.
     string = {"type": "string"}
@@ -6037,6 +6281,14 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "max_lines": {**integer, "minimum": 1},
                 "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 131072},
                 "encoding": {**string, "enum": ["utf-8"], "default": "utf-8"},
+                "line_numbers": {
+                    **boolean,
+                    "default": False,
+                    "description": (
+                        "Prefix each line of the model-facing text with its 1-based number and a tab "
+                        "(the numbers apply_changes edits use). structuredContent.content is unchanged."
+                    ),
+                },
             },
             ["path"],
         ),
@@ -6101,9 +6353,9 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     # error the model cannot act on.
                     "maxItems": MAX_CHANGES_PER_CALL,
                     "description": (
-                        "One entry per file, at least one. A path may appear once per call; use "
-                        "apply_patch to chain several edits onto one file. The whole request must fit in "
-                        "1 MiB, so keep it to roughly 20 files per call."
+                        "One entry per file, at least one. A path may appear once per call; combine "
+                        "several line edits for one file into that file's single edit change. The whole "
+                        "request must fit in 1 MiB, so keep it to roughly 20 files per call."
                     ),
                     "items": object_schema(
                         {
@@ -6116,69 +6368,95 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                                     "destination that must not exist."
                                 ),
                             },
-                            "path": {**string, "minLength": 1},
+                            "path": {
+                                **string,
+                                "minLength": 1,
+                                "description": "Workspace-relative file path; used by every action.",
+                            },
                             "revision": {
                                 **string,
                                 "minLength": 1,
                                 "description": (
-                                    "The revision read_file reported for this path. Required for write "
-                                    "when the path exists, and always for edit, delete, move, and copy; "
-                                    "write may omit it when creating a missing path, and create rejects "
-                                    "it. A file that changed since is refused with REVISION_MISMATCH."
+                                    "The 64-character hex revision of this path, from read_file or from "
+                                    "the latest apply_changes/apply_patch result for it (not a dry run). "
+                                    "Line numbers in edits must come from that same version of the file. "
+                                    "Required for write when the path exists, and always for edit, "
+                                    "delete, move, and copy; write may omit it when creating a missing "
+                                    "path, and create rejects it. A file that changed since is refused "
+                                    "with REVISION_MISMATCH: re-read it and rebuild the edits."
                                 ),
                             },
                             "content": {
                                 **string,
-                                "description": "Full file text for create and write.",
+                                "description": (
+                                    "Full file text; used by create and write only (edit takes "
+                                    "edits[].content)."
+                                ),
                             },
                             "destination": {
                                 **string,
                                 "minLength": 1,
-                                "description": "Target path for move and copy; must not already exist.",
+                                "description": (
+                                    "Target path; used by move and copy only, and must not already exist."
+                                ),
                             },
                             "edits": {
                                 "type": "array",
                                 "minItems": 1,
                                 "maxItems": MAX_EDITS_PER_CHANGE,
                                 "description": (
-                                    "Line operations for action=edit. Every line number refers to the "
-                                    "file as read_file reported it, never to the result of another edit "
-                                    "in the same call, and no two edits may address the same lines."
+                                    "Line operations; used by action=edit only. Every line number refers "
+                                    "to the file version named by revision, never to the result of "
+                                    "another edit in the same call, and no two edits may address the "
+                                    "same lines. replace: start_line, optional end_line, content. delete: "
+                                    "start_line, optional end_line. insert_after / insert_before: line, "
+                                    "content."
                                 ),
                                 "items": object_schema(
                                     {
-                                        "op": {**string, "enum": list(EDIT_OPERATIONS)},
+                                        "op": {
+                                            **string,
+                                            "enum": list(EDIT_OPERATIONS),
+                                            "description": (
+                                                "replace and delete address start_line..end_line; "
+                                                "insert_after and insert_before address line."
+                                            ),
+                                        },
                                         "start_line": {
                                             **integer,
                                             "minimum": 1,
                                             "description": (
-                                                "First line of the range for replace and delete, "
-                                                "1-based and inclusive."
+                                                "Used by replace and delete: first line of the range, "
+                                                "1-based and inclusive. insert_after and insert_before "
+                                                "accept it in place of line."
                                             ),
                                         },
                                         "end_line": {
                                             **integer,
                                             "minimum": 1,
                                             "description": (
-                                                "Last line of the range for replace and delete, "
-                                                "inclusive; defaults to start_line."
+                                                "Used by replace and delete only: last line of the "
+                                                "range, inclusive; defaults to start_line."
                                             ),
                                         },
                                         "line": {
                                             **integer,
                                             "minimum": 0,
                                             "description": (
-                                                "Anchor for insert_after (0 to total_lines, where 0 "
-                                                "inserts at the beginning) or insert_before (1 to "
-                                                "total_lines + 1, where total_lines + 1 appends)."
+                                                "Used by insert_after (0 to total_lines, where 0 "
+                                                "inserts at the beginning) and insert_before (1 to "
+                                                "total_lines + 1, where total_lines + 1 appends). "
+                                                "replace and delete accept it as shorthand for "
+                                                "start_line = end_line = line."
                                             ),
                                         },
                                         "content": {
                                             **string,
                                             "description": (
-                                                "Whole lines to write. \"\" is zero lines, which makes "
-                                                "replace with empty content a deletion; a trailing "
-                                                "newline adds a blank line. Not accepted for op=delete."
+                                                "Used by replace, insert_after, and insert_before "
+                                                "(required); not accepted for delete. Whole lines: \"\" "
+                                                "is zero lines, which makes replace with empty content "
+                                                "a deletion; a trailing newline adds a blank line."
                                             ),
                                         },
                                     },
@@ -6227,8 +6505,31 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
                 "verbosity": {**string, "enum": ["summary", "preview", "full"]},
                 "preview_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
-                "stdin": {**string, "default": ""},
-                "tty": {**boolean, "default": False},
+                "stdin": {
+                    **string,
+                    "default": "",
+                    "description": (
+                        "One-shot input written to the command's stdin at start. stdin is then closed "
+                        "(EOF) unless keep_stdin_open is true."
+                    ),
+                },
+                "tty": {
+                    **boolean,
+                    "default": False,
+                    "description": (
+                        "Run under a real pseudo-terminal (POSIX only; Windows returns TTY_UNSUPPORTED). "
+                        "stdin stays writable with write_stdin."
+                    ),
+                },
+                "keep_stdin_open": {
+                    **boolean,
+                    "default": False,
+                    "description": (
+                        "Keep the stdin pipe open so write_stdin can send input to a non-tty command "
+                        "(works on Windows). Default false closes stdin so commands that read it get EOF "
+                        "instead of hanging."
+                    ),
+                },
                 "env": {"type": "object", "additionalProperties": {"type": "string"}, "default": {}},
             },
             ["cmd"],
@@ -6236,7 +6537,14 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "write_stdin": object_schema(
             {
                 "command_id": {**string, "minLength": 1},
-                "chars": {**string, "default": ""},
+                "chars": {
+                    **string,
+                    "default": "",
+                    "description": (
+                        "Empty polls for output. Non-empty is written to stdin and requires a command "
+                        "started with keep_stdin_open=true or tty=true; otherwise COMMAND_CLOSED."
+                    ),
+                },
                 "yield_time_ms": {**integer, "minimum": 0, "maximum": MAX_YIELD_MS, "default": DEFAULT_YIELD_MS},
                 "max_output_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 65536},
                 "verbosity": {**string, "enum": ["summary", "preview", "full"]},
@@ -6258,8 +6566,22 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         ),
         "read_output": object_schema(
             {
-                "output_ref": {**string, "minLength": 1},
-                "stream": {**string, "enum": ["stdout", "stderr"]},
+                "output_ref": {
+                    **string,
+                    "minLength": 1,
+                    "description": (
+                        "command:<id>:stdout or command:<id>:stderr from output_refs, or a bare command_id "
+                        "or command:<id> (stream then selects the stream)."
+                    ),
+                },
+                "stream": {
+                    **string,
+                    "enum": ["stdout", "stderr"],
+                    "description": (
+                        "Stream for a bare command_id or command:<id> (default stdout). With a full ref it "
+                        "must match the ref's stream."
+                    ),
+                },
                 "offset": {**integer, "minimum": 0, "default": 0},
                 "limit": {**integer, "minimum": 1, "maximum": 1048576, "default": 4096},
             },

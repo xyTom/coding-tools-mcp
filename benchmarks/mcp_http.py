@@ -10,11 +10,27 @@ the `2026-07-28` path is exercised by the compliance suite instead.
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+TELEMETRY_ENV = "CODING_TOOLS_MCP_TELEMETRY"
+
+
+def local_server_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Copy of ``base`` (default ``os.environ``) for a locally launched server.
+
+    Benchmark, dogfood, and agent-eval runs are not product usage, so their
+    servers start with telemetry off unless the caller set it explicitly.
+    """
+
+    env = dict(os.environ if base is None else base)
+    env.setdefault(TELEMETRY_ENV, "off")
+    return env
 
 
 class McpHttpError(RuntimeError):

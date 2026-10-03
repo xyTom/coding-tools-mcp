@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from benchmarks.mcp_http import McpHttpClient, McpHttpError, connect_with_retry  # noqa: E402 - repo path is bootstrapped above
+from benchmarks.mcp_http import McpHttpClient, McpHttpError, connect_with_retry, local_server_env  # noqa: E402 - repo path is bootstrapped above
 from benchmarks.runtime_latency import percentile  # noqa: E402 - repo path is bootstrapped above
 
 
@@ -410,9 +410,10 @@ def prepare_workspace(base_dir: Path | None = None) -> tuple[Path, Path]:
 
 
 def start_server(command: str | None, workspace: Path, endpoint: str) -> subprocess.Popen[bytes] | None:
+    """Launch the formatted server command with local telemetry defaults, if supplied."""
     if not command:
         return None
-    env = os.environ.copy()
+    env = local_server_env()
     env.setdefault("CODING_TOOLS_MCP_WORKSPACE", str(workspace))
     env.setdefault("CODING_TOOLS_MCP_ENDPOINT", endpoint)
     argv = shlex.split(command.format(workspace=str(workspace), endpoint=endpoint))

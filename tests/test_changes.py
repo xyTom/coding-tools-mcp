@@ -290,7 +290,8 @@ class ApplyChangesRuntimeTests(unittest.TestCase):
         read_after = self.runtime.read_file({"path": "windows.txt"})
         self.assertEqual(read_after["total_lines"], 3)
 
-    def test_a_stale_revision_is_refused_with_the_current_one(self) -> None:
+    def test_a_stale_revision_is_refused_without_the_current_one(self) -> None:
+        """Verify stale edits preserve file bytes and withhold the current revision from errors."""
         stale = self.revision("a.txt")
         (self.workspace / "a.txt").write_text("alpha\nbeta\ndelta\n", encoding="utf-8")
         with self.assertRaises(ToolFailure) as raised:
@@ -307,7 +308,11 @@ class ApplyChangesRuntimeTests(unittest.TestCase):
                 }
             )
         self.assertEqual(raised.exception.code, "REVISION_MISMATCH")
-        self.assertEqual(raised.exception.details["current_revision"], self.revision("a.txt"))
+        # The current revision is withheld: pasted back with the old line
+        # numbers it would edit the wrong line. read_file supplies both.
+        self.assertNotIn("current_revision", raised.exception.details)
+        self.assertNotIn(self.revision("a.txt"), raised.exception.message)
+        self.assertNotIn(self.revision("a.txt"), repr(raised.exception.details))
         self.assertEqual((self.workspace / "a.txt").read_text(encoding="utf-8"), "alpha\nbeta\ndelta\n")
 
     def test_the_revision_read_file_publishes_is_the_one_apply_changes_takes(self) -> None:

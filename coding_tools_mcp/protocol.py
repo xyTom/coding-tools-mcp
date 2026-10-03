@@ -494,9 +494,16 @@ def _dispatch_legacy(
 
 
 def _call_tool(runtime: Any, params: dict[str, Any], context: RequestContext) -> dict[str, Any]:
+    """Validate tools/call parameters, record rejected arguments, and dispatch the call."""
     if not isinstance(params.get("name"), str):
         raise JsonRpcError(-32602, "tools/call requires a tool name")
-    arguments = params.get("arguments") or {}
+    arguments = params.get("arguments")
+    if arguments is None:
+        arguments = {}
     if not isinstance(arguments, dict):
+        # Rejected before the runtime sees the call, so tell its telemetry.
+        record_rejected = getattr(runtime, "record_rejected_tool_call", None)
+        if callable(record_rejected):
+            record_rejected(params["name"], context=context)
         raise JsonRpcError(-32602, "tools/call arguments must be an object")
     return runtime.call_tool(params["name"], arguments, context=context)

@@ -29,6 +29,7 @@ Runtime without dispatching anything through it, produces no traffic.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import platform
@@ -43,6 +44,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from . import __version__
+from .breaker import REPEATED_CALL_BLOCKED
 from .envutils import ENV_PREFIX, truthy_env, utc_now
 from .protocol import DISCOVER_METHOD, MODERN_ERA
 
@@ -84,6 +86,8 @@ FAILED_OPERATION_OUTCOMES = frozenset({"exited_nonzero", "timeout", "signal", "s
 # cycling error codes from growing the map without bound.
 MAX_TRACKED_FAILURE_STREAKS = 128
 _LOG_PREFIX = "coding-tools-mcp"
+_DISTRIBUTION_NAME = "coding-tools-mcp"
+_PACKAGE_DIR = Path(__file__).resolve().parent
 
 
 def telemetry_mode() -> str:
@@ -172,6 +176,81 @@ def note_first_appearance(key: str, message: str) -> None:
             return
         _first_seen.add(key)
     print(f"{_LOG_PREFIX}: {message}", file=sys.stderr, flush=True)
+
+
+def install_kind() -> str:
+    """How this package is installed, as one of a closed set of labels.
+
+    ``source`` (no installed distribution, or one whose files are not the code
+    running), ``editable``, ``local`` (a non-editable install from a local
+    path), ``vcs``, or ``index``; ``unknown`` if the metadata cannot be read.
+    Only the label leaves this function — never the URL or path it came from.
+    """
+
+    try:
+        from importlib import metadata
+
+        try:
+            distribution = metadata.distribution(_DISTRIBUTION_NAME)
+        except metadata.PackageNotFoundError:
+            return "source"
+        raw = distribution.read_text("direct_url.json")
+        info = json.loads(raw) if raw else None
+        if isinstance(info, dict):
+            dir_info = info.get("dir_info")
+            if isinstance(dir_info, dict) and dir_info.get("editable") is True:
+                return "editable"
+        # A non-editable install copies the package; when the copy is not the
+        # code actually running (a checkout on sys.path shadows it), report
+        # the checkout rather than the install.
+        installed = Path(str(distribution.locate_file("coding_tools_mcp/__init__.py"))).resolve()
+        if installed.parent != _PACKAGE_DIR:
+            return "source"
+        if isinstance(info, dict):
+            if "vcs_info" in info:
+                return "vcs"
+            url = info.get("url")
+            if isinstance(url, str) and url.startswith("file:"):
+                return "local"
+        return "index"
+    except Exception:  # noqa: BLE001 - a fingerprint must never break a session
+        return "unknown"
+
+
+_build_lock = threading.Lock()
+_build_id: str | None = None
+
+
+def build_id() -> str:
+    """First 12 hex chars of a hash over this package's own ``.py`` sources.
+
+    Each file contributes its path relative to the package directory, a NUL,
+    and its bytes, in sorted path order. The official wheel of a release has
+    one value; any modified copy has another. Computed once per process;
+    ``unknown`` if the sources cannot be read.
+    """
+
+    global _build_id
+    cached = _build_id
+    if cached:
+        return cached
+    with _build_lock:
+        if _build_id:
+            return _build_id
+        try:
+            digest = hashlib.sha256()
+            files = sorted((path.relative_to(_PACKAGE_DIR).as_posix(), path) for path in _PACKAGE_DIR.rglob("*.py"))
+            if not files:
+                raise FileNotFoundError("no package sources")
+            for relative, path in files:
+                digest.update(relative.encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(path.read_bytes())
+            value = digest.hexdigest()[:12]
+        except Exception:  # noqa: BLE001 - a fingerprint must never break a session
+            value = "unknown"
+        _build_id = value
+        return value
 
 
 def _looks_like_install_id(value: str) -> bool:
@@ -297,6 +376,7 @@ class SessionTelemetry:
     """
 
     def __init__(self, *, permission_mode: str, transport: str = "stdio") -> None:
+        """Initialize inactive session counters and fixed environment and build labels."""
         self._session_id = uuid.uuid4().hex
         self._started_monotonic = time.monotonic()
         self._base_properties: dict[str, Any] = {
@@ -306,6 +386,8 @@ class SessionTelemetry:
             "python": f"{sys.version_info.major}.{sys.version_info.minor}",
             "transport": _label(transport),
             "permission_mode": _label(permission_mode),
+            "install": install_kind(),
+            "build": build_id(),
             "session_id": self._session_id,
             "$process_person_profile": False,
         }
@@ -313,8 +395,10 @@ class SessionTelemetry:
         self._legacy_requests = 0
         self._modern_requests = 0
         self._discover_probes = 0
+        self._unknown_tool_calls = 0
         self._error_events_sent = 0
         self._errors_dropped = 0
+        self._breaker_blocks = 0
         # Keyed by (tool, error_code) rather than held in one global slot: a
         # single slot reset by any success of any tool cannot tell a model
         # stuck in a loop from a model making progress alongside one failure.
@@ -393,6 +477,7 @@ class SessionTelemetry:
         truncated: bool,
         context: Any = None,
         outcome: str | None = None,
+        already_applied: bool = False,
     ) -> None:
         """Count one tool call.
 
@@ -400,7 +485,15 @@ class SessionTelemetry:
         ``outcome`` is operation-level, set by tools that run something whose
         result is not the call's result — a command that exits non-zero is a
         successful call and a failed operation, and only the operation is what
-        a failure rate should be measured against.
+        a failure rate should be measured against. ``already_applied`` marks a
+        successful write call that found its change already in place and wrote
+        nothing.
+
+        A ``REPEATED_CALL_BLOCKED`` refusal is neither: the breaker answered
+        before any handler ran. It is counted only as a breaker block, so a
+        client that ignores the refusal and resends the same call thousands of
+        times measures how persistent that client is, not how often a tool
+        fails.
         """
 
         emit_error: tuple[str, int] | None = None
@@ -415,7 +508,15 @@ class SessionTelemetry:
                     "truncated": 0,
                     "outcomes": {},
                     "operation_failures": 0,
+                    "breaker_blocks": 0,
+                    "already_applied": 0,
                 }
+            if not ok and error_code == REPEATED_CALL_BLOCKED:
+                # Not a call the tool handled, so it touches no call, error,
+                # duration, or streak counter and spends no tool_error budget.
+                stats["breaker_blocks"] += 1
+                self._breaker_blocks += 1
+                return
             stats["calls"] += 1
             bucket = _DURATION_OVERFLOW
             for limit, name in _DURATION_BUCKETS:
@@ -425,6 +526,8 @@ class SessionTelemetry:
             stats["buckets"][bucket] = stats["buckets"].get(bucket, 0) + 1
             if truncated:
                 stats["truncated"] += 1
+            if ok and already_applied:
+                stats["already_applied"] += 1
             if outcome:
                 label = _label(outcome) or "unknown"
                 stats["outcomes"][label] = stats["outcomes"].get(label, 0) + 1
@@ -469,6 +572,16 @@ class SessionTelemetry:
                 ]
             )
 
+    def record_unknown_tool_call(self) -> None:
+        """Count one tools/call naming a tool this server does not have.
+
+        The name is not kept: it is whatever the client sent, and per-tool
+        statistics keyed by it would let any client mint new properties.
+        """
+
+        with self._lock:
+            self._unknown_tool_calls += 1
+
     def record_deferred_operation_outcome(self, tool: str, outcome: str) -> None:
         """Attach a later-observed terminal outcome to its original tool call.
 
@@ -508,6 +621,7 @@ class SessionTelemetry:
             return self._failure_streaks.get((tool, _label(error_code) or "UNKNOWN"), 0)
 
     def finish(self, *, output_retention: Mapping[str, int] | None = None) -> None:
+        """Emit tool summaries and session totals once, if telemetry is active and enabled."""
         with self._lock:
             if self._finished:
                 return
@@ -528,7 +642,9 @@ class SessionTelemetry:
                     "ok": stats["calls"] - failures - operation_failures,
                     "errors": failures,
                     "operation_failures": operation_failures,
+                    "breaker_blocks": int(stats.get("breaker_blocks", 0)),
                     "truncated": stats["truncated"],
+                    "already_applied": int(stats.get("already_applied", 0)),
                 }
                 for code, count in sorted(stats["errors"].items()):
                     properties[f"err_{code}"] = count
@@ -541,9 +657,11 @@ class SessionTelemetry:
                 "tool_calls": sum(stats["calls"] for stats in self._tools.values()),
                 "distinct_tools": len(self._tools),
                 "errors_dropped": self._errors_dropped,
+                "breaker_blocks": self._breaker_blocks,
                 "legacy_requests": self._legacy_requests,
                 "modern_requests": self._modern_requests,
                 "discover_probes": self._discover_probes,
+                "unknown_tool_calls": self._unknown_tool_calls,
             }
             for counter in _RETENTION_COUNTERS:
                 value = output_retention.get(counter, 0) if output_retention else 0

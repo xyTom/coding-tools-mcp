@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import shutil
 import socket
 import subprocess
@@ -21,6 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from ..mcp_http import local_server_env
 from .tasks import Task
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -184,7 +184,8 @@ def _run_check(command: str, workspace: Path, timeout_s: int) -> bool:
 
 
 def _run_agent(task: Task, arm: ArmConfig, workspace: Path, server_url: str) -> tuple[int, bool]:
-    env = {**os.environ, **arm.env, "CODING_TOOLS_EVAL_PROMPT": task.prompt, "CODING_TOOLS_EVAL_TASK": task.id}
+    """Run the agent with the task prompt and return its exit code and timeout flag."""
+    env = {**local_server_env(), **arm.env, "CODING_TOOLS_EVAL_PROMPT": task.prompt, "CODING_TOOLS_EVAL_TASK": task.id}
     if server_url:
         env["CODING_TOOLS_MCP_URL"] = server_url
     try:
@@ -205,6 +206,7 @@ def _run_agent(task: Task, arm: ArmConfig, workspace: Path, server_url: str) -> 
 
 @contextlib.contextmanager
 def _maybe_server(arm: ArmConfig, workspace: Path, python: str) -> Iterator[str]:
+    """Yield a temporary MCP endpoint, or an empty string when this arm needs no server."""
     if not arm.serve_mcp:
         yield ""
         return
@@ -225,7 +227,7 @@ def _maybe_server(arm: ArmConfig, workspace: Path, python: str) -> Iterator[str]
         cwd=str(REPO_ROOT),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        env={**local_server_env(), "PYTHONDONTWRITEBYTECODE": "1"},
     )
     url = f"http://127.0.0.1:{port}/mcp"
     try:

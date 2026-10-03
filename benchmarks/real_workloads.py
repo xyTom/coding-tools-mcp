@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.mcp_http import McpHttpClient, McpHttpError, connect_with_retry  # noqa: E402
+from benchmarks.mcp_http import McpHttpClient, McpHttpError, connect_with_retry, local_server_env  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -161,6 +161,7 @@ def tool_payload(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def start_server(workspace: Path, port: int, raw_dir: Path, name: str) -> subprocess.Popen[bytes]:
+    """Launch a trusted workload server with captured logs and toolchain allow roots."""
     command = [
         sys.executable,
         "-c",
@@ -179,7 +180,7 @@ def start_server(workspace: Path, port: int, raw_dir: Path, name: str) -> subpro
     raw_dir.mkdir(parents=True, exist_ok=True)
     stdout = (raw_dir / f"{name}-server.stdout.txt").open("wb")
     stderr = (raw_dir / f"{name}-server.stderr.txt").open("wb")
-    env = os.environ.copy()
+    env = local_server_env()
     env["CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS"] = os.pathsep.join(toolchain_allow_roots())
     (raw_dir / f"{name}-exec-allow-roots.txt").write_text(env["CODING_TOOLS_MCP_EXEC_ALLOW_ROOTS"] + "\n", encoding="utf-8")
     return subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env)

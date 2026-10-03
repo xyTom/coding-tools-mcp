@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+# `unittest discover -s tests` imports this module top-level, without running
+# tests/__init__.py, and these tests start real servers: keep them silent.
+os.environ.setdefault("CODING_TOOLS_MCP_TELEMETRY", "off")
 
 from benchmarks.agent_eval.harness import ArmConfig, TaskRun, run_task
 from benchmarks.agent_eval.run_eval import main, parse_arm

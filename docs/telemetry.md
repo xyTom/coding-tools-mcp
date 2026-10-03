@@ -16,7 +16,9 @@ export DO_NOT_TRACK=1                    # the cross-tool convention
 
 Telemetry is also disabled automatically whenever `CI` is set, and the test
 suite forces it off in `tests/__init__.py`, so CI and test runs never pollute
-usage data. Deleting `~/.coding-tools-mcp/id` resets the anonymous install
+usage data. The `Makefile` exports `CODING_TOOLS_MCP_TELEMETRY=off` unless it
+is already set, and the benchmark, dogfood, and agent-eval harnesses start
+their servers with it defaulted to `off` the same way. Deleting `~/.coding-tools-mcp/id` resets the anonymous install
 identity.
 
 To see exactly what would be sent without sending it:
@@ -33,19 +35,33 @@ version strings assembled by one function (`coding_tools_mcp/telemetry.py`).
 It is structurally incapable of carrying paths, arguments, or file contents.
 
 Every event carries: package version, OS platform and architecture, Python
-`major.minor`, transport (`stdio`/`http`), permission mode, a random
-per-session id, and the anonymous install id. No client identity and no
+`major.minor`, transport (`stdio`/`http`), permission mode, a build
+fingerprint (`install` and `build`, below), a random per-session id, and the
+anonymous install id. No client identity and no
 protocol version is carried by every event: one server process answers every
 client of its workspace, so a value recorded once would only ever describe
 whichever client connected first.
+
+The build fingerprint exists because a version string alone proved
+untrustworthy: forks and modified copies report whatever version they were
+copied from, including versions this repository never published. `install` is
+one of `index` (installed from a package index), `editable`, `local` (a
+non-editable install from a local path or archive), `vcs` (installed from a
+version-control URL), `source` (run from a checkout with no installed
+distribution, or with one that is not the code running), or `unknown`. `build`
+is the first 12 hex characters of a SHA-256 over the package's own `.py`
+source files, so the official wheel of a release has exactly one value and
+any modified copy has another; it is `unknown` if the sources cannot be read.
+Only these two labels are sent — never the install URL, path, or file names
+they were derived from.
 
 | Event | When | Additional properties |
 | --- | --- | --- |
 | `session_start` | the first request or notification of the session, `ping` excepted | — |
 | `handshake` | every MCP `initialize` | negotiated protocol version, the client's `clientInfo` name and version |
 | `tool_error` | a tool call fails (max 20 per session) | tool name, error code, duration ms, consecutive-failure count, and for a 2026-07-28 request the `clientInfo` name and version it carried |
-| `tool_summary` | session ends, one per tool used | `calls`, `ok`, `errors`, `operation_failures`, per-error-code `err_*` counts, per-outcome `outcome_*` counts, duration buckets, truncation count |
-| `session_end` | session ends | session duration, total calls, distinct tools, dropped error-event count, handshake-era and 2026-07-28 request counts, `server/discover` probe count, retained-output eviction and omitted-read counters |
+| `tool_summary` | session ends, one per tool used | `calls`, `ok`, `errors`, `operation_failures`, `breaker_blocks`, `already_applied`, per-error-code `err_*` counts, per-outcome `outcome_*` counts, duration buckets, truncation count |
+| `session_end` | session ends | session duration, total calls, distinct tools, dropped error-event count, breaker-block count, handshake-era and 2026-07-28 request counts, `server/discover` probe count, `unknown_tool_calls`, retained-output eviction and omitted-read counters |
 
 A typical session produces 5–15 events totalling a few kilobytes.
 
@@ -59,7 +75,36 @@ it even when `write_stdin`, `read_output`, or `kill_command` is the first call
 to observe that outcome. Those observer calls remain successful unless the
 calls themselves fail. Each `outcome_*` property counts the named operation
 outcome. A terminal command outcome is counted only on its first observation,
-however many later polls report it again.
+however many later polls report it again; the non-terminal `running` is not
+counted. A command stopped by `kill_command` reports `killed`, which is not an
+operation failure.
+
+`breaker_blocks` is retained for legacy `REPEATED_CALL_BLOCKED` results:
+those pre-handler refusals are excluded from `calls`, `errors`, `ok`, duration
+buckets, and failure streaks, and emit no `tool_error`. Current Runtime no
+longer produces these refusals, so ordinary current sessions report zero
+blocks. A repeated call now really executes: if it fails, it increments
+`calls`, `errors`, and its original `err_*` counter even when accompanied by
+nonblocking advice. Do not count advice as success or subtract these real
+failures from the error rate.
+
+Summaries from v0.5.0 counted refusals as calls and as
+`err_REPEATED_CALL_BLOCKED` errors. When comparing executed-operation error
+rates, remove those historical refusals from both numerator and denominator.
+A drop in block counts after upgrading is a policy change, not proof that
+client loops or underlying tool failures decreased.
+
+`already_applied` counts successful calls whose result reported
+`already_applied: true` — a write tool that found its change already in place
+and wrote nothing. Those calls are still counted in `ok`.
+
+A `tools/call` rejected with JSON-RPC `-32602` before any handler runs —
+arguments that violate the tool's input schema, or arguments that are not an
+object — is still a failed call: for a tool this server has, it counts toward
+`calls` and `errors` as `err_INVALID_PARAMS` and may emit a `tool_error` like
+any other failure. A call naming a tool the server does not have is counted
+only in `session_end`'s `unknown_tool_calls`; the name itself is never
+recorded, because it is whatever the client sent.
 
 ## What a session is
 
