@@ -1,0 +1,5 @@
+Publication workflow smoke test
+
+Date: 2026-10-03
+Purpose: verify local file upload, isolated branch commit, and draft pull request creation.
+This temporary fixture changes no runtime behavior and is not intended for merging.
