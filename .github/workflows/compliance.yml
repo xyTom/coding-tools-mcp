@@ -86,6 +86,43 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  package:
+    name: Core package boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CODING_TOOLS_MCP_TELEMETRY: "off"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: "3.11"
+
+      - name: Install packaging tools
+        run: python -m pip install build twine uv
+
+      - name: Check the lock and build distributions
+        run: |
+          uv lock --check
+          python -m build
+          python -m twine check dist/*
+          python scripts/check_release_versions.py --dist-dir dist
+
+      - name: Verify the installed core CLI
+        run: |
+          python -m venv .package-verify
+          .package-verify/bin/python -m pip install dist/*.whl
+          .package-verify/bin/coding-tools-mcp --help >/dev/null
+          .package-verify/bin/python -I - <<'PY'
+          import importlib.metadata
+          import coding_tools_mcp
+
+          assert coding_tools_mcp.__version__ == importlib.metadata.version("coding-tools-mcp")
+          PY
+
   windows-msvc-smoke:
     runs-on: windows-latest
     timeout-minutes: 20

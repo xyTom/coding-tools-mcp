@@ -1,1 +1,0 @@
-"""MCP desktop client package."""

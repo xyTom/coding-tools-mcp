@@ -98,41 +98,15 @@ jobs:
 
       - name: Verify wheel contents and installation
         run: |
-          python - <<'PY'
-          import glob
-          import zipfile
-
-          wheel = glob.glob("dist/*.whl")
-          if len(wheel) != 1:
-              raise SystemExit(f"expected one wheel, found {wheel}")
-          required = {
-              "coding_tools_mcp/__init__.py",
-              "mcp_desktop_client/app.py",
-              "mcp_desktop_client/locales/app_zh_CN.qm",
-              "mcp_desktop_client/locales/app_zh_CN.ts",
-          }
-          with zipfile.ZipFile(wheel[0]) as archive:
-              names = set(archive.namelist())
-              missing = sorted(required - names)
-              if missing:
-                  raise SystemExit(f"wheel is missing: {missing}")
-              entry_points = archive.read(
-                  next(name for name in names if name.endswith("entry_points.txt"))
-              ).decode()
-              for command in ("coding-tools-mcp", "coding-tools-mcp-desktop"):
-                  if command not in entry_points:
-                      raise SystemExit(f"wheel entry point is missing: {command}")
-          PY
+          python scripts/check_release_versions.py --dist-dir dist
           python -m venv .package-verify
           .package-verify/bin/python -m pip install dist/*.whl
           .package-verify/bin/coding-tools-mcp --help >/dev/null
-          .package-verify/bin/python - <<'PY'
+          .package-verify/bin/python -I - <<'PY'
+          import importlib.metadata
           import coding_tools_mcp
-          import tomllib
 
-          with open("pyproject.toml", "rb") as handle:
-              expected = tomllib.load(handle)["project"]["version"]
-          assert coding_tools_mcp.__version__ == expected
+          assert coding_tools_mcp.__version__ == importlib.metadata.version("coding-tools-mcp")
           PY
 
       - name: Upload distribution artifacts

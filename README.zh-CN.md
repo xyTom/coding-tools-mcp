@@ -65,8 +65,8 @@ Gemini CLI 或 Cline——各家的 JSON 配置完全相同（偏好 Node 的话
 上同时提供：完整支持 MCP `2026-07-28`（对外声明的 capability 只有 `tools`），
 同时继续支持握手时代的 `2025-11-25` 与 `2025-06-18`；两代都没有会话。
 一行安装脚本、各客户端的完整接入指南和排障见
-[docs/quickstart.md](docs/quickstart.md) 与
-[docs/mcp-client-config.md](docs/mcp-client-config.md)。
+[快速开始](https://coding-tools-mcp.github.io/docs/zh-CN/getting-started/) 与
+[客户端配置](https://coding-tools-mcp.github.io/docs/zh-CN/clients/)。
 
 ## 七个值得一试的玩法
 
@@ -83,7 +83,7 @@ CODING_TOOLS_MCP_AUTH_MODE=bearer ./integrations/tunnels/tunnel.sh cloudflared /
 Tunnel）。手机上打开 claude.ai，指向 `https://<tunnel-host>/mcp`，就能驱动家里的
 工作站。ChatGPT 与 Grok 通过各自的连接器设置同样接入。内置 Bearer token 与
 OAuth 2.1 + PKCE（含 RFC 7591 动态注册）。
-→ [docs/remote-mcp.md](docs/remote-mcp.md)
+→ [Remote MCP](https://coding-tools-mcp.github.io/docs/zh-CN/guides/remote-access/)
 
 **3. 在一次性 Docker 沙箱里放心跑可疑代码。**
 
@@ -93,7 +93,7 @@ docker run --rm --init -it -p 8765:8765 -v "$PWD:/workspace" coding-tools-mcp-sa
 ```
 
 容器化的服务器，工具链和缓存都预配好——放心把 agent 指向一个来路不明的
-PR，用完即毁。→ [docs/docker.md](docs/docker.md)
+PR，用完即毁。→ [Docker 沙箱](https://coding-tools-mcp.github.io/docs/zh-CN/guides/docker-sandbox/)
 
 **4. 一个 MCP 调用，起一台云沙箱。**内置的
 [Cloudflare Worker 控制面](infra/cloudflare/sandbox-control/README.md) 把
@@ -103,13 +103,23 @@ PR，用完即毁。→ [docs/docker.md](docs/docker.md)
 
 **5. 用图形界面操作。**
 
+桌面应用已经拆到独立仓库：
+[coding-tools-mcp/desktop](https://github.com/coding-tools-mcp/desktop)。
+
 ```bash
-python -m pip install "coding-tools-mcp[desktop]"
+git clone https://github.com/coding-tools-mcp/desktop.git
+cd desktop
+python -m pip install -e .
 coding-tools-mcp-desktop
 ```
 
 按工作区管理配置、一键启停服务器与隧道、凭证设置带剪贴板助手、实时健康
-检查。支持英文与简体中文。
+检查。支持英文与简体中文。Desktop 与核心 runtime 现在独立版本、独立发布。
+
+如果此前安装的是 `coding-tools-mcp[desktop]`，请先升级核心 runtime，再按
+上面的步骤安装独立桌面应用。如果同一环境中已安装独立桌面应用，请在核心
+升级后重装它：旧核心包拥有相同的桌面文件和命令。新核心包不再提供
+`desktop` extra 或 `coding-tools-mcp-desktop` 命令。
 
 **6. 保持一个活着的交互式命令。**`exec_command` 在真实 PTY 下启动 REPL 或
 调试器；`write_stdin` 跨轮次喂输入；`read_output` 分页读取长输出；
@@ -117,7 +127,7 @@ coding-tools-mcp-desktop
 
 **7. 给自研 agent 装上生产级的"手"。**用 Anthropic SDK 或任何框架搭 agent
 循环？别再手写文件和执行工具——对着这个服务器讲 MCP，整个安全边界直接
-继承。→ [docs/embedding.md](docs/embedding.md)
+继承。→ [嵌入指南](https://coding-tools-mcp.github.io/docs/zh-CN/guides/embedding/)
 
 ## 工具目录
 
@@ -178,12 +188,13 @@ SWE-bench 榜单成绩——[docs/swe-bench.md](docs/swe-bench.md) 写明了测�
 
 | | |
 | --- | --- |
-| 文档导航 | [按主题浏览文档](docs/README.md) |
-| 上手 | [快速开始](docs/quickstart.md) · [客户端配置](docs/mcp-client-config.md) · [排障](docs/troubleshooting.md) |
-| 远程与沙箱 | [Remote MCP](docs/remote-mcp.md) · [Docker 沙箱](docs/docker.md) · [云沙箱 Worker](infra/cloudflare/sandbox-control/README.md) |
-| 工具与契约 | [工具与 Schema](docs/tools-and-schemas.md) · [运行时契约](docs/runtime-contract-v0.3.md) · [迁移到 0.3](docs/migration-0.3.md) · [权限模式](docs/permission-modes.md) |
-| 命令执行 | [Exec 配方](docs/exec-command-recipes.md) · [Exec 排障](docs/troubleshooting-exec.md) |
-| 集成 | [嵌入指南](docs/embedding.md) · [npm 启动器](packages/npm-launcher/README.md) |
+| 公共文档 | [简体中文文档](https://coding-tools-mcp.github.io/docs/zh-CN/) |
+| 核心文档导航 | [与源码强关联的 reference 与 evidence](docs/README.md) |
+| 上手 | [快速开始](https://coding-tools-mcp.github.io/docs/zh-CN/getting-started/) · [客户端配置](https://coding-tools-mcp.github.io/docs/zh-CN/clients/) · [排障](https://coding-tools-mcp.github.io/docs/zh-CN/troubleshooting/) |
+| 远程与沙箱 | [Remote MCP](https://coding-tools-mcp.github.io/docs/zh-CN/guides/remote-access/) · [Docker 沙箱](https://coding-tools-mcp.github.io/docs/zh-CN/guides/docker-sandbox/) · [云沙箱 Worker](infra/cloudflare/sandbox-control/README.md) |
+| 工具与契约 | [工具与 Schema](docs/tools-and-schemas.md) · [运行时契约](docs/runtime-contract-v0.3.md) · [迁移到 0.3](https://coding-tools-mcp.github.io/docs/zh-CN/migrations/0.3/) · [权限模式](docs/permission-modes.md) |
+| 命令执行 | [Exec 配方](https://coding-tools-mcp.github.io/docs/zh-CN/guides/exec-command-recipes/) · [Exec 排障](https://coding-tools-mcp.github.io/docs/zh-CN/troubleshooting/execution/) |
+| 集成 | [嵌入指南](https://coding-tools-mcp.github.io/docs/zh-CN/guides/embedding/) · [npm 启动器](packages/npm-launcher/README.md) |
 | 安全与质量 | [安全策略](SECURITY.md) · [安全边界](docs/security-boundary.md) · [CI 与测试](docs/ci-and-tests.md) · [已知限制](docs/limitations.md) · [竞品分析](docs/competitive-analysis.md) |
 
 ## 开发

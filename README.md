@@ -72,9 +72,9 @@ Prefer HTTP? Drop `--stdio` and the server speaks Streamable HTTP on
 transport: MCP `2026-07-28` in full, with `tools` as the only advertised
 capability, and the handshake era `2025-11-25` with `2025-06-18`
 compatibility. Neither has sessions. A one-line installer, per-client
-walkthroughs, and troubleshooting live in
-[docs/quickstart.md](docs/quickstart.md) and
-[docs/mcp-client-config.md](docs/mcp-client-config.md).
+walkthroughs, and troubleshooting live in the
+[Quickstart](https://coding-tools-mcp.github.io/docs/getting-started/) and
+[client configuration](https://coding-tools-mcp.github.io/docs/clients/) guides.
 
 ## Seven things to try
 
@@ -93,7 +93,7 @@ Microsoft Dev Tunnel). Point claude.ai on your phone at
 `https://<tunnel-host>/mcp` and drive your home workstation from anywhere.
 ChatGPT and Grok connect through their connector settings the same way.
 Bearer tokens and OAuth 2.1 + PKCE (with RFC 7591 dynamic registration) are
-built in. → [docs/remote-mcp.md](docs/remote-mcp.md)
+built in. → [Remote access](https://coding-tools-mcp.github.io/docs/guides/remote-access/)
 
 **3. Let an agent loose on untrusted code — inside a disposable sandbox.**
 
@@ -103,7 +103,7 @@ docker run --rm --init -it -p 8765:8765 -v "$PWD:/workspace" coding-tools-mcp-sa
 ```
 
 A containerized server with toolchains and caches preconfigured, safe to point
-at a sketchy PR and destroy afterwards. → [docs/docker.md](docs/docker.md)
+at a sketchy PR and destroy afterwards. → [Docker sandbox](https://coding-tools-mcp.github.io/docs/guides/docker-sandbox/)
 
 **4. Spin up a cloud sandbox with one MCP call.** The bundled
 [Cloudflare Worker control plane](infra/cloudflare/sandbox-control/README.md) exposes
@@ -113,13 +113,25 @@ authenticated Cloudflare Tunnel. Ephemeral compute, no server of your own.
 
 **5. Drive it from a GUI.**
 
+The desktop application now lives in its own repository:
+[coding-tools-mcp/desktop](https://github.com/coding-tools-mcp/desktop).
+
 ```bash
-python -m pip install "coding-tools-mcp[desktop]"
+git clone https://github.com/coding-tools-mcp/desktop.git
+cd desktop
+python -m pip install -e .
 coding-tools-mcp-desktop
 ```
 
 Per-workspace profiles, server and tunnel start/stop, credential setup with
-clipboard helpers, live health checks. English and 简体中文.
+clipboard helpers, live health checks. English and 简体中文. The desktop app is
+versioned and released independently from the core runtime.
+
+If you previously installed `coding-tools-mcp[desktop]`, upgrade the core runtime
+before installing the standalone app above. If the standalone app already
+shares that environment, reinstall it after the core upgrade: the old core
+package owned the same desktop files and command. The new core package no longer
+ships the desktop extra or the `coding-tools-mcp-desktop` command.
 
 **6. Keep an interactive command alive.** `exec_command` starts a REPL or
 debugger under a real PTY; `write_stdin` feeds it across turns; `read_output`
@@ -129,7 +141,7 @@ first-class, with deadline watchdogs and bounded buffers.
 **7. Give your own agent production-grade hands.** Building an agent loop with
 the Anthropic SDK or anything else? Don't hand-roll file and exec tools —
 speak MCP to this server and inherit the whole safety boundary. →
-[docs/embedding.md](docs/embedding.md)
+[Embedding guide](https://coding-tools-mcp.github.io/docs/guides/embedding/)
 
 ## The tool catalog
 
@@ -196,12 +208,13 @@ measured. More: [COMPLIANCE.md](COMPLIANCE.md) · [BENCHMARK.md](BENCHMARK.md) �
 
 | | |
 | --- | --- |
-| Documentation map | [Browse docs by topic](docs/README.md) |
-| Getting started | [Quickstart](docs/quickstart.md) · [Client configuration](docs/mcp-client-config.md) · [Troubleshooting](docs/troubleshooting.md) |
-| Remote & sandboxed | [Remote MCP](docs/remote-mcp.md) · [Docker sandbox](docs/docker.md) · [Cloud sandbox worker](infra/cloudflare/sandbox-control/README.md) |
-| Tools & contract | [Tools and schemas](docs/tools-and-schemas.md) · [Runtime contract](docs/runtime-contract-v0.3.md) · [Migrating to 0.3](docs/migration-0.3.md) · [Permission modes](docs/permission-modes.md) |
-| Execution | [Exec recipes](docs/exec-command-recipes.md) · [Exec troubleshooting](docs/troubleshooting-exec.md) |
-| Integration | [Embedding](docs/embedding.md) · [npm launcher](packages/npm-launcher/README.md) |
+| Public documentation | [coding-tools-mcp.github.io/docs](https://coding-tools-mcp.github.io/docs/) |
+| Core documentation map | [Source-coupled reference and evidence](docs/README.md) |
+| Getting started | [Quickstart](https://coding-tools-mcp.github.io/docs/getting-started/) · [Client configuration](https://coding-tools-mcp.github.io/docs/clients/) · [Troubleshooting](https://coding-tools-mcp.github.io/docs/troubleshooting/) |
+| Remote & sandboxed | [Remote MCP](https://coding-tools-mcp.github.io/docs/guides/remote-access/) · [Docker sandbox](https://coding-tools-mcp.github.io/docs/guides/docker-sandbox/) · [Cloud sandbox worker](infra/cloudflare/sandbox-control/README.md) |
+| Tools & contract | [Tools and schemas](docs/tools-and-schemas.md) · [Runtime contract](docs/runtime-contract-v0.3.md) · [Migrating to 0.3](https://coding-tools-mcp.github.io/docs/migrations/0.3/) · [Permission modes](docs/permission-modes.md) |
+| Execution | [Exec recipes](https://coding-tools-mcp.github.io/docs/guides/exec-command-recipes/) · [Exec troubleshooting](https://coding-tools-mcp.github.io/docs/troubleshooting/execution/) |
+| Integration | [Embedding](https://coding-tools-mcp.github.io/docs/guides/embedding/) · [npm launcher](packages/npm-launcher/README.md) |
 | Security & quality | [Security policy](SECURITY.md) · [Security boundary](docs/security-boundary.md) · [CI and tests](docs/ci-and-tests.md) · [Limitations](docs/limitations.md) · [Competitive analysis](docs/competitive-analysis.md) |
 
 ## Development

@@ -75,6 +75,8 @@ present. Errors use the same envelope with readable recovery guidance and
 once in one `image` block. `structuredContent` contains path, media type, byte
 count, dimensions, resize metadata, and warnings, but no base64 or data URL.
 
+<a id="apply_patch"></a>
+
 ## Patch behavior
 
 `apply_patch` accepts the standard envelope:

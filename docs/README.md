@@ -1,33 +1,30 @@
-# Documentation map
+# Core documentation map
 
-The documentation keeps stable file paths for existing links, while this index provides the logical structure for humans and coding agents.
+Human-oriented tutorials, client setup, migrations, and troubleshooting are published at:
 
-## Get started and connect clients
+https://coding-tools-mcp.github.io/docs/
 
-- [Quickstart](quickstart.md)
-- [MCP client configuration](mcp-client-config.md)
-- [Remote MCP](remote-mcp.md)
-- [Docker](docker.md)
-- [Troubleshooting](troubleshooting.md)
+Their source is maintained in:
+
+https://github.com/coding-tools-mcp/docs
+
+Existing user-guide paths remain as compatibility pointers with their historical
+section anchors. Current runtime corrections link to the source-coupled
+references below; the local tool journal's storage and security contract also
+remain here.
 
 ## Runtime and protocol reference
+
+These documents stay with the source because tests and releases validate them against the implementation:
 
 - [Tools and schemas](tools-and-schemas.md)
 - [Runtime contract v0.3](runtime-contract-v0.3.md)
 - [Runtime contract v0.2](runtime-contract-v0.2.md)
 - [Permission modes](permission-modes.md)
 - [Telemetry](telemetry.md)
+- [Local tool event journal](local-tool-events.md)
 - [Security boundary](security-boundary.md)
 - [Limitations](limitations.md)
-
-## Guides and integration
-
-- [Embedding](embedding.md)
-- [Exec command recipes](exec-command-recipes.md)
-- [Exec troubleshooting](troubleshooting-exec.md)
-- [Migration to 0.3](migration-0.3.md)
-- [Migration to 0.5](migration-0.5.md)
-- [Profile](profile.md)
 
 ## Engineering and evaluation
 
@@ -39,12 +36,13 @@ The documentation keeps stable file paths for existing links, while this index p
 - [Dogfood](dogfood.md)
 - [SWE-bench](swe-bench.md)
 - [SWE-bench supporting material](swebench/README.md)
+- [Contract profile](profile.md)
 
-## Component-local documentation
+## Ecosystem
 
-Some documentation belongs with the component it describes:
-
-- [Desktop client](../apps/desktop-client/README.md)
+- [Desktop application](https://github.com/coding-tools-mcp/desktop)
+- [Public documentation](https://coding-tools-mcp.github.io/docs/)
+- [Documentation source](https://github.com/coding-tools-mcp/docs)
 - [Tunnel integrations](../integrations/tunnels/README.md)
 - [npm launcher](../packages/npm-launcher/README.md)
 - [Cloudflare sandbox control](../infra/cloudflare/sandbox-control/README.md)

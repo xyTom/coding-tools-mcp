@@ -19,7 +19,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/xyTom/coding-tools-mcp"
-Documentation = "https://github.com/xyTom/coding-tools-mcp/tree/main/docs"
+Documentation = "https://coding-tools-mcp.github.io/docs/"
 Source = "https://github.com/xyTom/coding-tools-mcp"
 Issues = "https://github.com/xyTom/coding-tools-mcp/issues"
 
@@ -33,21 +33,13 @@ dev = [
   "ruff>=0.15,<0.16",
   "typing_extensions>=4.12",
 ]
-desktop = [
-  "PySide6>=6.8,<6.9",
-  "psutil>=7.0,<8",
-]
 image = [
   "Pillow>=10.0",
 ]
 
 [project.scripts]
 coding-tools-mcp = "coding_tools_mcp.server:main"
-coding-tools-mcp-desktop = "mcp_desktop_client.app:main"
 
 [tool.setuptools.packages.find]
-where = [".", "apps/desktop-client"]
-include = ["coding_tools_mcp*", "mcp_desktop_client*"]
-
-[tool.setuptools.package-data]
-mcp_desktop_client = ["locales/*.qm", "locales/*.ts"]
+where = ["."]
+include = ["coding_tools_mcp*"]

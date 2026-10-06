@@ -1,75 +1,22 @@
-# Exec Command Recipes
+<a id="exec-command-recipes"></a>
 
-These recipes intentionally use explicit `exec_command` commands. The MCP server does not infer project type, install dependencies automatically, or choose package-manager cache policy.
+# Exec command recipes moved
+
+The maintained recipes are published in the [execution guide](https://coding-tools-mcp.github.io/docs/guides/exec-command-recipes/).
+Their source is maintained at:
+
+https://github.com/coding-tools-mcp/docs/blob/main/content/docs/guides/exec-command-recipes.mdx
 
 ## Foreground and background results
 
-The server always exposes the same four process tools: `exec_command`,
-`write_stdin`, `read_output`, and `kill_command`. It does not dynamically add a
-tool after a command starts.
+For the behavior of this checkout, use the source-coupled
+[command lifecycle](runtime-contract-v0.3.md#command-lifecycle) and
+[command/output reference](tools-and-schemas.md#command-and-output-behavior).
+They cover `next_action`, polling, truncated output, process lifetime, and
+`keep_stdin_open` for input without a TTY on every platform.
+Pass an explicit workspace-relative `workdir` when targeting a subdirectory;
+see the [exec_command contract](runtime-contract-v0.3.md#exec_command).
 
-`exec_command` waits up to 10 seconds by default. If the command exits in that
-window, the result is complete and no polling call is needed. If it is still
-running, the result contains a `command_id` and an exact `next_action`, for
-example:
-
-```json
-{
-  "status": "running",
-  "command_id": "cmd_123",
-  "next_action": {
-    "tool": "write_stdin",
-    "arguments": {
-      "command_id": "cmd_123",
-      "chars": "",
-      "yield_time_ms": 10000
-    }
-  }
-}
-```
-
-Calling `write_stdin` with empty `chars` means “wait/poll”; non-empty `chars`
-interacts with the process, which requires starting it with
-`keep_stdin_open: true` (or `tty: true` on POSIX). `read_output` is for paging retained stdout/stderr
-when a result explicitly says output was truncated (or when compact verbosity
-was requested). It is not an extra step for every command.
-
-Relative paths always resolve against the workspace root, so pass `workdir`
-explicitly whenever a command must run somewhere else.
-
-Use the external runtime `HOME`, `TMPDIR`, or `cache_dir` reported by `server_info` when you want dependency caches without adding files to the Git worktree. These shell examples assume trusted mode because they use environment expansion:
-
-```bash
-MAVEN_USER_HOME="$HOME/.cache/m2" mvn test
-GRADLE_USER_HOME="$HOME/.cache/gradle" ./gradlew test
-npm_config_cache="$HOME/.cache/npm" npm ci && npm test
-PIP_CACHE_DIR="$HOME/.cache/pip" python -m pip install -r requirements.txt && python -m pytest
-GOCACHE="$HOME/.cache/go-build" GOMODCACHE="$HOME/.cache/go-mod" go test ./...
-CARGO_HOME="$HOME/.cache/cargo" cargo test
-cmake -S . -B "$TMPDIR/cmake-build" && cmake --build "$TMPDIR/cmake-build" && ctest --test-dir "$TMPDIR/cmake-build"
-```
-
-Primitive toolchain checks:
-
-```bash
-java -version
-javac -version
-mvn -version
-gcc --version
-g++ --version
-make --version
-cmake --version
-node --version
-npm --version
-python --version
-pip --version
-go version
-cargo --version
-rustc --version
-```
-
-If dependencies need network access, start with:
-
-```bash
-coding-tools-mcp --permission-mode trusted --workspace /path/to/repo
-```
+The public recipes remain the home for toolchain commands and cache examples.
+This file preserves the existing section link while the contract records
+runtime changes independently of the tutorial.

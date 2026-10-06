@@ -2,6 +2,10 @@
 
 This repository uses a local compliance runner plus GitHub Actions.
 
+Desktop development, translation checks, packaging, and release gates belong
+to the independent [desktop repository](https://github.com/coding-tools-mcp/desktop#development).
+The commands below validate and release the core runtime and its npm launcher.
+
 ## One-Command Gates
 
 ```bash

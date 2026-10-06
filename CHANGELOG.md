@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Breaking
+
+- The desktop application is now maintained and released independently from
+  the core runtime at
+  [coding-tools-mcp/desktop](https://github.com/coding-tools-mcp/desktop).
+  The core `coding-tools-mcp` wheel no longer provides the `desktop` extra,
+  the `mcp_desktop_client` package, or the `coding-tools-mcp-desktop`
+  console entry point. Install the standalone desktop package instead.
+
+### Changed
+
+- Human-oriented setup, client, migration, and troubleshooting documentation
+  is maintained in
+  [coding-tools-mcp/docs](https://github.com/coding-tools-mcp/docs) and
+  published at
+  [coding-tools-mcp.github.io/docs](https://coding-tools-mcp.github.io/docs/).
+  Source-coupled contracts, security invariants, and release/evaluation
+  evidence remain in the core repository.
+- Existing public `docs/*.md` user-guide paths remain as compatibility
+  pointers so inbound GitHub links do not immediately break.
+
 ### Fixed
 
 - Adjacent `@@` anchors must contain meaningful text before they count as
