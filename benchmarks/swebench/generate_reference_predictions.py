@@ -5,13 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import urllib.parse
-import urllib.request
+import sys
 from pathlib import Path
 from typing import Any
 
 
-DATASETS_SERVER_ROWS = "https://datasets-server.huggingface.co/rows"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from benchmarks.swebench.pinned import dataset_path, load_instances, load_pins  # noqa: E402
 
 
 def load_subset(path: Path) -> dict[str, Any]:
@@ -33,46 +36,16 @@ def path_display(values: list[str]) -> str:
     return ", ".join(values)
 
 
-def fetch_rows(dataset_name: str, split: str, offset: int, length: int) -> dict[str, Any]:
-    query = urllib.parse.urlencode(
-        {
-            "dataset": dataset_name,
-            "config": "default",
-            "split": split,
-            "offset": offset,
-            "length": length,
-        }
-    )
-    request = urllib.request.Request(f"{DATASETS_SERVER_ROWS}?{query}", headers={"Accept": "application/json"})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        payload = response.read()
-    return json.loads(payload)
-
-
-def fetch_reference_patches(dataset_name: str, split: str, instance_ids: list[str], page_size: int = 100) -> dict[str, str]:
-    wanted = set(instance_ids)
-    patches: dict[str, str] = {}
-    offset = 0
-    while wanted - set(patches):
-        page = fetch_rows(dataset_name, split, offset, page_size)
-        rows = page.get("rows", [])
-        if not isinstance(rows, list) or not rows:
-            break
-        for entry in rows:
-            if not isinstance(entry, dict):
-                continue
-            row = entry.get("row")
-            if not isinstance(row, dict):
-                continue
-            instance_id = row.get("instance_id")
-            patch = row.get("patch")
-            if isinstance(instance_id, str) and instance_id in wanted and isinstance(patch, str) and patch.strip():
-                patches[instance_id] = patch
-        offset += len(rows)
-    missing = sorted(wanted - set(patches))
+def fetch_reference_patches(dataset_name: str, split: str, instance_ids: list[str]) -> dict[str, str]:
+    """Read verified fixtures; never query a floating datasets-server revision."""
+    pins = load_pins()
+    if dataset_name != pins["dataset"]["name"] or split != pins["dataset"]["split"]:
+        raise ValueError("requested dataset does not match pinned fixture")
+    rows = {row["instance_id"]: row for row in load_instances(pins)}
+    missing = sorted(set(instance_ids) - set(rows))
     if missing:
-        raise SystemExit(f"reference patches not found for: {path_display(missing)}")
-    return {instance_id: patches[instance_id] for instance_id in instance_ids}
+        raise ValueError(f"reference patches not pinned for: {path_display(missing)}")
+    return {instance_id: rows[instance_id]["patch"] for instance_id in instance_ids}
 
 
 def write_predictions(path: Path, model_name: str, patches: dict[str, str]) -> None:
@@ -101,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate-output", type=Path, required=True)
     parser.add_argument("--metadata-output", type=Path)
     parser.add_argument("--baseline-model-name", default="baseline_native_reference_patch")
-    parser.add_argument("--candidate-model-name", default="candidate_mcp_reference_patch")
+    parser.add_argument("--candidate-model-name", default="candidate_reference_patch_harness_control")
     args = parser.parse_args(argv)
 
     subset = load_subset(args.subset)
@@ -118,7 +91,8 @@ def main(argv: list[str] | None = None) -> int:
                 "dataset_name": dataset_name,
                 "split": split,
                 "instance_ids": instance_ids,
-                "source": DATASETS_SERVER_ROWS,
+                "source": str(dataset_path(load_pins())),
+                "pins": load_pins(),
                 "prediction_source": "reference_patch",
                 "warning": "Reference patches validate the official harness path; they are not model-generated benchmark predictions.",
             },

@@ -12,6 +12,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,10 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCHMARK_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from benchmarks.swebench.pinned import dataset_path, docker_image, load_pins  # noqa: E402
 
 
 @dataclass
@@ -40,6 +45,9 @@ def selected_instances(subset: dict[str, Any], requested: list[str]) -> list[dic
     if not requested:
         return instances
     wanted = set(requested)
+    missing = wanted - {item.get("instance_id") for item in instances}
+    if missing:
+        raise ValueError(f"instance IDs are not in pinned subset: {', '.join(sorted(missing))}")
     return [item for item in instances if item.get("instance_id") in wanted]
 
 
@@ -50,6 +58,8 @@ def validate_predictions(path: Path, expected_ids: set[str]) -> PredictionSet:
     model_names: set[str] = set()
     if not path.exists():
         return PredictionSet(path, 0, [], [], True, [f"{path} does not exist"])
+    if not expected_ids:
+        errors.append("no benchmark instances selected")
     for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
@@ -58,21 +68,30 @@ def validate_predictions(path: Path, expected_ids: set[str]) -> PredictionSet:
         except json.JSONDecodeError as exc:
             errors.append(f"line {line_no}: invalid JSON: {exc}")
             continue
+        if not isinstance(row, dict):
+            errors.append(f"line {line_no}: prediction must be an object")
+            continue
         for key in ("instance_id", "model_name_or_path", "model_patch"):
-            if key not in row:
-                errors.append(f"line {line_no}: missing {key}")
+            if not isinstance(row.get(key), str):
+                errors.append(f"line {line_no}: {key} must be a string")
         instance_id = row.get("instance_id")
         if isinstance(instance_id, str) and instance_id in expected_ids:
+            if instance_id in ids:
+                errors.append(f"line {line_no}: duplicate prediction for {instance_id}")
             ids.append(instance_id)
             patch = row.get("model_patch")
             patches.append(patch if isinstance(patch, str) else "")
             model_name = row.get("model_name_or_path")
-            if isinstance(model_name, str) and model_name:
+            if isinstance(model_name, str) and model_name and model_name not in {".", ".."}:
                 model_names.add(model_name)
+            else:
+                errors.append(f"line {line_no}: invalid model_name_or_path")
     missing = sorted(expected_ids - set(ids))
     if missing:
         errors.append(f"missing predictions for: {', '.join(missing)}")
-    return PredictionSet(path, len(ids), ids, sorted(model_names), all(not patch.strip() for patch in patches), errors)
+    if not model_names:
+        errors.append("predictions must name a model or replay source")
+    return PredictionSet(path, len(ids), ids, sorted(model_names), not patches or any(not patch.strip() for patch in patches), errors)
 
 
 def capture(command: list[str], raw_dir: Path, name: str, *, timeout: int = 120) -> dict[str, Any]:
@@ -151,8 +170,12 @@ def check_docker(raw_dir: Path) -> tuple[bool, str, dict[str, Any]]:
 
 def check_swebench(raw_dir: Path, *, install: bool) -> tuple[bool, str, dict[str, Any] | None, dict[str, Any]]:
     install_result: dict[str, Any] | None = None
-    if install and importlib.util.find_spec("swebench") is None:
-        install_result = capture([sys.executable, "-m", "pip", "install", "swebench"], raw_dir, "pip-install-swebench", timeout=900)
+    required = load_pins()["swebench_version"]
+    if install and package_version("swebench") != required:
+        install_result = capture([sys.executable, "-m", "pip", "install", f"swebench=={required}"], raw_dir, "pip-install-swebench", timeout=900)
+    if package_version("swebench") != required:
+        detail = f"swebench=={required} required; installed={package_version('swebench')}"
+        return False, detail, install_result, {"ran": False, "returncode": None, "stdout": "", "stderr": detail}
     help_result = capture([sys.executable, "-m", "swebench.harness.run_evaluation", "--help"], raw_dir, "swebench-help", timeout=120)
     if help_result["returncode"] != 0:
         if importlib.util.find_spec("swebench") is None:
@@ -162,12 +185,21 @@ def check_swebench(raw_dir: Path, *, install: bool) -> tuple[bool, str, dict[str
 
 
 def evaluation_command(predictions: Path, run_id: str, max_workers: int, instance_ids: list[str]) -> list[str]:
+    pins = load_pins()
     command = [
         sys.executable,
         "-m",
         "swebench.harness.run_evaluation",
         "--dataset_name",
-        "princeton-nlp/SWE-bench_Lite",
+        str(dataset_path(pins)),
+        "--split",
+        pins["dataset"]["split"],
+        "--namespace",
+        pins["docker"]["namespace"],
+        "--instance_image_tag",
+        pins["docker"]["instance_image_tag"],
+        "--cache_level",
+        "instance",
         "--predictions_path",
         str(predictions),
         "--max_workers",
@@ -179,6 +211,37 @@ def evaluation_command(predictions: Path, run_id: str, max_workers: int, instanc
         command.append("--instance_ids")
         command.extend(instance_ids)
     return command
+
+
+def prepare_images(instance_ids: list[str], raw_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
+    """Pull immutable digests, then alias locally for the harness's tag-only API."""
+    pins = load_pins()
+    evidence: list[dict[str, Any]] = []
+    for instance_id in instance_ids:
+        source, target = docker_image(pins, instance_id)
+        commands = (["docker", "pull", "--platform", "linux/amd64", source],
+                    ["docker", "tag", source, target],
+                    ["docker", "image", "inspect", "--format", "{{.Id}}", source, target])
+        for index, command in enumerate(commands):
+            result = capture(command, raw_dir, f"image-{instance_id}-{index}", timeout=1200)
+            evidence.append(result)
+            if result["returncode"] != 0:
+                return False, evidence
+            if index == 2:
+                ids = str(result["stdout"]).splitlines()
+                if len(ids) != 2 or ids[0] != ids[1] or not ids[0].startswith("sha256:"):
+                    return False, evidence
+    return True, evidence
+
+
+def comparison_conclusion(baseline: dict[str, Any], candidate: dict[str, Any], expected: int) -> str:
+    if expected < 1 or baseline.get("completed") != expected or candidate.get("completed") != expected:
+        return "INCONCLUSIVE"
+    native, mcp = baseline.get("resolved"), candidate.get("resolved")
+    if not isinstance(native, int) or not isinstance(mcp, int):
+        return "INCONCLUSIVE"
+    # Two empty/failed controls must never become a green advisory result.
+    return "PASS" if native > 0 and mcp >= native else "FAIL"
 
 
 def maybe_run(command: list[str], enabled: bool, raw_dir: Path, name: str) -> dict[str, Any]:
@@ -209,10 +272,11 @@ def copy_if_exists(source: Path, destination: Path) -> str | None:
 
 def collect_harness_artifacts(raw_dir: Path, run_id: str, label: str) -> list[str]:
     copied: list[str] = []
-    for source, destination in (
-        (Path("logs/run_evaluation") / run_id, raw_dir / f"{label}-logs-run_evaluation"),
-        (Path("evaluation_results"), raw_dir / f"{label}-evaluation_results"),
-    ):
+    sources = [(Path("logs/run_evaluation") / run_id, raw_dir / f"{label}-logs-run_evaluation")]
+    # Official 4.1.0 summary names end in the run ID. Never copy a shared
+    # evaluation_results directory that may contain stale unrelated runs.
+    sources.extend((source, raw_dir / f"{label}-{source.name}") for source in Path.cwd().glob(f"*.{run_id}.json"))
+    for source, destination in sources:
         copied_path = copy_if_exists(source, destination)
         if copied_path is not None:
             copied.append(copied_path)
@@ -261,6 +325,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "# SWE-bench Smoke Regression Report",
         "",
         f"- Conclusion: **{report['conclusion']}**",
+        f"- Prediction source: `{report.get('prediction_source', 'checked_in')}` (advisory only)",
         f"- Dataset: `{report['dataset_name']}` split `{report['split']}`",
         f"- Smoke subset: `{report['subset_path']}`",
         f"- Raw log directory: `{report['raw_dir']}`",
@@ -314,9 +379,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--report-json", type=Path, default=Path("reports/benchmark/swebench-regression.json"))
     parser.add_argument("--report-md", type=Path, default=Path("reports/benchmark/swebench-regression.md"))
-    parser.add_argument("--raw-dir", type=Path)
+    parser.add_argument("--raw-dir", type=Path, help="Parent directory for this attempt's unique raw-log subdirectory")
     parser.add_argument("--max-workers", type=int, default=2)
     parser.add_argument("--instance-id", action="append", default=[])
+    parser.add_argument("--prediction-source", choices=("reference_patch", "mcp_reference_replay", "checked_in"), default="checked_in")
     parser.add_argument("--run-evaluation", action="store_true")
     parser.add_argument("--install-swebench", action="store_true")
     parser.add_argument("--allow-placeholder-evaluation", action="store_true")
@@ -327,10 +393,36 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    raw_dir = args.raw_dir
-    if raw_dir is None:
-        raw_dir = args.report_json.parent / args.report_json.stem / "raw"
+    raw_parent = args.raw_dir or args.report_json.parent / args.report_json.stem / "raw"
+    # Preserve previous diagnostics, but never mix them into this run's evidence.
+    args.raw_dir = raw_parent / uuid.uuid4().hex
+    # Replace any old PASS before pin/subset reads or other fallible preflight.
+    # An interrupted run must also leave a current, explicitly incomplete report.
+    incomplete: dict[str, Any] = {
+        "conclusion": "INCONCLUSIVE", "prediction_source": args.prediction_source,
+        "advisory_only": True, "dataset_name": "not validated", "split": "not validated",
+        "subset_path": str(args.subset), "raw_dir": str(args.raw_dir), "instances": [],
+        "preflight": [], "limitations": ["This attempt has not completed preflight or evaluation."],
+        "baseline": {"path": str(args.baseline_predictions), "command": []},
+        "candidate": {"path": str(args.candidate_predictions), "command": []},
+    }
+    write_reports(incomplete, args.report_json, args.report_md)
+    try:
+        return run_attempt(args)
+    except Exception as exc:
+        incomplete["conclusion"] = "ERROR"
+        incomplete["limitations"] = [f"Preflight or evaluation failed: {type(exc).__name__}: {exc}"]
+        write_reports(incomplete, args.report_json, args.report_md)
+        print(incomplete["limitations"][0], file=sys.stderr)
+        return 1
 
+
+def run_attempt(args: argparse.Namespace) -> int:
+    raw_dir = args.raw_dir
+    pins = load_pins()
+    dataset_path(pins)  # Fail closed on fixture corruption even for preflight.
+    if args.max_workers < 1:
+        raise ValueError("--max-workers must be positive")
     subset = load_subset(args.subset)
     instances = selected_instances(subset, args.instance_id)
     expected_ids = {str(item["instance_id"]) for item in instances}
@@ -339,20 +431,24 @@ def main(argv: list[str] | None = None) -> int:
     docker_ok, docker_detail, docker_run = check_docker(raw_dir)
     swebench_ok, swebench_detail, install_run, help_run = check_swebench(raw_dir, install=args.install_swebench)
     environment = capture_environment(raw_dir)
+    suffix = uuid.uuid4().hex
+    baseline_id, candidate_id = f"native_{suffix}", f"mcp_{suffix}"
     baseline_command = evaluation_command(
         args.baseline_predictions,
-        "coding_tools_native_smoke",
+        baseline_id,
         args.max_workers,
         sorted(expected_ids),
     )
     candidate_command = evaluation_command(
         args.candidate_predictions,
-        "coding_tools_mcp_smoke",
+        candidate_id,
         args.max_workers,
         sorted(expected_ids),
     )
 
     limitations: list[str] = []
+    if args.prediction_source != "checked_in":
+        limitations.append("Reference-derived smoke evidence only; not a model-generated benchmark comparison.")
     preflight = [
         f"docker: {'ok' if docker_ok else 'missing'} - {docker_detail}",
         f"swebench package: {'ok' if swebench_ok else 'missing'} - {swebench_detail}",
@@ -363,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
         for error in prediction_set.errors:
             limitations.append(f"{prediction_set.path}: {error}")
     if baseline.placeholder or candidate.placeholder:
-        limitations.append("Prediction files are schema-valid placeholders, not model-generated patches.")
+        limitations.append("Selected predictions include empty patches and are not eligible for a valid benchmark comparison.")
     if not docker_ok:
         limitations.append("Official SWE-bench evaluation requires a working Docker daemon.")
     if not swebench_ok:
@@ -380,20 +476,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.run_evaluation and not can_run:
         limitations.append("Evaluation was requested but preflight/resource checks prevent a valid comparison.")
 
+    images_ok, image_runs = prepare_images(sorted(expected_ids), raw_dir) if can_run else (False, [])
+    if can_run and not images_ok:
+        limitations.append("Pinned Docker image pull/tag verification failed; evaluation was not run.")
+        can_run = False
     baseline_run = maybe_run(baseline_command, can_run, raw_dir, "baseline-evaluation")
     candidate_run = maybe_run(candidate_command, can_run, raw_dir, "candidate-evaluation")
-    baseline_artifacts = collect_harness_artifacts(raw_dir, "coding_tools_native_smoke", "baseline") if can_run else []
-    candidate_artifacts = collect_harness_artifacts(raw_dir, "coding_tools_mcp_smoke", "candidate") if can_run else []
-    baseline_counts = parse_resolved_count("coding_tools_native_smoke", baseline.model_names, expected_ids) if can_run else {}
-    candidate_counts = parse_resolved_count("coding_tools_mcp_smoke", candidate.model_names, expected_ids) if can_run else {}
+    baseline_artifacts = collect_harness_artifacts(raw_dir, baseline_id, "baseline") if can_run else []
+    candidate_artifacts = collect_harness_artifacts(raw_dir, candidate_id, "candidate") if can_run else []
+    baseline_counts = parse_resolved_count(baseline_id, baseline.model_names, expected_ids) if can_run else {}
+    candidate_counts = parse_resolved_count(candidate_id, candidate.model_names, expected_ids) if can_run else {}
     if can_run and baseline_run["returncode"] == 0 and candidate_run["returncode"] == 0:
-        baseline_resolved = baseline_counts.get("resolved")
-        candidate_resolved = candidate_counts.get("resolved")
-        if isinstance(baseline_resolved, int) and isinstance(candidate_resolved, int):
-            conclusion = "PASS" if candidate_resolved >= baseline_resolved else "FAIL"
-        else:
-            conclusion = "INCONCLUSIVE"
-            limitations.append("Harness ran, but resolved counts could not be parsed from report.json files.")
+        conclusion = comparison_conclusion(baseline_counts, candidate_counts, len(expected_ids))
+        if conclusion == "INCONCLUSIVE":
+            limitations.append("Harness reports are incomplete; every selected instance requires a fresh report.")
     elif can_run:
         conclusion = "FAIL"
     elif args.run_evaluation:
@@ -403,6 +499,11 @@ def main(argv: list[str] | None = None) -> int:
 
     report = {
         "conclusion": conclusion,
+        "prediction_source": args.prediction_source,
+        "advisory_only": True,
+        "pins": pins,
+        "image_preparation": image_runs,
+        "run_ids": {"baseline": baseline_id, "candidate": candidate_id},
         "dataset_name": subset.get("dataset_name"),
         "split": subset.get("split"),
         "subset_path": str(args.subset),

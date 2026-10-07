@@ -3,6 +3,12 @@ name: real-workloads
 on:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      source_ref:
+        description: Immutable release commit; defaults to triggering revision
+        type: string
+        required: false
+        default: ""
 
 jobs:
   real-workloads:
@@ -10,22 +16,27 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6.2.0
         with:
           python-version: "3.11"
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
+          package-manager-cache: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: "1.23.x"
+          cache: false
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -40,9 +51,10 @@ jobs:
 
       - name: Upload real workload evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: real-workloads-evidence
           path: reports/benchmark/real-workloads**
           if-no-files-found: ignore
           retention-days: 14
+          overwrite: true

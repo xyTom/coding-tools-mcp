@@ -182,14 +182,19 @@ of sending. The full event list and guarantees are in
 
 ## Evidence, Dogfood and SWE-bench
 
-Every release ships through a tag-triggered pipeline in which the compliance
-suite, real-workload benchmark, and SWE-bench harness run from the same commit
-that publishes to PyPI and npm — both via trusted publishing, npm with
-provenance. Dogfood efficiency metrics are reproducible (`make dogfood-smoke`)
-and checked in under `reports/`. This repository does not claim a
-model-generated SWE-bench leaderboard result — see
-[docs/swe-bench.md](docs/swe-bench.md) for exactly what is and is not
-measured. More: [COMPLIANCE.md](COMPLIANCE.md) · [BENCHMARK.md](BENCHMARK.md) ·
+Release PRs merge into `main`. The main-triggered pipeline selects the immutable
+version commit, runs the hard gates and package verification, publishes to PyPI
+and npm through trusted publishing, verifies both registries, then creates the
+tag and GitHub Release. npm publication includes provenance. See
+[CI and tests](docs/ci-and-tests.md#release-from-main) for the gates, repository
+setup, source evidence, and recovery procedure.
+
+SWE-bench provides advisory evidence: a pinned official-harness control and a
+real HTTP MCP read/patch/edit/diff/exec replay judged by that harness. It does not
+block releases or measure a model-generated solve rate. See
+[docs/swe-bench.md](docs/swe-bench.md) for the scope and evidence. Dogfood
+efficiency metrics are reproducible (`make dogfood-smoke`) and checked in under
+`reports/`. More: [COMPLIANCE.md](COMPLIANCE.md) · [BENCHMARK.md](BENCHMARK.md) ·
 [docs/dogfood.md](docs/dogfood.md)
 
 ## Documentation
