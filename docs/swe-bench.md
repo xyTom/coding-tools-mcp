@@ -1,73 +1,36 @@
 # SWE-bench Evaluation
 
-SWE-bench is the external benchmark path for validating whether this MCP runtime can support issue-fixing agents, not just unit tests. The official harness is Docker-based and evaluates prediction files containing patches.
+SWE-bench's official Docker-backed harness evaluates patch predictions. This
+repository uses it for advisory deterministic smoke evidence. It does not measure
+model-generated solve rates or agent quality.
 
-## Current Artifacts
+## Run and interpret current evidence
 
-- Smoke report: [../reports/benchmark/swebench-regression.md](../reports/benchmark/swebench-regression.md)
-- Smoke JSON: [../reports/benchmark/swebench-regression.json](../reports/benchmark/swebench-regression.json)
-- Official attempt report: [../reports/benchmark/swebench-official-attempt.md](../reports/benchmark/swebench-official-attempt.md)
-- Official attempt JSON: [../reports/benchmark/swebench-official-attempt.json](../reports/benchmark/swebench-official-attempt.json)
-- Official attempt raw logs: [../reports/benchmark/swebench-official-attempt/raw](../reports/benchmark/swebench-official-attempt/raw)
-- Subset: [../benchmarks/swebench/subsets/smoke-lite-10.json](../benchmarks/swebench/subsets/smoke-lite-10.json)
+The [pinned benchmark runbook](../benchmarks/swebench/README.md) is the authoritative
+source for commands, immutable inputs, workflow modes, and acceptance criteria.
+It documents both the reference-patch harness control and the actual HTTP MCP
+repair replay of `sympy__sympy-12419`.
 
-Default local smoke conclusion: `PREFLIGHT_ONLY`.
+The workflow defaults to `prediction_source=both`. A local `make benchmark-smoke`
+is `PREFLIGHT_ONLY`; an explicit evaluation without Docker or the pinned harness
+is `BLOCKED`. A replay pass establishes the tool path only. Official resolution
+claims require complete fresh harness reports and a nonzero successful control.
 
-Explicit official-harness attempt conclusion in this container: `BLOCKED`.
+For a workflow run, inspect its `swebench-lite-evidence` artifact. Current runs
+include `attempt.json` with source/run identifiers and only that attempt's
+selected evidence. Missing reports, a successful advisory workflow, or an older
+checked-in result cannot establish an official pass for a new source commit.
+See the runbook for `ERROR`, `INCONCLUSIVE`, and per-attempt raw-log handling.
 
-Recorded blocker categories:
+## Historical checked-in artifacts
 
-- Docker executable or daemon unavailable.
-- Official `swebench` harness unavailable or import/help path fails.
-- Checked-in baseline and candidate prediction files are schema-valid placeholders, not real model-generated patches.
+These preserved examples describe the runs recorded inside each artifact; they
+are not current-head verification. Check their repository, source SHA, run ID,
+prediction mode, and limitations before citing them.
 
-The repository must not claim SWE-bench pass until official harness results exist.
-
-The GitHub Actions `swebench-lite` workflow defaults to `prediction_source=reference_patch`.
-That mode generates non-empty prediction JSONL files from the SWE-bench Lite
-reference patches before invoking the official harness. It is an official
-harness sanity check with parsed resolved counts, not a native-vs-MCP model
-leaderboard result.
-
-## Official Attempt Command
-
-```bash
-python benchmarks/swebench/run_smoke.py \
-  --install-swebench \
-  --run-evaluation \
-  --require-evaluation-pass \
-  --instance-id sympy__sympy-12419 \
-  --max-workers 1 \
-  --report-json reports/benchmark/swebench-official-attempt.json \
-  --report-md reports/benchmark/swebench-official-attempt.md
-```
-
-The preferred execution path is the manual GitHub Actions workflow, because the
-local Codex container may not have Docker:
-
-```bash
-gh workflow run swebench-lite.yml \
-  --ref recover-rollout-2026-05-16 \
-  -f instance_ids=sympy__sympy-12419 \
-  -f max_workers=1 \
-  -f prediction_source=reference_patch \
-  -f install_swebench=true \
-  -f require_evaluation_pass=true
-```
-
-The workflow uploads `reports/benchmark/**`, including raw harness stdout/stderr,
-captured `logs/run_evaluation` files, prediction paths, Docker diagnostics, and
-environment metadata. It fails by default unless the official harness runs with
-non-placeholder baseline and MCP-candidate predictions, parses resolved counts,
-and satisfies the comparison below. Use `prediction_source=checked_in` only when
-real model-generated prediction files have replaced the scaffold files. Use
-`require_evaluation_pass=false` only for diagnostic attempts that are expected
-to end in `BLOCKED`.
-
-## Acceptance Standard
-
-```text
-candidate_mcp_resolved >= baseline_native_resolved
-```
-
-Both numbers must come from official harness output over the same dataset subset and prediction-generation budget.
+- Smoke report: [swebench-regression.md](../reports/benchmark/swebench-regression.md)
+- Smoke JSON: [swebench-regression.json](../reports/benchmark/swebench-regression.json)
+- Official attempt report: [swebench-official-attempt.md](../reports/benchmark/swebench-official-attempt.md)
+- Official attempt JSON: [swebench-official-attempt.json](../reports/benchmark/swebench-official-attempt.json)
+- Official attempt raw logs: [swebench-official-attempt/raw](../reports/benchmark/swebench-official-attempt/raw)
+- Pinned subset: [smoke-lite-10.json](../benchmarks/swebench/subsets/smoke-lite-10.json)

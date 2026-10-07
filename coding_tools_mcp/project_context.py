@@ -4,6 +4,11 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from .errors import ToolFailure
+from .executor import WorkspaceExecutor
+from .policy import IsolationConfig, compile_policy
 
 
 CONTEXT_FILE_NAMES = frozenset({"AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"})
@@ -67,19 +72,19 @@ class ProjectContext:
         return "\n\n".join(sections)
 
 
-def load_project_context(root: Path) -> ProjectContext:
+def load_project_context(root: Path, *, executor: WorkspaceExecutor | None = None, broker: Any = None) -> ProjectContext:
     resolved_root = root.expanduser().resolve(strict=True)
     loaded: list[LoadedContextFile] = []
     warnings: list[str] = []
     remaining = MAX_ROOT_CONTEXT_BYTES
     for name in sorted(CONTEXT_FILE_NAMES):
         path = resolved_root / name
-        if not path.is_file():
-            continue
         try:
-            resolved = path.resolve(strict=True)
+            if not (broker.is_file(path) if broker else path.is_file()):
+                continue
+            resolved = path if broker else path.resolve(strict=True)
             resolved.relative_to(resolved_root)
-        except (OSError, ValueError):
+        except (OSError, ValueError, ToolFailure):
             warnings.append(f"Skipped unsafe root instruction path: {name}")
             continue
         if remaining <= 0:
@@ -87,13 +92,13 @@ def load_project_context(root: Path) -> ProjectContext:
             break
         budget = min(MAX_CONTEXT_FILE_BYTES, remaining)
         try:
-            with resolved.open("rb") as handle:
+            with (broker.open_binary(path) if broker else resolved.open("rb")) as handle:
                 data = handle.read(budget + 1)
             content = _decode_utf8_prefix(data[:budget])
         except UnicodeDecodeError:
             warnings.append(f"Skipped non-UTF-8 instruction file: {name}")
             continue
-        except OSError as exc:
+        except (OSError, ToolFailure) as exc:
             warnings.append(f"Could not read {name}: {exc}")
             continue
         truncated = len(data) > budget
@@ -101,18 +106,27 @@ def load_project_context(root: Path) -> ProjectContext:
         remaining -= len(content.encode("utf-8"))
 
     loaded_names = {item.path for item in loaded}
-    nested = [path for path in _discover_context_files(resolved_root, warnings) if path not in loaded_names]
+    nested = [path for path in _discover_context_files(resolved_root, warnings, executor=executor, broker=broker) if path not in loaded_names]
     if len(nested) > MAX_NESTED_CONTEXT_FILES:
         nested = nested[:MAX_NESTED_CONTEXT_FILES]
         warnings.append(f"Nested instruction list truncated to {MAX_NESTED_CONTEXT_FILES} files.")
     return ProjectContext(tuple(loaded), tuple(nested), tuple(warnings))
 
 
-def _discover_context_files(root: Path, warnings: list[str]) -> list[str]:
-    git_paths = _git_context_files(root)
+def _discover_context_files(root: Path, warnings: list[str], *, executor: WorkspaceExecutor | None = None, broker: Any = None) -> list[str]:
+    git_paths = _git_context_files(root, executor=executor)
     if git_paths is not None:
         return git_paths
     discovered: list[str] = []
+    if broker is not None:
+        paths = broker.walk_files(".", excluded_directories=SKIPPED_CONTEXT_DIRS, max_depth=MAX_CONTEXT_SCAN_DEPTH)
+        for index, path in enumerate(paths):
+            if index >= MAX_CONTEXT_SCAN_FILES:
+                warnings.append(f"Project-context scan stopped after {MAX_CONTEXT_SCAN_FILES} files.")
+                break
+            if Path(path).name in CONTEXT_FILE_NAMES:
+                discovered.append(path)
+        return discovered
     scanned = 0
     for current, dirs, files in os.walk(root, followlinks=False):
         current_path = Path(current)
@@ -136,12 +150,21 @@ def _discover_context_files(root: Path, warnings: list[str]) -> list[str]:
     return discovered
 
 
-def _git_context_files(root: Path) -> list[str] | None:
+def _git_context_files(root: Path, *, executor: WorkspaceExecutor | None = None) -> list[str] | None:
+    if executor is None:
+        # Embedders calling discovery directly still use the same executor.
+        # No runtime directory is created or written by this read-only path.
+        import tempfile
+        runtime_dir = Path(tempfile.gettempdir()) / "coding-tools-context-unused"
+        executor = WorkspaceExecutor(
+            lambda purpose: compile_policy(IsolationConfig(), root, runtime_dir, purpose=purpose),
+            lambda: dict(os.environ),
+        )
     pathspecs = sorted(CONTEXT_FILE_NAMES) + [
         f":(glob)**/{name}" for name in sorted(CONTEXT_FILE_NAMES)
     ]
     try:
-        completed = subprocess.run(
+        completed = executor.run(
             [
                 "git",
                 "-C",

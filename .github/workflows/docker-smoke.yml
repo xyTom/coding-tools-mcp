@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Build sandbox image
         run: docker build -t coding-tools-mcp-sandbox:smoke .

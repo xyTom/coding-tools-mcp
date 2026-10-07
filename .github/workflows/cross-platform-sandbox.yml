@@ -1,0 +1,223 @@
+name: Cross-platform execution isolation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact source commit SHA to verify (defaults to the selected ref's commit)
+        type: string
+        required: false
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Exact source commit SHA to verify before release
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CODING_TOOLS_MCP_TELEMETRY: 'off'
+  PYTHONIOENCODING: utf-8
+  SANDBOX_SOURCE_SHA: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  native-posix:
+    name: ${{ matrix.platform }} ${{ matrix.scope }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Use the runner's existing user-namespace policy. Do not weaken
+          # host AppArmor/sysctl settings to pass CI.
+          - platform: Linux
+            os: ubuntu-22.04
+            scope: native isolation
+            helper_root: /var/lib/coding-tools-mcp
+            architecture: x86_64
+          - platform: Linux-ARM64
+            os: ubuntu-22.04-arm
+            scope: native isolation
+            helper_root: /var/lib/coding-tools-mcp
+            architecture: aarch64
+          - platform: macOS
+            os: macos-14
+            helper_root: /private/var/lib/coding-tools-mcp
+            scope: native capability rejection
+            architecture: arm64
+    env:
+      # Linux must enforce its advertised native capabilities. On macOS the
+      # gate must exercise explicit strict-mode rejection, not claim support.
+      CODING_TOOLS_SANDBOX_REQUIRE_NATIVE: '1'
+      CODING_TOOLS_SANDBOX_HELPER: ${{ matrix.helper_root }}/bin/coding-tools-sandbox-helper
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Require and record the exact source commit
+        run: python -c 'import os, re, subprocess; from pathlib import Path; expected = os.environ["SANDBOX_SOURCE_SHA"]; actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(); assert re.fullmatch("[0-9a-f]{40}", expected), "source_ref must be an immutable commit SHA"; assert actual == expected, (actual, expected); Path("source-revision.txt").write_text(actual + "\n", encoding="utf-8"); print(actual)'
+      - name: Record and require the native runner architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: python -c 'import os, platform; actual = platform.machine(); print(platform.platform(), actual); assert actual == os.environ["EXPECTED_ARCHITECTURE"], actual'
+      - name: Build pinned Linux backend
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes build-essential pkg-config meson ninja-build libcap-dev git ripgrep fd-find
+          # bubblewrap v0.12.0, including the source-path race security fix.
+          # The distro package on older runners is not new enough.
+          source="$RUNNER_TEMP/bubblewrap-source"
+          git init "$source"
+          git -C "$source" fetch --depth 1 https://github.com/containers/bubblewrap.git 2a76602a8c71f36c1527cf9fc3417d9149822e0c
+          git -C "$source" checkout --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = 2a76602a8c71f36c1527cf9fc3417d9149822e0c
+          meson setup "$source/_build" "$source" --prefix=/usr -Dtests=false -Dman=disabled -Dselinux=disabled -Dbash_completion=disabled -Dzsh_completion=disabled
+          meson compile -C "$source/_build"
+          sudo install -m 0755 "$source/_build/bwrap" /usr/bin/bwrap
+          /usr/bin/bwrap --version | tee backend-version.txt
+      - name: Install Python runtime
+        run: python -m pip install -e .
+      - name: Require native Git helper security and workspace execution regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v tests.test_git_helper_security tests.test_workspace_executor 2>&1 | tee git-helper-results.txt
+      - name: Build and test the pinned helper source
+        shell: bash
+        working-directory: native/sandbox-helper
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          cargo test --locked 2>&1 | tee ../../helper-tests.txt
+          cargo build --release --locked
+      - name: Install helper outside the command workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper_dir="$(dirname "$CODING_TOOLS_SANDBOX_HELPER")"
+          sudo install -d -m 0755 "${helper_dir%/bin}" "$helper_dir"
+          sudo install -m 0755 native/sandbox-helper/target/release/coding-tools-sandbox-helper "$CODING_TOOLS_SANDBOX_HELPER"
+          python -c 'import hashlib, os; p = os.environ["CODING_TOOLS_SANDBOX_HELPER"]; print("helper_sha256=" + hashlib.sha256(open(p, "rb").read()).hexdigest())' | tee helper-version.txt
+      - name: Exercise native capabilities without silent skips
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v tests.test_sandbox tests.test_sandbox_native 2>&1 | tee native-results.txt
+      - name: Require real controlled-proxy sockets and revocation
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest -v tests.test_network_proxy 2>&1 | tee proxy-results.txt
+      - name: Require native handle-relative structured file access
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c 'from coding_tools_mcp.file_broker import broker_supported; assert broker_supported(), "Native handle-relative file broker unavailable"'
+          python -m unittest -v tests.test_file_broker 2>&1 | tee file-broker-results.txt
+      - name: Preserve native evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: sandbox-${{ matrix.platform }}
+          path: |
+            source-revision.txt
+            git-helper-results.txt
+            helper-tests.txt
+            helper-version.txt
+            backend-version.txt
+            native-results.txt
+            proxy-results.txt
+            file-broker-results.txt
+          if-no-files-found: warn
+          retention-days: 14
+          overwrite: true
+
+  windows-shells:
+    name: Windows ${{ matrix.shell }} compatibility
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [cmd, pwsh]
+    env:
+      # Selection is explicit so cmd syntax is never sent to PowerShell or
+      # vice versa. The hosted image may still have both shells installed.
+      CODING_TOOLS_MCP_WINDOWS_SHELL: ${{ matrix.shell }}
+      CODING_TOOLS_MCP_ALLOW_CMD_FALLBACK: 'false'
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Require and record the exact source commit
+        run: python -c 'import os, re, subprocess; from pathlib import Path; expected = os.environ["SANDBOX_SOURCE_SHA"]; actual = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(); assert re.fullmatch("[0-9a-f]{40}", expected), "source_ref must be an immutable commit SHA"; assert actual == expected, (actual, expected); Path("source-revision.txt").write_text(actual + "\n", encoding="utf-8"); print(actual)'
+      - name: Install Python runtime
+        run: python -m pip install -e .
+      - name: Require native Git helper security and workspace execution regressions
+        shell: pwsh
+        run: |
+          python -m unittest -v tests.test_git_helper_security tests.test_workspace_executor 2>&1 | Tee-Object git-helper-results.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Require PowerShell 7 for its dedicated group
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 7) {
+            throw "This acceptance group requires PowerShell 7."
+          }
+          $PSVersionTable | Out-String
+      - name: Run shell policy and native execution tests
+        shell: pwsh
+        run: |
+          python -m unittest -v tests.test_shells tests.test_shells_windows_native 2>&1 | Tee-Object windows-shell-results.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify native Windows strict rejection
+        shell: pwsh
+        run: |
+          python -m unittest -v tests.test_sandbox_native.NativePlatformRejectionTests tests.test_file_broker.FileBrokerCapabilitiesTests 2>&1 | Tee-Object windows-rejection-results.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Require native Windows Job lifecycle containment
+        shell: pwsh
+        run: |
+          python -m unittest -v tests.test_windows_job tests.test_windows_job_native 2>&1 | Tee-Object windows-job-results.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run existing Windows lifecycle and encoding regressions
+        if: matrix.shell == 'cmd'
+        shell: pwsh
+        run: |
+          python -m unittest -v tests.test_exec_commands tests.test_windows_subprocess_encoding 2>&1 | Tee-Object windows-regression-results.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve compatibility evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: sandbox-Windows-${{ matrix.shell }}
+          path: |
+            source-revision.txt
+            git-helper-results.txt
+            windows-shell-results.txt
+            windows-rejection-results.txt
+            windows-job-results.txt
+            windows-regression-results.txt
+          if-no-files-found: warn
+          retention-days: 14
+          overwrite: true

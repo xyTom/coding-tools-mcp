@@ -11,56 +11,157 @@ make ci
 
 `make compliance` runs the full compliance suite and writes `reports/compliance/latest.json` and `reports/compliance/latest.md`.
 
-`make ci` mirrors the main CI workflow: lint, typecheck, unittest discovery, npm launcher checks, protocol tests, integration/security tests, required docs checks, schema drift checks, dogfood smoke, and SWE-bench smoke preflight. It requires Python 3.11 or newer plus Node.js 18 or newer and npm; GitHub Actions uses Node.js 22.
+`make ci` mirrors the main CI workflow: lint, typecheck, unittest discovery, npm launcher checks, protocol tests, integration/security tests, required docs checks, schema drift checks, dogfood smoke, and SWE-bench smoke preflight. It requires Python 3.11 or newer plus Node.js 18 or newer and npm; GitHub Actions uses Node.js 24.
 
 Report files are overwritten by whichever suite or benchmark was run most recently. Check `suite` in compliance reports and `conclusion` in benchmark reports before citing them.
 
-## PyPI Release
+## Release from main
 
-Releasing is one action: push the version tag.
+`v0.5.0` is sealed. Do not move its tag, delete registry files, or retrofit its
+workflow. This pipeline only publishes versions greater than `0.5.0`.
 
-1. Merge the release commit (version bumped in `pyproject.toml` and
-   `coding_tools_mcp/__init__.py`, CHANGELOG `Unreleased` folded into a dated
-   `## <version> - YYYY-MM-DD` heading).
-2. `git tag v<version> && git push origin v<version>`
+1. Open a release PR that updates `pyproject.toml`, `coding_tools_mcp/__init__.py`,
+   the editable package version in `uv.lock`, and a dated CHANGELOG section.
+   The npm launcher has an independent version; bump it whenever any packed
+   launcher file changes, including its README or package metadata.
+   Keep the version and complete release metadata together in one commit. Use
+   squash merge or a merge commit for multi-commit release PRs; rebase-merging a
+   version bump before its changelog would correctly fail release validation.
+   The currently published npm `0.1.0` still records repository directory
+   `npm/coding-tools-mcp`; main now records `packages/npm-launcher`. That is a
+   real packed-metadata change, so the next release PR must bump the launcher
+   to a new unused version (for example `0.1.1`) even if its executable is
+   unchanged. The verifier deliberately rejects reusing `0.1.0` for this tree.
+2. Merge the PR into `main` after the checks pass. Main must be protected so
+   only reviewed release PRs can introduce versions. Do not create a tag.
+3. `.github/workflows/release.yml` selects the first-parent main commit that
+   introduced that version. Every gate, build and package uses that exact SHA,
+   even if the push contains later commits. A push with no version change does
+   nothing. Multiple version bumps in one push fail rather than skip a release.
+4. Before either publisher starts, a read-only preflight checks both registries
+   against the built artifacts. An existing conflict in either registry blocks
+   all new publication. Both registries must contain verified package contents before the workflow
+   creates the tag and GitHub Release. The tag is a completion receipt.
 
-Pushing the tag triggers `.github/workflows/release.yml`, which runs everything
-from that single commit: release-metadata validation
-(`scripts/check_release_versions.py`), the `compliance`, `real-workloads`, and
-`swebench-lite` evidence workflows as called jobs, the wheel/sdist build with
-content and clean-install verification, PyPI trusted publishing, npm trusted
-publishing with provenance, and finally the GitHub Release with notes taken
-from the CHANGELOG section. There are no inputs, no run ids to copy, and no
-ref choices: evidence and publishes are jobs of one workflow run, so the
-same-release-commit property holds by construction, and a failed evidence job
-blocks both registries.
+Hard gates are metadata/version consistency, MCP contract/unit/security and
+integration tests (`compliance`), `native-sandbox`, `real-workloads`, package builds, an isolated
+wheel installation outside the checkout, and npm launcher/pack verification.
+`native-sandbox` runs every Linux/macOS/Windows acceptance group at the selected
+source SHA and must succeed before package builds or either publisher can start.
+SWE-bench runs separately as advisory evidence: it is not a build or publish
+prerequisite. Its infrastructure failure may affect the overall evidence run,
+never the package publication dependency chain. Do not make that optional
+workflow a required branch-protection status.
 
-The npm launcher keeps its own version. The pipeline publishes it only when
-`packages/npm-launcher/package.json` names a version that is not yet on the
-registry, so server-only releases skip the npm jobs automatically; bump the
-launcher version whenever its source changes (npm versions cannot be
-overwritten).
+### Repository setup before the next release
 
-PyPI and npm trusted publishing must both be configured with workflow filename
-`release.yml` and the `pypi` / `npm` environments. The `final-audit` workflow
-remains available as a manual, dispatch-only audit of an existing tag; it is
-no longer part of the release path.
+Before merging the next version PR, a repository administrator must verify these
+settings in GitHub. Workflow files do not configure branch protection, rulesets,
+or publishing environments.
 
-For local or recovery publishing, use the release helper so the same build,
-check, upload, and install-verification flow is used every time:
+- Protect `main` with a branch rule or ruleset requiring pull requests and at
+  least one approving review. Require the `compliance` check from
+  `.github/workflows/compliance.yml`, which includes release metadata validation.
+  Select the check from a successful PR run and require branches to be up to date
+  before merging so the required checks cover the current base.
+- Keep the advisory SWE-bench checks optional. The release workflow's
+  post-merge build and publish jobs are not pre-merge required checks;
+  `real-workloads` remains a hard gate inside the release dependency chain.
+- In Settings → Environments, verify that deployment branch rules for `pypi`
+  and `npm` permit `main`. Preserve any required reviewer policy and confirm
+  the trusted publishers still match repository `xyTom/coding-tools-mcp`,
+  workflow `release.yml`, and their respective environment names. See
+  [trusted publishing setup](#trusted-publishing-setup) below.
 
-```bash
-make publish-testpypi
-make publish-pypi
-```
+### Recovery and concurrency
 
-`make publish-testpypi` uploads to TestPyPI only. `make publish-pypi` uploads to production PyPI and asks for an irreversible-release confirmation. To run both in sequence:
+First try **Re-run failed jobs** on the original main run. Artifacts are named
+by source SHA, retained for 90 days, and reusable across run attempts. If the
+artifacts have expired, rerun all jobs or dispatch `release.yml` **from main**
+with `version=0.5.1` (the version to recover). Recovery uses the repaired control
+workflow/scripts from main but rebuilds and tests the original version commit.
+A later main commit is never silently substituted for that release source.
 
-```bash
-make publish-all
-```
+- Absent registry version: publish the missing files.
+- Partial PyPI version: compare every existing file, upload only missing files.
+- Existing npm version: compare its full packed payload, then skip publication.
+- Complete registries but missing tag/Release: finalize just the missing steps.
+- Existing tag alone: verify its target and treat it as incomplete; still verify
+  both registries. Existing GitHub Releases are left unchanged.
+- Different payload, wrong tag target, yanked/deprecated version, ambiguous
+  version history, or registry/network error: stop. A 401/403/429/5xx is never
+  interpreted as a missing version. Fix an infrastructure problem and rerun;
+  immutable package conflicts require a new version, not deletion or overwrite.
 
-The helper expects `TWINE_USERNAME`/`TWINE_PASSWORD` or `~/.pypirc` credentials. For token auth, use `__token__` as the username. After a production upload, bump `[project].version` and `coding_tools_mcp.__version__` before the next release because PyPI files cannot be overwritten.
+Archive comparison checks every filename, file content and executable bit while
+ignoring container timestamps/compression. Build tools are pinned in files from the original source commit (including the
+npm pack CLI), and `SOURCE_DATE_EPOCH` comes from the release commit. This permits safe rebuilds
+without accepting different code under the same version. Publishing never uses
+an unconditional `skip-existing` to conceal conflicts.
+
+The shared preflight prevents avoidable partial releases, including a new Python
+version paired with a changed launcher that still uses npm `0.1.0`. Each publisher
+repeats verification under its own lock before uploading. The registries cannot
+be updated atomically: a later outage, upload failure, or publication outside this
+workflow can still leave a partial release. Recover it through the same immutable
+source and missing-file checks; never roll back by deleting published packages.
+
+Per-version publish/finalize concurrency groups never cancel an in-progress
+publication. npm has one publication lock across all launcher versions so latest-tag
+selection and publishing cannot race between workflow runs. An older absent
+launcher is published under `release-<version>` without moving npm `latest`
+backward; new versions use an explicit `latest` tag. GitHub uses semantic-version
+latest selection. Redundant pending reruns may
+be coalesced by GitHub; rerun the original release if needed. Merge only one
+release version at a time and wait for both registries and GitHub finalization
+before introducing another version. Recovery of older versions remains possible
+from the first-parent history.
+
+### Trusted publishing setup
+
+Use the existing trusted publishers for repository `xyTom/coding-tools-mcp`,
+workflow filename `release.yml`, and environments `pypi` and `npm`. Environment
+branch rules must allow `main` because the workflow no longer runs from tags.
+Maintainers must review any necessary environment/publisher configuration;
+merging this code does not create grants or change account security settings.
+One GitHub platform limit remains: creating a release for a historical source
+whose `.github/workflows/` tree differs from the live default branch requires
+`Workflows:write`. `GITHUB_TOKEN` cannot receive that permission. The finalizer
+conservatively detects this and stops with an explicit maintainer-action error,
+leaving the original SHA and existing packages/tags untouched. It never changes
+the release target or creates a credential to evade this restriction.
+
+For this case, download the source-SHA release plan, Python/npm artifacts, and
+both verified registry receipts from the same run. Recheck both artifact payloads
+against their registries with `scripts.release_artifacts --require-complete`.
+An authorized maintainer then uses their already-approved publishing identity
+to run `scripts.finalize_release` with the exact plan `source_sha`, `tag`, and
+source CHANGELOG (without `--github-token`, which is specific to Actions' limited
+token). This creates only missing objects. If additional credential permissions
+are needed, have the maintainer approve/configure them separately; this workflow
+does not grant them. Rerun the main recovery workflow afterward to confirm the
+now-existing tag and release. See [GitHub's release permission rule](https://docs.github.com/en/rest/releases/releases#create-a-release).
+
+npm provenance attests the executing workflow's `GITHUB_SHA`, which can be the
+newer controller commit during recovery or a batched push. It does not alone
+prove the historical artifact's source. Preserve the separate source-SHA plan,
+artifact hashes, and registry receipts; do not spoof provenance environment values.
+
+Only the two publish jobs request `id-token: write`; only finalization requests
+`contents: write`. Checkouts do not persist credentials. npm uses Node 24 and
+an OIDC-capable pinned npm CLI, with provenance and no long-lived npm token.
+
+Official setup references: [PyPI trusted publishers](https://docs.pypi.org/trusted-publishers/adding-a-publisher/)
+and [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+`final-audit` remains a manual audit of existing tags, outside the release path.
+It validates workflow names, successful run status, and matching commit SHAs;
+its generated report does not inspect benchmark artifacts. Individual outcomes
+and SWE-bench resolution counts therefore remain `UNKNOWN` in that report until
+the linked, current-run evidence is reviewed. Workflow success alone is never a
+substitute for successful official evaluation.
+The legacy local `scripts/publish-pypi.sh` helper is for deliberately manual
+publishing only; it does not coordinate npm, tags or GitHub Releases and is not
+the recovery path for this workflow. Prefer the main-based recovery above.
 
 ## Individual Gates
 
@@ -123,7 +224,16 @@ Manual SWE-bench workflow:
 .github/workflows/swebench-lite.yml
 ```
 
-The manual `swebench-lite` workflow can install the official harness, record Docker diagnostics, run selected Lite instance IDs, and upload `reports/benchmark/**`. It defaults to `prediction_source=reference_patch`, which generates non-empty SWE-bench reference-patch predictions for official harness sanity. It fails by default unless official harness results include parsed resolved counts with `candidate_mcp_resolved >= baseline_native_resolved`. Use `prediction_source=checked_in` only after replacing the scaffold files with model-generated predictions.
+The `swebench-lite` workflow defaults to `prediction_source=both`: a separate
+reference-patch harness control and a real pinned SymPy repair through MCP
+read/apply_patch/edit/read/diff/exec before the official harness judges its output.
+This is a deterministic MCP execution replay, not a model-generated solve rate.
+Harness, dataset/reference fixture, base commit, reference patch and Docker image
+contents are pinned. See [the benchmark runbook](../benchmarks/swebench/README.md)
+for pin maintenance, evidence interpretation, and local replay commands. Manual
+runs are blocking when explicitly requested; release calls are advisory and
+outside the package-publication dependency chain. `checked_in` still requires
+real, nonempty predictions and complete official reports to establish a pass.
 
 Manual real-workload workflow:
 

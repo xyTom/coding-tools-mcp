@@ -36,6 +36,15 @@ from typing import Any, cast
 from . import __version__
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
+from .policy import IsolationConfig, ExecutionPolicy, compile_policy, ISOLATION_MODES, NETWORK_MODES
+from .service_trust import ServiceImportSnapshot
+from .executor import WorkspaceExecutor
+from .file_broker import FileBroker
+from .shells import (
+    selected_windows_command_shell, shell_command, windows_command_shell_payload,
+    merge_environment, powershell_scannable, powershell_dynamic_construct, cmd_dynamic_construct,
+    is_windows_loader_env_name, sanitized_environment, windows_pathext, WINDOWS_CORE_ENV_NAMES,
+)
 from .event_log import ToolEventJournal
 from .landlock_exec import libc_syscall
 from .oauth import (
@@ -81,7 +90,6 @@ from .processes import (
     COMMAND_HEAD_BUFFER_DIVISOR,
     COMMAND_OUTCOMES,
     CommandRun,
-    spawn_process,
     start_reader_threads,
     start_command_watchdog,
     terminate_process_group,
@@ -201,7 +209,6 @@ POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM"}
 # Not POSIX core, but inherited under inherit="core" so git helper subprocesses and
 # exec_command share the host's global git config (e.g. safe.directory entries).
 GIT_ENV_NAMES = {"GIT_CONFIG_GLOBAL"}
-WINDOWS_CORE_ENV_NAMES = {"PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR"}
 NETWORK_RE = re.compile(
     r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
     re.I,
@@ -420,6 +427,7 @@ class RuntimePolicy:
     allow_network: bool
     fake_readonly_annotations: bool = False
     workspace_mutation: WorkspaceMutationPolicy = WorkspaceMutationPolicy()
+    isolation: IsolationConfig = IsolationConfig()
 
 
 OAUTH_TOKEN_AUTH_METHODS = ("client_secret_basic", "client_secret_post", "none")
@@ -470,7 +478,7 @@ def env_pattern_matches(name: str, patterns: tuple[str, ...]) -> bool:
 
 def is_risky_env_name(name: str) -> bool:
     upper = name.upper()
-    return upper in RISKY_ENV_NAMES or upper.startswith("DYLD_")
+    return upper in RISKY_ENV_NAMES or upper.startswith("DYLD_") or (os.name == "nt" and is_windows_loader_env_name(name))
 
 
 def is_filtered_env_var(name: str, value: str) -> bool:
@@ -622,6 +630,10 @@ def workspace_mutation_policy_from_args(args: argparse.Namespace) -> WorkspaceMu
 
 
 def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
+    try:
+        isolation = IsolationConfig.from_args(args)
+    except ToolFailure as exc:
+        raise ValueError(f"{exc.code}: {exc.message}") from exc
     permission_mode = permission_mode_from_args(args)
     allow_network = (
         PERMISSION_MODE_CAPABILITIES[permission_mode].network
@@ -634,6 +646,7 @@ def runtime_policy_from_args(args: argparse.Namespace) -> RuntimePolicy:
         allow_network=allow_network,
         fake_readonly_annotations=fake_readonly_annotations_from_args(args, permission_mode),
         workspace_mutation=workspace_mutation_policy_from_args(args),
+        isolation=isolation,
     )
 
 
@@ -1354,6 +1367,11 @@ class Workspace:
         if str(self.root) in unsafe_roots:
             raise ToolFailure("INVALID_ARGUMENT", "Unsafe workspace root rejected.", category="security")
         self.git_path = shutil.which("git")
+        self.executor: WorkspaceExecutor | None = WorkspaceExecutor(
+            lambda purpose: compile_policy(IsolationConfig(), self.root, Path(tempfile.gettempdir()) / "coding-tools-context-unused", purpose=purpose),
+            lambda: dict(os.environ),
+        )
+        self.file_broker: FileBroker | None = None
 
     def _reject_unsafe_text(self, raw_path: str) -> PurePosixPath:
         if not isinstance(raw_path, str) or not raw_path:
@@ -1368,6 +1386,13 @@ class Workspace:
         return pure
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
+        if self.file_broker is not None:
+            display = self.file_broker.normalize(raw_path or ".")
+            try:
+                self.file_broker.stat(display)
+            except FileNotFoundError as exc:
+                raise ToolFailure("NOT_FOUND", f"Path not found: {raw_path}", category="not_found") from exc
+            return ResolvedPath(display, self.root / display, True)
         pure = self._reject_unsafe_text(raw_path or ".")
         candidate = self.root.joinpath(*pure.parts)
         try:
@@ -1380,6 +1405,10 @@ class Workspace:
         return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True)
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
+        if self.file_broker is not None:
+            display = self.file_broker.normalize(raw_path)
+            existed = self.file_broker.exists(display)
+            return ResolvedPath(display, self.root / display, existed)
         pure = self._reject_unsafe_text(raw_path)
         if pure.name in {"", ".", ".."}:
             raise ToolFailure("INVALID_ARGUMENT", "Invalid write target.", category="validation")
@@ -1444,13 +1473,13 @@ class Workspace:
         return is_relative_to(resolved, self.root)
 
     def git_ignored_paths(self, rel_paths: list[str]) -> set[str]:
-        if not rel_paths:
+        if not rel_paths or self.executor is None:
             return set()
         git = self.git_path
         if not git:
             return set()
         try:
-            completed = subprocess.run(
+            completed = self.executor.run(
                 [git, "-C", str(self.root), "check-ignore", "--stdin", "-z"],
                 input=b"\0".join(os.fsencode(path) for path in rel_paths) + b"\0",
                 text=False,
@@ -1540,8 +1569,15 @@ class Runtime:
         workspace_mutation: WorkspaceMutationPolicy | None = None,
         transport: str = "stdio",
         command_manager: WorkspaceCommandManager | None = None,
+        isolation: IsolationConfig | None = None,
     ) -> None:
         self.workspace = Workspace(workspace)
+        self.isolation = isolation or IsolationConfig()
+        self._service_import_snapshot = ServiceImportSnapshot.capture() if self.isolation.mode == "strict" else None
+        if self._service_import_snapshot is not None:
+            # Structured tools can write the whole workspace even when commands
+            # are structured-only or a command policy denies a nested subtree.
+            self._service_import_snapshot.reject_overlapping_writes((self.workspace.root,))
         self.workspace_mutation = workspace_mutation or WorkspaceMutationPolicy()
         if self.workspace_mutation.mode not in WORKSPACE_MUTATION_CHOICES:
             raise ToolFailure(
@@ -1599,6 +1635,11 @@ class Runtime:
                 "command_manager belongs to a different workspace.",
                 category="validation",
             )
+        if self._service_import_snapshot is not None:
+            runtime_roots = (self.command_manager.runtime_dir,)
+            if self.command_manager.fallback_runtime_dir is not None:
+                runtime_roots += (self.command_manager.fallback_runtime_dir,)
+            self._service_import_snapshot.reject_overlapping_writes(runtime_roots)
         self._owns_command_manager = command_manager is None
         self.server_instance_id = self.command_manager.server_instance_id
         self._set_runtime_dir(self.command_manager.runtime_dir)
@@ -1608,7 +1649,20 @@ class Runtime:
         self._closed = False
         self.patch_baselines: dict[str, str | None] = {}
         self.patch_lock = threading.Lock()
-        self.patch_committer = AtomicPatchCommitter()
+        service_roots = []
+        log_dir = os.environ.get(f"{ENV_PREFIX}_EVENT_LOG_DIR")
+        if log_dir:
+            service_roots.append(Path(log_dir))
+        self._service_roots = tuple(service_roots)
+        self.file_broker = (
+            FileBroker(self.workspace.root, denied_roots=self._execution_policy("read-helper").deny_roots,
+                       writable_roots=(self.workspace.root,))
+            if self.isolation.mode == "strict" else None
+        )
+        self.executor = WorkspaceExecutor(self._execution_policy, lambda: self._command_env({}, ensure_runtime=self.isolation.mode == "strict"), file_broker=self.file_broker)
+        self.workspace.executor = self.executor
+        self.workspace.file_broker = self.file_broker
+        self.patch_committer = AtomicPatchCommitter(broker=self.file_broker)
         self._idempotency_results: OrderedDict[tuple[str, str], tuple[str, dict[str, Any]]] = OrderedDict()
         self._idempotency_lock = threading.Lock()
         self._idempotency_condition = threading.Condition(self._idempotency_lock)
@@ -1632,13 +1686,72 @@ class Runtime:
         # ProjectContext is frozen and derived only from the workspace tree, so
         # an embedder that builds several runtimes over one workspace can reuse
         # the discovery (git ls-files / directory walk) result.
-        self.project_context: ProjectContext = (
-            project_context if project_context is not None else load_project_context(self.workspace.root)
-        )
+        try:
+            self.project_context: ProjectContext = (
+                project_context if project_context is not None else load_project_context(
+                    self.workspace.root, executor=self.executor, broker=self.file_broker
+                )
+            )
+        except BaseException:
+            if self.file_broker is not None:
+                self.file_broker.close()
+            if self._owns_command_manager:
+                self.command_manager.close()
+            raise
         self.telemetry = SessionTelemetry(permission_mode=self.permission_mode, transport=transport)
         self._tool_handlers = {name: getattr(self, name) for name in TOOL_REGISTRY}
         self._event_journal = ToolEventJournal.from_env()
         self._journal_instance_id = secrets.token_hex(16) if self._event_journal else None
+
+    def _execution_policy(self, purpose: str = "command") -> ExecutionPolicy:
+        return compile_policy(
+            self.isolation, self.workspace.root, self.runtime_dir, purpose=purpose,
+            structured_only=self.workspace_mutation.structured_only,
+            write_paths=self._workspace_write_path_roots,
+            service_roots=self._service_roots,
+        )
+
+    def _capture_baseline(self, path: Path) -> FileBaseline:
+        return FileBaseline.capture(path, broker=self.file_broker) if self.file_broker else FileBaseline.capture(path)
+
+    def _file_stat(self, path: Path) -> os.stat_result:
+        return self.file_broker.stat(path) if self.file_broker else path.stat()
+
+    def _file_is_dir(self, path: Path) -> bool:
+        return self.file_broker.is_dir(path) if self.file_broker else path.is_dir()
+
+    def _file_is_file(self, path: Path) -> bool:
+        return self.file_broker.is_file(path) if self.file_broker else path.is_file()
+
+    def _file_exists(self, path: Path) -> bool:
+        return self.file_broker.exists(path) if self.file_broker else path.exists()
+
+    def _file_bytes(self, path: Path) -> bytes:
+        return self.file_broker.read_bytes(path) if self.file_broker else path.read_bytes()
+
+    def _file_text(self, path: Path) -> str:
+        return self.file_broker.read_text(path) if self.file_broker else read_text_preserve_newlines(path)
+
+    def _walk_files(self, path: Path) -> Iterator[Path]:
+        if self.file_broker:
+            yield from (self.workspace.root / item for item in self.file_broker.walk_files(path, excluded_directories=DEFAULT_EXCLUDED_NAMES))
+        else:
+            yield from walk_files(path)
+
+    def _file_entry(self, path: Path) -> dict[str, Any]:
+        if not self.file_broker:
+            return entry_for_path(path, self.workspace.root)
+        info = self.file_broker.stat(path)
+        return {
+            "name": path.name, "path": normalize_rel_display(path, self.workspace.root),
+            "type": "directory" if stat.S_ISDIR(info.st_mode) else "file",
+            "size_bytes": info.st_size,
+            "modified": datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
+            "is_hidden": path.name.startswith("."), "is_ignored": False,
+        }
+
+    def isolation_payload(self) -> dict[str, Any]:
+        return self.executor.capability_report()
 
     def _set_runtime_dir(self, runtime_dir: Path) -> None:
         self.runtime_dir = runtime_dir
@@ -1657,6 +1770,8 @@ class Runtime:
         finally:
             if self._event_journal is not None:
                 self._event_journal.close()
+            if self.file_broker is not None:
+                self.file_broker.close()
 
     @property
     def commands(self) -> dict[str, CommandRun]:
@@ -1689,12 +1804,30 @@ class Runtime:
                 runtime_dir / "tmp",
                 runtime_dir / "cache",
             ):
-                path.mkdir(parents=True, mode=0o700, exist_ok=True)
-                if os.name != "nt":
+                if self.isolation.mode == "strict":
+                    # Commands can modify their runtime tree. Never follow a
+                    # replacement HOME/TEMP/cache symlink with host authority.
+                    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+                    fd = os.open(path.anchor, flags)
                     try:
-                        path.chmod(0o700)
-                    except OSError:
-                        pass
+                        for part in path.parts[1:]:
+                            try:
+                                os.mkdir(part, 0o700, dir_fd=fd)
+                            except FileExistsError:
+                                pass
+                            child = os.open(part, flags, dir_fd=fd)
+                            os.close(fd)
+                            fd = child
+                        os.fchmod(fd, 0o700)
+                    finally:
+                        os.close(fd)
+                else:
+                    path.mkdir(parents=True, mode=0o700, exist_ok=True)
+                    if os.name != "nt":
+                        try:
+                            path.chmod(0o700)
+                        except OSError:
+                            pass
         except OSError as exc:
             return f"{runtime_dir}: {exc}"
         return None
@@ -1749,7 +1882,7 @@ class Runtime:
         return "enabled" if self.capabilities.secret_env_filter else "disabled"
 
     def landlock_enabled(self) -> bool:
-        return self.capabilities.landlock
+        return self.capabilities.landlock and self.isolation.mode == "compatibility"
 
     def landlock_write_roots(self) -> list[Path]:
         roots = [self.runtime_dir]
@@ -1760,10 +1893,10 @@ class Runtime:
     def _resolve_workspace_write_paths(self) -> list[Path]:
         """Resolve and validate the configured workspace write allowlist.
 
-        A write path that escapes the workspace would widen the sandbox past
-        the boundary every other tool enforces, so it is dropped rather than
-        honoured. Resolution is deliberately side-effect free: reporting tools
-        must not create directories merely by describing the policy.
+        Unresolvable paths and paths outside the workspace are rejected in
+        strict mode. Compatibility mode drops them rather than widening the
+        write grant. Resolution is deliberately side-effect free: reporting
+        tools must not create directories merely by describing the policy.
         """
 
         resolved: list[Path] = []
@@ -1772,8 +1905,13 @@ class Runtime:
             absolute = candidate if candidate.is_absolute() else self.workspace.root / candidate
             try:
                 real = absolute.resolve(strict=False)
-            except OSError:
+            except (OSError, RuntimeError, ValueError) as exc:
+                if self.isolation.mode == "strict":
+                    raise ToolFailure("INVALID_ARGUMENT", "A configured workspace write path cannot be resolved.",
+                                      category="validation", details={"path": entry}) from exc
                 continue
+            if not is_relative_to(real, self.workspace.root) and self.isolation.mode == "strict":
+                raise ToolFailure("INVALID_ARGUMENT", "Strict write paths must stay inside the workspace.", category="security", details={"path": entry})
             if is_relative_to(real, self.workspace.root):
                 existing = real
                 while not existing.exists() and existing != self.workspace.root:
@@ -1798,7 +1936,10 @@ class Runtime:
 
         for path in self._workspace_write_path_roots:
             try:
-                path.mkdir(parents=True, exist_ok=True)
+                if self.file_broker:
+                    self.file_broker.ensure_directory(path)
+                else:
+                    path.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 display = normalize_rel_display(path, self.workspace.root)
                 if exc.errno in {errno.EEXIST, errno.ENOTDIR}:
@@ -1818,7 +1959,7 @@ class Runtime:
                         "reason": exc.strerror or str(exc),
                     },
                 ) from exc
-            if not path.is_dir():
+            if not self._file_is_dir(path):
                 display = normalize_rel_display(path, self.workspace.root)
                 raise ToolFailure(
                     "INVALID_ARGUMENT",
@@ -1836,6 +1977,15 @@ class Runtime:
         than the kernel can provide.
         """
 
+        if self.isolation.mode == "strict":
+            return {
+                "mode": self.workspace_mutation.mode,
+                "write_paths": [normalize_rel_display(path, self.workspace.root) for path in self.workspace_write_paths()],
+                "enforced": self.executor.last_launch_confirmed,
+                "enforced_by": "native-sandbox-required",
+                "structured_write_tools": sorted(WORKSPACE_WRITE_TOOLS),
+                "warnings": [],
+            }
         landlock = landlock_status_payload()
         abi = landlock.get("abi_version")
         truncate_protected = isinstance(abi, int) and abi >= 3
@@ -1962,10 +2112,10 @@ class Runtime:
         return {
             "workspace": str(self.workspace.root),
             "permission_mode": self.permission_mode,
-            "network_allowed": self.allow_network,
+            "network_allowed": self.allow_network and (self.isolation.mode != "strict" or self.isolation.network == "proxy"),
             "runtime_dir": str(self.runtime_dir),
-            "home": str(self.command_home_dir()),
-            "tmpdir": str(self.command_tmp_dir()),
+            "home": "/tmp/home" if self.isolation.mode == "strict" else str(self.command_home_dir()),
+            "tmpdir": "/tmp" if self.isolation.mode == "strict" else str(self.command_tmp_dir()),
             "cache_dir": str(self.cache_dir),
         }
 
@@ -1986,6 +2136,7 @@ class Runtime:
             "dangerously_skip_all_permissions": self.dangerously_skip_all_permissions,
             "annotation_override": "fake_readonly" if self.fake_readonly_annotations else None,
             "landlock": landlock,
+            "execution_isolation": self.isolation_payload(),
             "exec_policy": {
                 "shell_expansion": self.shell_expansion_policy(),
                 "inline_script": self.inline_script_policy(),
@@ -2394,12 +2545,12 @@ class Runtime:
         # Landlock is the only filesystem confinement this server has, and it is
         # Linux-only. Elsewhere a command runs with the whole user account's
         # reach, which callers must be told rather than left to infer.
-        if sys.platform != "linux":
+        if sys.platform != "linux" and self.isolation.mode == "compatibility":
             warnings.append(
                 f"platform {sys.platform} has no filesystem confinement for exec_command; "
                 "commands run with full user privileges outside the workspace"
             )
-        if not landlock.get("available"):
+        if not landlock.get("available") and self.isolation.mode == "compatibility":
             warnings.append("Linux Landlock filesystem confinement is unavailable")
         mutation = self.workspace_mutation_payload()
         warnings.extend(str(item) for item in mutation.get("warnings", []))
@@ -2414,6 +2565,7 @@ class Runtime:
             **self._exec_environment_summary(),
             "landlock_enabled": self._landlock_enforced(landlock),
             "landlock_abi": landlock.get("abi_version"),
+            "execution_isolation": self.isolation_payload(),
             "global_tmp_write": self.global_tmp_write_policy(),
             "workspace_mutation_policy": mutation,
             "warnings": warnings,
@@ -2551,7 +2703,7 @@ class Runtime:
         """Read a bounded UTF-8 line range with its file revision and continuation metadata."""
         requested_path = str(args.get("path", ""))
         resolved = self.resolve_existing(requested_path)
-        if resolved.path.is_dir():
+        if self._file_is_dir(resolved.path):
             raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
         max_bytes = int(args.get("max_bytes", 131072))
         start_line = int(args.get("start_line", 1))
@@ -2566,8 +2718,8 @@ class Runtime:
         encoding = args.get("encoding", "utf-8")
         if encoding != "utf-8":
             raise ToolFailure("UNSUPPORTED_ENCODING", "Only utf-8 is supported.", category="validation")
-        total_bytes = resolved.path.stat().st_size
-        with resolved.path.open("rb") as raw_handle:
+        total_bytes = self._file_stat(resolved.path).st_size
+        with (self.file_broker.open_binary(resolved.path) if self.file_broker else resolved.path.open("rb")) as raw_handle:
             if b"\x00" in raw_handle.read(4096):
                 raise ToolFailure("BINARY_FILE", "Binary file read blocked for text tool.", category="validation")
         if start_line < 1:
@@ -2584,7 +2736,7 @@ class Runtime:
         # open would have found a moment later.
         digest = hashlib.sha256()
         try:
-            with resolved.path.open("r", encoding="utf-8", errors="strict", newline="") as handle:
+            with (self.file_broker.open_text(resolved.path) if self.file_broker else resolved.path.open("r", encoding="utf-8", errors="strict", newline="")) as handle:
                 for total_lines, line in enumerate(handle, start=1):
                     line_bytes = line.encode("utf-8")
                     digest.update(line_bytes)
@@ -2664,7 +2816,7 @@ class Runtime:
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
-        if not resolved.path.is_dir():
+        if not self._file_is_dir(resolved.path):
             raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
         recursive = bool(args.get("recursive", False))
         max_depth = int(args.get("max_depth", 1))
@@ -2680,7 +2832,8 @@ class Runtime:
             if truncated:
                 return
             try:
-                children = list(directory.iterdir())
+                children = ([self.workspace.root / item.display for item in self.file_broker.list_dir(directory)]
+                            if self.file_broker else list(directory.iterdir()))
             except OSError:
                 return
             child_rel_paths = [normalize_rel_display(child, self.workspace.root) for child in children]
@@ -2693,11 +2846,11 @@ class Runtime:
                     git_ignored=ignored,
                 ):
                     continue
-                entries.append(entry_for_path(child, self.workspace.root))
+                entries.append(self._file_entry(child))
                 if len(entries) >= max_entries:
                     truncated = True
                     return
-                if recursive and depth < max_depth and child.is_dir() and not child.is_symlink():
+                if recursive and depth < max_depth and self._file_is_dir(child) and (self.file_broker is not None or not child.is_symlink()):
                     visit(child, depth + 1)
 
         visit(resolved.path, 1)
@@ -2711,7 +2864,7 @@ class Runtime:
 
     def list_files(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
-        if not resolved.path.is_dir():
+        if not self._file_is_dir(resolved.path):
             raise ToolFailure("NOT_A_DIRECTORY", "Path is not a directory.", category="validation")
         patterns_arg = args.get("patterns")
         glob_arg = args.get("glob")
@@ -2738,7 +2891,7 @@ class Runtime:
             return fast_result
         files: list[dict[str, Any]] = []
         truncated = False
-        for batch in path_batches(walk_files(resolved.path), 256):
+        for batch in path_batches(self._walk_files(resolved.path), 256):
             # Filter by glob first so git check-ignore only sees candidates.
             candidates = [
                 (path, rel)
@@ -2756,7 +2909,7 @@ class Runtime:
                     git_ignored=ignored,
                 ):
                     continue
-                files.append(file_entry(path, rel, path.lstat()))
+                files.append(file_entry(path, rel, self._file_stat(path) if self.file_broker else path.lstat()))
                 if len(files) >= max_results:
                     truncated = True
                     break
@@ -2782,7 +2935,7 @@ class Runtime:
         sort_key: str,
     ) -> dict[str, Any] | None:
         fd = cached_which("fd", "fdfind")
-        if not fd or not resolved.path.is_dir():
+        if not fd or not self._file_is_dir(resolved.path):
             return None
         args_base = [
             fd,
@@ -2816,7 +2969,7 @@ class Runtime:
                     effective = f"**/{pattern}"
             args.extend(["--", effective, "."])
             try:
-                completed = subprocess.run(
+                completed = self.executor.run(
                     args,
                     cwd=str(resolved.path),
                     text=True,
@@ -2826,6 +2979,19 @@ class Runtime:
                     stderr=subprocess.PIPE,
                     timeout=10,
                 )
+                if completed.returncode in {1, 2} and "--no-require-git" in completed.stderr:
+                    # Older fd (including Ubuntu 22.04's 8.3) lacks this
+                    # optional flag; clap 2 uses exit 1 and clap 3+ uses 2.
+                    # Retry through the same policy boundary;
+                    # git check-ignore below still enforces repository ignores.
+                    args_base.remove("--no-require-git")
+                    args.remove("--no-require-git")
+                    completed = self.executor.run(
+                        args, cwd=str(resolved.path), text=True, encoding="utf-8", errors="strict",
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                    )
+            except ToolFailure:
+                raise
             except Exception:
                 return None
             if completed.returncode not in {0, 1}:
@@ -2856,10 +3022,10 @@ class Runtime:
             ):
                 continue
             try:
-                stat = path.lstat()
-            except OSError:
+                info = self.file_broker.stat(path) if self.file_broker else path.lstat()
+            except (OSError, ToolFailure):
                 continue
-            files.append(file_entry(path, rel, stat))
+            files.append(file_entry(path, rel, info))
         files.sort(key=lambda item: item["modified"] if sort_key == "modified" else item["path"])
         truncated = len(paths) >= max_results
         return {
@@ -2906,13 +3072,13 @@ class Runtime:
             raise ToolFailure("INVALID_ARGUMENT", f"Invalid regex: {exc}", category="validation") from exc
         needle = query if case_sensitive else query.lower()
 
-        roots = [resolved.path] if resolved.path.is_file() else walk_files(resolved.path)
+        roots = [resolved.path] if self._file_is_file(resolved.path) else self._walk_files(resolved.path)
         for batch in path_batches(roots, 256):
             # Filter by glob first so git check-ignore runs once per batch of
             # candidates instead of once per walked file.
             candidates = []
             for path in batch:
-                if path.is_dir():
+                if self._file_is_dir(path):
                     continue
                 if path.is_symlink() and not self.workspace.is_safe_existing_path(path):
                     continue
@@ -2927,7 +3093,7 @@ class Runtime:
                 if self.workspace.is_ignored_path(path, git_ignored=ignored):
                     continue
                 try:
-                    data = path.read_bytes()
+                    data = self._file_bytes(path)
                 except OSError:
                     continue
                 if b"\x00" in data[:4096]:
@@ -2991,7 +3157,7 @@ class Runtime:
         search_path = resolved.display if resolved.display != "." else "."
         args.extend(["--", query, search_path])
         try:
-            process = subprocess.Popen(
+            process = self.executor.popen(
                 args,
                 cwd=str(self.workspace.root),
                 text=True,
@@ -3007,7 +3173,7 @@ class Runtime:
         def stop_timed_out_search() -> None:
             timed_out.set()
             try:
-                process.kill()
+                terminate_process_group(process, HARD_KILL_SIGNAL)
             except OSError:
                 pass
 
@@ -3048,7 +3214,7 @@ class Runtime:
                     lines = file_cache.get(rel, [])
                     if rel not in file_cache:
                         try:
-                            lines = (self.workspace.root / rel).read_text(encoding="utf-8").splitlines()
+                            lines = self._file_text(self.workspace.root / rel).splitlines()
                         except OSError:
                             lines = []
                         file_cache[rel] = lines
@@ -3130,7 +3296,7 @@ class Runtime:
                     self._validate_patch_path(op.move_to, require_existing=False)
                     self.workspace.reject_write_symlink(op.move_to)
                 if op.kind == "add":
-                    baseline = prior.baseline if prior is not None else FileBaseline.capture(target.path)
+                    baseline = prior.baseline if prior is not None else self._capture_baseline(target.path)
                     staged[target.display] = StagedFile(
                         target.display,
                         target.path,
@@ -3158,9 +3324,9 @@ class Runtime:
                     if baseline.data is not None:
                         removals += len(baseline.data.splitlines())
                 elif op.kind == "delete":
-                    if target.path.is_dir():
+                    if self._file_is_dir(target.path):
                         raise ToolFailure("PATCH_FAILED", "Cannot delete a directory.", category="validation")
-                    baseline = prior.baseline if prior is not None else FileBaseline.capture(target.path)
+                    baseline = prior.baseline if prior is not None else self._capture_baseline(target.path)
                     staged[target.display] = StagedFile(
                         target.display, target.path, None, baseline, baseline.mode, action="delete"
                     )
@@ -3172,9 +3338,9 @@ class Runtime:
                     removals += len((baseline.data or b"").splitlines())
                 elif op.kind == "update":
                     source = target
-                    if source.path.is_dir():
+                    if self._file_is_dir(source.path):
                         raise ToolFailure("PATCH_FAILED", "Cannot update a directory.", category="validation")
-                    baseline = prior.baseline if prior is not None else FileBaseline.capture(source.path)
+                    baseline = prior.baseline if prior is not None else self._capture_baseline(source.path)
                     content = prior.content if prior is not None else baseline.text(source.display)
                     assert content is not None
                     outcome = apply_update_hunks_detailed(content, op.hunks, op.path)
@@ -3206,7 +3372,7 @@ class Runtime:
                         # overwrite an intervening external edit.
                         dest_baseline = (
                             dest_prior.baseline if dest_prior is not None else
-                            baseline if dest.display == source.display else FileBaseline.capture(dest.path)
+                            baseline if dest.display == source.display else self._capture_baseline(dest.path)
                         )
                         destination_evidence = _patch_evidence(
                             updated,
@@ -3377,7 +3543,7 @@ class Runtime:
         """Stage a create or revision-checked write and return file evidence and line counts."""
         target = self.workspace.resolve_for_write(change.path)
         content = change.content or ""
-        if target.existed and target.path.is_dir():
+        if target.existed and self._file_is_dir(target.path):
             raise ToolFailure(
                 "PATCH_FAILED",
                 f"Cannot {change.action} {target.display}: it is a directory. create and write "
@@ -3385,7 +3551,7 @@ class Runtime:
                 category="validation",
                 details={"path": target.display, "is_directory": True},
             )
-        baseline = FileBaseline.capture(target.path)
+        baseline = self._capture_baseline(target.path)
         if change.action == "create" and target.existed:
             if baseline.data != content.encode("utf-8"):
                 raise ToolFailure(
@@ -3441,9 +3607,9 @@ class Runtime:
     ) -> tuple[dict[str, Any], str, int, int]:
         """Stage revision-checked line edits and report only the lines that actually changed."""
         source = self.workspace.resolve_existing(change.path)
-        if source.path.is_dir():
+        if self._file_is_dir(source.path):
             raise ToolFailure("PATCH_FAILED", "Cannot edit a directory.", category="validation")
-        baseline = FileBaseline.capture(source.path)
+        baseline = self._capture_baseline(source.path)
         current = baseline.text(source.display)
         self._check_revision(change, source.display, current)
         outcome = apply_line_edits(current, change.edits, source.display)
@@ -3471,9 +3637,9 @@ class Runtime:
         self, change: ChangeRequest, staged: dict[str, StagedFile]
     ) -> tuple[dict[str, Any], str, int, int]:
         target = self.workspace.resolve_existing(change.path)
-        if target.path.is_dir():
+        if self._file_is_dir(target.path):
             raise ToolFailure("PATCH_FAILED", "Cannot delete a directory.", category="validation")
-        baseline = FileBaseline.capture(target.path)
+        baseline = self._capture_baseline(target.path)
         self._check_revision(change, target.display, baseline.text(target.display))
         staged[target.display] = StagedFile(
             target.display, target.path, None, baseline, baseline.mode, action="delete"
@@ -3485,7 +3651,7 @@ class Runtime:
         self, change: ChangeRequest, staged: dict[str, StagedFile]
     ) -> tuple[dict[str, Any], str, int, int]:
         source = self.workspace.resolve_existing(change.path)
-        if source.path.is_dir():
+        if self._file_is_dir(source.path):
             raise ToolFailure("PATCH_FAILED", f"Cannot {change.action} a directory.", category="validation")
         destination = str(change.destination)
         dest = self.workspace.resolve_for_write(destination)
@@ -3495,7 +3661,7 @@ class Runtime:
                 f"Cannot {change.action} onto {dest.display}: it already exists.",
                 category="validation",
             )
-        baseline = FileBaseline.capture(source.path)
+        baseline = self._capture_baseline(source.path)
         content = baseline.text(source.display)
         self._check_revision(change, source.display, content)
         # A copy must still fail if its source changed underneath us, so the
@@ -3512,7 +3678,7 @@ class Runtime:
             dest.display,
             dest.path,
             content,
-            FileBaseline.capture(dest.path),
+            self._capture_baseline(dest.path),
             baseline.mode,
             action="write",
         )
@@ -3599,7 +3765,7 @@ class Runtime:
         if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
             raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
         workdir = self.resolve_existing(str(workdir_arg))
-        if not workdir.path.is_dir():
+        if not self._file_is_dir(workdir.path):
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
         self._check_command_policy(cmd, args)
         timeout_ms = int(args.get("timeout_ms", DEFAULT_PROCESS_LIFETIME_MS))
@@ -3617,6 +3783,13 @@ class Runtime:
         popen_cmd: Any = cmd
         popen_shell = True
         popen_extra = process_group_popen_kwargs()
+        selected_shell = None
+        if os.name == "nt":
+            selected_shell = selected_windows_command_shell(str(self.workspace.root))
+            popen_cmd = shell_command(cmd, selected_shell)
+            popen_shell = False
+        if self.isolation.mode == "strict":
+            self._ensure_workspace_write_paths()
         if self.landlock_enabled():
             try:
                 landlock_fd = open_landlock_ruleset(
@@ -3638,7 +3811,7 @@ class Runtime:
             not self.workspace_mutation.structured_only
             or mutation.get("enforced") is not True
             or bool(self._workspace_write_path_roots)
-            or not landlock_confined
+            or (not landlock_confined and self.isolation.mode != "strict")
         )
         with self.commands_lock:
             if self._closed or self.command_manager.closed:
@@ -3661,7 +3834,7 @@ class Runtime:
         registered = False
         slot_released = False
         try:
-            process, pty_master_fd = spawn_process(
+            process, pty_master_fd = self.executor.spawn_managed(
                 popen_cmd,
                 cwd=str(workdir.path),
                 shell=popen_shell,
@@ -3669,6 +3842,8 @@ class Runtime:
                 tty=tty,
                 popen_kwargs=popen_extra,
             )
+            if self.isolation.mode == "strict":
+                workspace_may_write = not self.workspace_mutation.structured_only or bool(self._workspace_write_path_roots)
             command = self._make_command(
                 process,
                 timeout_at=deadline,
@@ -3735,6 +3910,10 @@ class Runtime:
             # terminated/timeout) so exec, polling, and kill paths agree.
             payload = command.snapshot_since_cursor(max_output_bytes)
             payload["elapsed_ms"] = int((time.time() - start) * 1000)
+            if selected_shell is not None:
+                payload["shell"] = windows_command_shell_payload(selected_shell)
+            if self.isolation.mode == "strict":
+                payload["execution_isolation"] = {"mode": "strict", "confirmed": True, "network": self.isolation.network}
             self._add_exec_diagnostics(payload)
             return self._format_command_output(command, payload, args)
 
@@ -3762,6 +3941,8 @@ class Runtime:
     def _check_command_policy(self, cmd: str, args: dict[str, Any]) -> None:
         if self.dangerously_skip_all_permissions:
             return
+        selected_shell = selected_windows_command_shell(str(self.workspace.root)) if os.name == "nt" else None
+        scannable = powershell_scannable(cmd) if selected_shell and selected_shell.kind == "pwsh" else cmd
         self._check_command_paths(cmd)
         env = args.get("env", {})
         if isinstance(env, dict) and any(
@@ -3774,7 +3955,7 @@ class Runtime:
                 details={"permission": "sensitive_env", "env_keys": sorted(str(key) for key in env)},
             )
         if not self.capabilities.inline_script:
-            inline_script = inline_script_command(cmd)
+            inline_script = inline_script_command(scannable)
             if inline_script is not None:
                 raise ToolFailure(
                     "PERMISSION_REQUIRED",
@@ -3783,7 +3964,11 @@ class Runtime:
                     details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
                 )
         compact = " ".join(cmd.split()).lower()
-        if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
+        dynamic = (
+            powershell_dynamic_construct(cmd) if selected_shell and selected_shell.kind == "pwsh"
+            else cmd_dynamic_construct(cmd) if selected_shell else SHELL_EXPANSION_RE.search(scannable)
+        )
+        if not self.capabilities.shell_expansion and dynamic:
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Shell command substitution and parameter expansion require explicit permission.",
@@ -3797,14 +3982,14 @@ class Runtime:
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
             )
-        if DESTRUCTIVE_RE.search(cmd):
+        if DESTRUCTIVE_RE.search(scannable):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Destructive commands are blocked without explicit permission.",
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
             )
-        if not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd):
+        if not self.allow_network and NETWORK_RE.search(scannable) and not is_literal_network_reference_command(cmd):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Network access is denied by default.",
@@ -3900,7 +4085,7 @@ class Runtime:
                 details={"permission": "privileged_executable", "path": str(executable_path)},
             )
 
-    def _command_env(self, extra: Any) -> dict[str, str]:
+    def _command_env(self, extra: Any, *, ensure_runtime: bool = True) -> dict[str, str]:
         env = self._base_command_env()
         if not self.dangerously_skip_all_permissions:
             env = {key: value for key, value in env.items() if not is_filtered_env_var(key, value)}
@@ -3917,8 +4102,9 @@ class Runtime:
                 for key, value in env.items()
                 if env_pattern_matches(key, self.shell_env_policy.include_only)
             }
-        env.update({str(key): str(value) for key, value in self.shell_env_policy.set.items()})
-        self._ensure_runtime_dirs()
+        env = merge_environment(env, {str(key): str(value) for key, value in self.shell_env_policy.set.items()}, windows=os.name == "nt")
+        if ensure_runtime:
+            self._ensure_runtime_dirs()
         tmp_dir = self.command_tmp_dir()
         env["HOME"] = str(self.command_home_dir())
         env["TMPDIR"] = str(tmp_dir)
@@ -3931,7 +4117,12 @@ class Runtime:
                 value_text = str(value)
                 if not self.dangerously_skip_all_permissions and is_filtered_env_var(key_text, value_text):
                     continue
-                env[key_text] = value_text
+                env = merge_environment(env, {key_text: value_text}, windows=os.name == "nt")
+        if not self.dangerously_skip_all_permissions or self.isolation.mode == "strict":
+            env = sanitized_environment(env, windows=os.name == "nt", is_filtered=is_filtered_env_var)
+        if os.name == "nt":
+            env = merge_environment(env, {"PATHEXT": ";".join(windows_pathext(env))}, windows=True)
+            env = merge_environment(env, {"HOME": str(self.command_home_dir()), "TEMP": str(tmp_dir), "TMP": str(tmp_dir)}, windows=True)
         return env
 
     def _git_env(self) -> dict[str, str]:
@@ -3963,7 +4154,7 @@ class Runtime:
     def _run_git_bytes(
         self, cmd: list[str], *, timeout: int | None = None, env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.run(
+        return self.executor.run(
             cmd,
             text=False,
             stdout=subprocess.PIPE,
@@ -4026,6 +4217,8 @@ class Runtime:
             pty_master_fd=pty_master_fd,
             landlock_confined=landlock_confined,
             workspace_may_write=workspace_may_write,
+            execution_isolation=({"mode": "strict", "confirmed": True, "network": self.isolation.network}
+                                 if self.isolation.mode == "strict" else None),
             on_evict=self.command_manager.record_output_eviction,
         )
 
@@ -4637,7 +4830,7 @@ class Runtime:
             if selected and rel not in selected:
                 continue
             current_path = self.workspace.resolve_for_write(rel).path
-            after = read_text_preserve_newlines(current_path) if current_path.exists() and not current_path.is_dir() else None
+            after = self._file_text(current_path) if self._file_exists(current_path) and not self._file_is_dir(current_path) else None
             if before == after:
                 continue
             before_lines = [] if before is None else before.splitlines(keepends=True)
@@ -4775,7 +4968,7 @@ class Runtime:
         git_env = self._git_env()
         requested_path = str(args.get("path", ""))
         resolved = self.resolve_existing(requested_path)
-        if resolved.path.is_dir():
+        if self._file_is_dir(resolved.path):
             raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
         if not self._is_git_repo(self.workspace.root, env=git_env):
             return {"is_repo": False, "path": resolved.display, "lines": [], "truncated": False, "warnings": []}
@@ -4874,7 +5067,7 @@ class Runtime:
         max_width = int(args.get("max_width", IMAGE_RESIZE_MAX_DIMENSION))
         max_height = int(args.get("max_height", IMAGE_RESIZE_MAX_DIMENSION))
         auto_resize = bool(args.get("auto_resize", True))
-        data = resolved.path.read_bytes()
+        data = self._file_bytes(resolved.path)
         mime_type, width, height = identify_image(data, resolved.path)
         if mime_type is None:
             raise ToolFailure("BINARY_FILE", "File is not a supported image.", category="validation")
@@ -5154,7 +5347,10 @@ def command_argument_path_candidates(command: str | None, args: list[str]) -> li
         if wrapped_command is not None:
             candidates.extend(command_argument_path_candidates(wrapped_command, wrapped_args))
         return candidates
-    if name in PATH_ARGUMENT_COMMANDS:
+    if name in PATH_ARGUMENT_COMMANDS or (windows_shell_syntax() and name in {
+        "get-content", "gc", "get-item", "get-childitem", "gci", "set-content", "add-content",
+        "remove-item", "copy-item", "move-item", "new-item", "test-path", "resolve-path",
+    }):
         return [arg for arg in args if is_inspectable_path_argument(arg)]
     if name in PATTERN_THEN_PATH_COMMANDS:
         return pattern_command_path_candidates(args)
@@ -7477,6 +7673,7 @@ def build_runtime(
         workspace_mutation=runtime_policy.workspace_mutation,
         transport=transport,
         command_manager=command_manager,
+        isolation=runtime_policy.isolation,
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
@@ -7671,6 +7868,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=env_int(f"{ENV_PREFIX}_PORT", 8000),
         help=f"bind port; defaults to {ENV_PREFIX}_PORT or 8000",
     )
+    parser.add_argument("--execution-isolation", choices=ISOLATION_MODES, default=None,
+                        help="strict requires native file/network isolation and fails closed; compatibility preserves legacy modes")
+    parser.add_argument("--sandbox-network", choices=NETWORK_MODES, default=None,
+                        help="strict network policy; unsupported capabilities fail closed")
+    parser.add_argument("--sandbox-allow-destination", action="append", default=None, help="exact HOST:PORT allowed through enforced proxy; repeatable")
+    parser.add_argument("--sandbox-helper", default=None, help="absolute trusted native-helper installation path")
+    parser.add_argument("--sandbox-helper-sha256", default=None, help="pinned SHA-256 of the native helper")
+    parser.add_argument("--sandbox-read-root", action="append", default=None, help="explicit additional trusted toolchain read root")
+    parser.add_argument("--sandbox-deny-root", action="append", default=None, help="service-private path hidden from tools and commands")
     parser.add_argument("--stdio", action="store_true", help="serve newline-delimited JSON-RPC over stdio")
     parser.add_argument(
         "--auth-token",

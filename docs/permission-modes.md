@@ -1,5 +1,10 @@
 # Permission Modes
 
+These settings are independent of `--execution-isolation`. The descriptions of
+optional Landlock enforcement below apply to the default `compatibility`
+isolation mode. See [cross-platform execution isolation](cross-platform-sandbox.md)
+for the additive strict-mode contract, supported capabilities, and migration.
+
 `exec_command` has three permission modes.
 
 ## safe

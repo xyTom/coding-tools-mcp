@@ -1,0 +1,15 @@
+[package]
+name = "coding-tools-sandbox-helper"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+
+[profile.release]
+strip = true
+panic = "abort"
+lto = true
+codegen-units = 1

@@ -18,6 +18,7 @@ The documentation keeps stable file paths for existing links, while this index p
 - [Permission modes](permission-modes.md)
 - [Telemetry](telemetry.md)
 - [Security boundary](security-boundary.md)
+- [Cross-platform execution isolation](cross-platform-sandbox.md)
 - [Limitations](limitations.md)
 
 ## Guides and integration

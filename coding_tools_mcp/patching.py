@@ -9,8 +9,12 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .errors import ToolFailure
+
+if TYPE_CHECKING:
+    from .file_broker import FileBroker
 
 
 PATCH_TEMP_PREFIX = ".coding-tools-patch-"
@@ -121,7 +125,9 @@ class FileBaseline:
     digest: str | None
 
     @classmethod
-    def capture(cls, path: Path) -> FileBaseline:
+    def capture(cls, path: Path, *, broker: FileBroker | None = None) -> FileBaseline:
+        if broker is not None:
+            return broker.capture_baseline(path)
         if not path.exists():
             return cls(data=None, mode=None, digest=None)
         if path.is_dir():
@@ -195,7 +201,13 @@ class AtomicPatchCommitter:
     without asking for a write.
     """
 
+    def __init__(self, *, broker: FileBroker | None = None) -> None:
+        self.broker = broker
+
     def commit(self, changes: list[StagedFile]) -> None:
+        if self.broker is not None:
+            self.broker.commit(changes)
+            return
         if not changes:
             return
         self._assert_unique_paths(changes)

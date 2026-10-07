@@ -1700,14 +1700,17 @@ Maven home: /usr/share/maven
             workspace = root / "repo"
             workspace.mkdir()
             (workspace / "tracked.txt").write_text("tracked\n", encoding="utf-8")
-            init_git(workspace)
+            isolated_config = {"GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_GLOBAL": os.devnull,
+                               "GIT_CONFIG_NOSYSTEM": "1"}
+            with patch.dict(os.environ, isolated_config):
+                init_git(workspace)
 
             # GIT_TEST_ASSUME_DIFFERENT_OWNER makes git treat the repo as owned
             # by another user, reproducing the dubious-ownership failure that
             # motivated routing helper subprocesses through the command env.
             probe = subprocess.run(
                 ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
-                env={**os.environ, "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": os.devnull},
+                env={**os.environ, **isolated_config, "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"},
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1715,31 +1718,54 @@ Maven home: /usr/share/maven
             if probe.returncode == 0:
                 self.skipTest("git does not honor GIT_TEST_ASSUME_DIFFERENT_OWNER")
 
-            def runtime_with_git_config(config: Path) -> Runtime:
-                return Runtime(
-                    workspace,
-                    shell_env_policy=ShellEnvPolicy(
-                        set={"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": str(config)}
-                    ),
-                )
-
             without_safe = root / "gitconfig-empty"
             without_safe.write_text("", encoding="utf-8")
-            status = runtime_with_git_config(without_safe).git_status({"max_entries": 5})
-            self.assertFalse(status.get("is_repo"))
-            self.assertTrue(
-                any("dubious ownership" in warning for warning in status.get("warnings", [])),
-                status.get("warnings"),
-            )
-
             with_safe = root / "gitconfig-safe"
             with_safe.write_text(f"[safe]\n\tdirectory = {workspace.as_posix()}\n", encoding="utf-8")
-            runtime = runtime_with_git_config(with_safe)
-            status = runtime.git_status({"max_entries": 5})
-            self.assertTrue(status.get("is_repo"))
-            log = runtime.git_log({"max_count": 1})
-            self.assertTrue(log.get("is_repo"))
-            self.assertEqual(log.get("commits", [])[0].get("subject"), "baseline fixture")
+            included = root / "gitconfig-include"
+            included.write_text(f"[include]\n\tpath = {with_safe.as_posix()}\n", encoding="utf-8")
+            reset_safe = root / "gitconfig-reset"
+            reset_safe.write_text("[safe]\n\tdirectory =\n", encoding="utf-8")
+            malformed = root / "gitconfig-malformed"
+            malformed.write_text("[invalid\n", encoding="utf-8")
+            # Native Git must keep both protected scope precedence and error
+            # semantics. Never replace these with an unconditional trust grant.
+            cases = (
+                ("no trust", without_safe, without_safe, "0", False),
+                ("global trust", without_safe, with_safe, "0", True),
+                ("system trust", with_safe, without_safe, "0", True),
+                ("system include", included, without_safe, "false", True),
+                ("system disabled", with_safe, without_safe, "1", False),
+                ("global resets system trust", with_safe, reset_safe, "0", False),
+                ("missing system config", root / "missing", without_safe, "0", False),
+                ("malformed system config", malformed, with_safe, "0", False),
+                ("unreadable system config", root, with_safe, "0", False),
+                ("explicitly ignore broken system config", malformed, with_safe, "1", True),
+            )
+            for name, system, global_config, nosystem, trusted in cases:
+                with self.subTest(name=name):
+                    config_env = {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_SYSTEM": str(system),
+                                  "GIT_CONFIG_GLOBAL": str(global_config), "GIT_CONFIG_NOSYSTEM": nosystem}
+                    direct = subprocess.run(
+                        ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
+                        env={**os.environ, **config_env}, text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                    )
+                    self.assertEqual(direct.returncode == 0, trusted, direct.stderr)
+                    runtime = Runtime(workspace, shell_env_policy=ShellEnvPolicy(set=config_env))
+                    try:
+                        status = runtime.git_status({"max_entries": 5})
+                        self.assertEqual(status.get("is_repo"), trusted, status)
+                        if trusted:
+                            log = runtime.git_log({"max_count": 1})
+                            self.assertTrue(log.get("is_repo"))
+                            self.assertEqual(log.get("commits", [])[0].get("subject"), "baseline fixture")
+                        else:
+                            self.assertTrue(status.get("warnings"), status)
+                            self.assertTrue(any(direct.stderr.strip() in warning
+                                                for warning in status["warnings"]), status)
+                    finally:
+                        runtime.close()
 
 
 class PatchLineFidelityTests(unittest.TestCase):

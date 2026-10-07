@@ -1,0 +1,88 @@
+{
+  "dataset": {
+    "fixture": "fixtures/smoke-lite-10.json",
+    "fixture_sha256": "1349d287e251e762e28ffc5e659a78e1a9967016bad6c0105fa2088eefd0d7a8",
+    "name": "princeton-nlp/SWE-bench_Lite",
+    "revision": "6ec7bb89b9342f664a54a6e0a6ea6501d3437cc2",
+    "source_file": "data/test-00000-of-00001.parquet",
+    "source_sha256": "7a21f37b8bc179c7db5beeb14e88ac538ba283455c776e6b2535bbfb6e3551b4",
+    "split": "test"
+  },
+  "docker": {
+    "images": {
+      "astropy__astropy-12907": {
+        "digest": "sha256:7485c1e3c8861efd0c6a4a78b952857592e541031039000d25e9481f045dc4a3",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.astropy_1776_astropy-12907",
+        "source_tag": "latest"
+      },
+      "django__django-11099": {
+        "digest": "sha256:364ab4524539dda8fc9c18c7b4761c76113eba606b79b845563d5052dec163c4",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.django_1776_django-11099",
+        "source_tag": "latest"
+      },
+      "matplotlib__matplotlib-18869": {
+        "digest": "sha256:5a237c238da682b5203cd965183e00dd6fdbe9a0844c492f503a42f12a25f1ca",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.matplotlib_1776_matplotlib-18869",
+        "source_tag": "latest"
+      },
+      "pallets__flask-4992": {
+        "digest": "sha256:5a970453fa5e01ecbaba40bd63eda9411164eba75e3770a571ac899f55afd246",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.pallets_1776_flask-4992",
+        "source_tag": "latest"
+      },
+      "psf__requests-2317": {
+        "digest": "sha256:a0ce096d4dfa27ca8ea80ae4b38103e970d17b19066d886a550936394827c9fb",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.psf_1776_requests-2317",
+        "source_tag": "latest"
+      },
+      "pydata__xarray-3364": {
+        "digest": "sha256:7e306350435d278f8ad1df5ea10645866478bb734a32f75593b31210ce4c1cc9",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.pydata_1776_xarray-3364",
+        "source_tag": "latest"
+      },
+      "pytest-dev__pytest-5221": {
+        "digest": "sha256:c190b1e0539cef0e292e5c6e6219734f298d1bdee17189e497c5b116d8c0ca7f",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.pytest-dev_1776_pytest-5221",
+        "source_tag": "latest"
+      },
+      "scikit-learn__scikit-learn-10297": {
+        "digest": "sha256:c48ade7195b167b2562f90f3a3a60ebb410276e7583bd1212e324c16157d7eb0",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-10297",
+        "source_tag": "latest"
+      },
+      "sphinx-doc__sphinx-10325": {
+        "digest": "sha256:ed17aaf0185364b135e353dc6727241f9d3c02cfc49e91e32280da7a6cda8f6c",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.sphinx-doc_1776_sphinx-10325",
+        "source_tag": "latest"
+      },
+      "sympy__sympy-12419": {
+        "digest": "sha256:d72d802ea46a9a328017406f4e6c83ce7d014cdae537276807f0cdf05bb0f3be",
+        "platform": "linux/amd64",
+        "repository": "swebench/sweb.eval.x86_64.sympy_1776_sympy-12419",
+        "source_tag": "latest"
+      }
+    },
+    "instance_image_tag": "coding-tools-pinned-v1",
+    "namespace": "swebench"
+  },
+  "replay": {
+    "base_commit": "479939f8c65c8c2908bbedc959549a257a7c0b0b",
+    "instance_id": "sympy__sympy-12419",
+    "path": "sympy/matrices/expressions/matexpr.py",
+    "reference_patch_sha256": "18794d75ba41397df2db6f4bad1c870a0d15be216987b0f594d5fdf11ded7f99",
+    "result_sha256": "5b61ca3366b54e6d7d4c47648ac99d5c898c50fb3067bddace7ee88337329ad9",
+    "source_fixture": "fixtures/sympy-matexpr.base.txt",
+    "source_sha256": "c2cd2d1c416fc238b667114130cfe20c9854a136e43086cc42718171bae9ce6f"
+  },
+  "schema_version": 1,
+  "swebench_version": "4.1.0"
+}

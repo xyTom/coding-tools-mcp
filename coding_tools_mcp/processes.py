@@ -11,6 +11,7 @@ from typing import Any, BinaryIO
 
 from .errors import ToolFailure
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_tail
+from .windows_job import close_windows_job, get_windows_job, spawn_windows_process
 
 
 COMMAND_BUFFER_BYTES = 524_288
@@ -68,6 +69,13 @@ def terminate_process_group(
 ) -> None:
     """Stop a process tree or group, escalating or falling back to direct-child cleanup."""
     if os.name == "nt":
+        job = get_windows_job(process)
+        if job is not None:
+            # The root may already have exited while descendants still own
+            # its pipes. Job ownership, unlike taskkill /T, survives that exit.
+            job.terminate()
+            process.wait(timeout=5)
+            return
         # CTRL_BREAK needs a console shared with the child, which a stdio
         # server usually lacks, and process.terminate() only ends cmd.exe.
         # Kill the whole tree first, then make sure the direct child is gone.
@@ -111,17 +119,18 @@ def spawn_process(
     env: dict[str, str],
     tty: bool,
     popen_kwargs: dict[str, Any],
-) -> tuple[subprocess.Popen[bytes], int | None]:
+    stdio: dict[str, Any] | None = None,
+) -> tuple[subprocess.Popen[Any], int | None]:
     """Spawn a pipe-backed or true POSIX PTY-backed process."""
 
     if not tty:
-        process = subprocess.Popen(
+        streams = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, **(stdio or {})}
+        launch = spawn_windows_process if os.name == "nt" else subprocess.Popen
+        process = launch(
             command,
             cwd=cwd,
             shell=shell,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            **streams,
             env=env,
             **popen_kwargs,
         )
@@ -173,6 +182,7 @@ class CommandRun:
     # workspace. These describe the command that actually ran, not the
     # server's advertised Landlock capability.
     landlock_confined: bool = False
+    execution_isolation: dict[str, Any] | None = None
     workspace_may_write: bool = True
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
@@ -339,6 +349,8 @@ class CommandRun:
             "operation_outcome": self.operation_outcome(status),
         }
         warnings: list[str] = list(self.warnings)
+        if self.execution_isolation is not None:
+            payload["execution_isolation"] = dict(self.execution_isolation)
         if stdout_truncation.truncated:
             warnings.append(f"stdout truncated from tail by {stdout_truncation.truncated_by}")
         if stderr_truncation.truncated:
@@ -382,6 +394,9 @@ class CommandRun:
         code = self.process.poll()
         if code is None:
             return
+        # Also release surviving Windows descendants before draining inherited
+        # pipes. The Job's lifetime watcher does this for synchronous helpers.
+        close_windows_job(self.process)
         self.drain_readers()
         # A keep_stdin_open pipe has no reader left; release it.
         self.close_stdin()
