@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import subprocess
 import tomllib
 
 
@@ -23,6 +24,8 @@ def _canonical_requirement_name(requirement: str) -> str:
 def validate_release(root: Path, tag: str) -> tuple[str, str]:
     pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     project_version = pyproject["project"]["version"]
+    if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", project_version):
+        raise SystemExit(f"Python version {project_version!r} is not stable major.minor.patch")
 
     package_init = (root / "coding_tools_mcp" / "__init__.py").read_text(encoding="utf-8")
     match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', package_init, re.MULTILINE)
@@ -79,7 +82,7 @@ def validate_release(root: Path, tag: str) -> tuple[str, str]:
 
     npm_package = json.loads((root / "packages" / "npm-launcher" / "package.json").read_text(encoding="utf-8"))
     npm_version = npm_package["version"]
-    if re.search(r"(?:^|[-.])(alpha|beta|rc|dev|next)(?:[-.]|$)", npm_version, re.IGNORECASE):
+    if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", npm_version):
         raise SystemExit(f"npm launcher version {npm_version!r} is not stable")
 
     return project_version, npm_version
@@ -87,10 +90,27 @@ def validate_release(root: Path, tag: str) -> tuple[str, str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--tag", required=True, help="Release tag, for example v0.2.0")
+    parser.add_argument("--changed-from", help="Skip release-only checks when the Python version is unchanged")
     args = parser.parse_args()
 
-    project_version, npm_version = validate_release(ROOT, args.tag)
+    if args.changed_from:
+        before = tomllib.loads(subprocess.check_output(
+            ["git", "-C", str(args.root), "show", f"{args.changed_from}:pyproject.toml"], text=True,
+        ))["project"]["version"]
+        current = tomllib.loads((args.root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+        if before == current:
+            print("No Python version change; release-only metadata checks are deferred")
+            return 0
+        def numeric_version(value: str) -> tuple[int, ...]:
+            if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value):
+                raise SystemExit(f"version {value!r} is not stable major.minor.patch")
+            return tuple(map(int, value.split(".")))
+        if numeric_version(current) <= numeric_version(before):
+            raise SystemExit("release version must increase")
+
+    project_version, npm_version = validate_release(args.root, args.tag)
 
     print(
         f"Release metadata OK: Python {project_version} ({args.tag}), "

@@ -1,5 +1,9 @@
 # Security Boundary
 
+This page describes default `--execution-isolation compatibility` behavior.
+For the opt-in strict mode, its supported capabilities, and fail-closed
+requirements, see [cross-platform execution isolation](cross-platform-sandbox.md).
+
 Coding Tools MCP exposes primitives, not an agent workflow engine.
 
 The boundary is:

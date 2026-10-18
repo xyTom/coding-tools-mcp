@@ -3,6 +3,11 @@ name: swebench-lite
 on:
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: "Immutable source commit (defaults to workflow commit)"
+        required: false
+        type: string
+        default: ""
       instance_ids:
         description: "Comma-separated SWE-bench Lite instance IDs"
         required: false
@@ -12,7 +17,7 @@ on:
         required: false
         default: "1"
       require_evaluation_pass:
-        description: "Fail unless official harness resolves candidate >= baseline with real predictions"
+        description: "Require complete official reports and candidate >= nonzero baseline"
         required: false
         type: boolean
         default: true
@@ -21,9 +26,11 @@ on:
         required: false
         type: choice
         options:
+          - both
+          - mcp_reference_replay
           - reference_patch
           - checked_in
-        default: reference_patch
+        default: both
       install_swebench:
         description: "Attempt to install the official SWE-bench package"
         required: false
@@ -34,8 +41,17 @@ on:
         required: false
         type: boolean
         default: true
+      timeout_minutes:
+        description: "Whole-job time limit, an integer from 1 through 180 minutes"
+        required: false
+        type: number
+        default: 180
   workflow_call:
     inputs:
+      source_ref:
+        required: false
+        type: string
+        default: ""
       instance_ids:
         required: false
         type: string
@@ -51,7 +67,7 @@ on:
       prediction_source:
         required: false
         type: string
-        default: reference_patch
+        default: both
       install_swebench:
         required: false
         type: boolean
@@ -60,14 +76,65 @@ on:
         required: false
         type: boolean
         default: true
+      timeout_minutes:
+        required: false
+        type: number
+        default: 180
+
+permissions:
+  contents: read
 
 jobs:
   swebench-lite:
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout_minutes || 180 }}
+    env:
+      SOURCE_REF: ${{ inputs.source_ref || github.sha }}
+      INSTANCE_IDS: ${{ inputs.instance_ids }}
+      MAX_WORKERS: ${{ inputs.max_workers }}
+      PREDICTION_SOURCE: ${{ inputs.prediction_source }}
+      INSTALL_SWEBENCH: ${{ inputs.install_swebench }}
+      REQUIRE_PASS: ${{ inputs.require_evaluation_pass }}
+      TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+      CODING_TOOLS_MCP_TELEMETRY: "off"
     steps:
+      - name: Initialize current-run evidence
+        run: |
+          EVIDENCE_ROOT="$(mktemp -d "$RUNNER_TEMP/swebench-evidence-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-XXXXXX")"
+          export EVIDENCE_ROOT
+          printf 'EVIDENCE_ROOT=%s\n' "$EVIDENCE_ROOT" >> "$GITHUB_ENV"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path(os.environ["EVIDENCE_ROOT"], "attempt.json").write_text(json.dumps({
+              "workflow_sha": os.environ["GITHUB_SHA"],
+              "source_ref": os.environ["SOURCE_REF"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "prediction_source": os.environ["PREDICTION_SOURCE"],
+              "notice": "Only reports produced by this attempt are included. Missing evidence is not a pass."
+          }, indent=2) + "\n")
+          PY
+
+      - name: Validate immutable source and evidence mode
+        run: |
+          [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]
+          case "$PREDICTION_SOURCE" in
+            both|reference_patch|mcp_reference_replay|checked_in) ;;
+            *) echo "Unsupported prediction source" >&2; exit 1 ;;
+          esac
+          python - <<'PY'
+          import os
+          timeout = int(os.environ["TIMEOUT_MINUTES"])
+          if not 1 <= timeout <= 180:
+              raise SystemExit("timeout_minutes must be an integer from 1 through 180")
+          PY
+
       - name: Check out repository
         uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v6.2.0
@@ -76,62 +143,74 @@ jobs:
 
       - name: Install runtime
         run: |
-          python -m pip install --upgrade pip
+          test "$(git rev-parse HEAD)" = "$SOURCE_REF"
           python -m pip install -e .
 
       - name: Record Docker diagnostics
+        continue-on-error: true
         run: |
           docker version
           docker info
 
-      - name: Attempt SWE-bench Lite official evaluation
+      - name: Replay pinned SymPy repair through MCP
+        id: replay
+        if: inputs.prediction_source == 'both' || inputs.prediction_source == 'mcp_reference_replay'
+        continue-on-error: ${{ inputs.blocking == false }}
+        run: python benchmarks/swebench/replay_mcp.py --output-dir "$EVIDENCE_ROOT/mcp-replay"
+
+      - name: Evaluate reference-patch harness control
+        if: always() && (inputs.prediction_source == 'both' || inputs.prediction_source == 'reference_patch' || inputs.prediction_source == 'checked_in')
         continue-on-error: ${{ inputs.blocking == false }}
         run: |
-          ids="${{ inputs.instance_ids }}"
           args=()
           prediction_args=()
-          IFS=',' read -ra parts <<< "$ids"
+          IFS=',' read -ra parts <<< "$INSTANCE_IDS"
           for id in "${parts[@]}"; do
             trimmed="$(echo "$id" | xargs)"
-            if [ -n "$trimmed" ]; then
-              args+=(--instance-id "$trimmed")
-            fi
+            if [ -n "$trimmed" ]; then args+=(--instance-id "$trimmed"); fi
           done
-          if [ "${{ inputs.prediction_source }}" = "reference_patch" ]; then
-            mkdir -p reports/benchmark/swebench-reference-predictions
+          source="$PREDICTION_SOURCE"
+          if [ "$source" != "checked_in" ]; then
+            source=reference_patch
             python benchmarks/swebench/generate_reference_predictions.py \
               "${args[@]}" \
-              --baseline-output reports/benchmark/swebench-reference-predictions/baseline_reference.jsonl \
-              --candidate-output reports/benchmark/swebench-reference-predictions/candidate_reference.jsonl \
-              --metadata-output reports/benchmark/swebench-reference-predictions/metadata.json
+              --baseline-output "$EVIDENCE_ROOT/reference-predictions/baseline_reference.jsonl" \
+              --candidate-output "$EVIDENCE_ROOT/reference-predictions/candidate_reference.jsonl" \
+              --metadata-output "$EVIDENCE_ROOT/reference-predictions/metadata.json"
             prediction_args=(
-              --baseline-predictions reports/benchmark/swebench-reference-predictions/baseline_reference.jsonl
-              --candidate-predictions reports/benchmark/swebench-reference-predictions/candidate_reference.jsonl
+              --baseline-predictions "$EVIDENCE_ROOT/reference-predictions/baseline_reference.jsonl"
+              --candidate-predictions "$EVIDENCE_ROOT/reference-predictions/candidate_reference.jsonl"
             )
           fi
-          install_flag=()
-          if [ "${{ inputs.install_swebench }}" = "true" ]; then
-            install_flag=(--install-swebench)
-          fi
-          require_flag=()
-          if [ "${{ inputs.require_evaluation_pass }}" = "true" ]; then
-            require_flag=(--require-evaluation-pass)
-          fi
+          if [ "$INSTALL_SWEBENCH" = "true" ]; then args+=(--install-swebench); fi
+          if [ "$REQUIRE_PASS" = "true" ]; then args+=(--require-evaluation-pass); fi
           python benchmarks/swebench/run_smoke.py \
-            "${install_flag[@]}" \
-            --run-evaluation \
-            --max-workers "${{ inputs.max_workers }}" \
-            "${args[@]}" \
-            "${prediction_args[@]}" \
-            "${require_flag[@]}" \
-            --report-json reports/benchmark/swebench-official-attempt.json \
-            --report-md reports/benchmark/swebench-official-attempt.md
+            --run-evaluation --prediction-source "$source" \
+            --max-workers "$MAX_WORKERS" "${args[@]}" "${prediction_args[@]}" \
+            --report-json "$EVIDENCE_ROOT/reference-official.json" \
+            --report-md "$EVIDENCE_ROOT/reference-official.md"
+
+      - name: Evaluate MCP-generated diff in official harness
+        if: always() && steps.replay.outcome == 'success'
+        continue-on-error: ${{ inputs.blocking == false }}
+        run: |
+          args=()
+          if [ "$INSTALL_SWEBENCH" = "true" ]; then args+=(--install-swebench); fi
+          if [ "$REQUIRE_PASS" = "true" ]; then args+=(--require-evaluation-pass); fi
+          python benchmarks/swebench/run_smoke.py \
+            --run-evaluation --prediction-source mcp_reference_replay \
+            --instance-id sympy__sympy-12419 --max-workers "$MAX_WORKERS" "${args[@]}" \
+            --baseline-predictions "$EVIDENCE_ROOT/mcp-replay/baseline_native.jsonl" \
+            --candidate-predictions "$EVIDENCE_ROOT/mcp-replay/candidate_mcp.jsonl" \
+            --report-json "$EVIDENCE_ROOT/mcp-official.json" \
+            --report-md "$EVIDENCE_ROOT/mcp-official.md"
 
       - name: Upload SWE-bench evidence
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
           name: swebench-lite-evidence
-          path: reports/benchmark/**
+          overwrite: true
+          path: ${{ env.EVIDENCE_ROOT }}
           if-no-files-found: ignore
           retention-days: 14

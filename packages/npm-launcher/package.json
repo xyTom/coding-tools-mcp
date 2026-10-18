@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "npm launcher for the coding-tools-mcp Python MCP server (PyPI). Starts the server via uvx or pipx.",
   "type": "module",
   "license": "Apache-2.0",

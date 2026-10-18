@@ -2,7 +2,7 @@
   "dataset_name": "princeton-nlp/SWE-bench_Lite",
   "split": "test",
   "selection_date": "2026-05-16",
-  "selection_source": "Hugging Face datasets-server rows API",
+  "selection_source": "Checked-in revision-verified fixture; see benchmarks/swebench/pins.json",
   "purpose": "Small smoke subset covering the major SWE-bench Lite project families before full benchmark runs.",
   "instances": [
     {

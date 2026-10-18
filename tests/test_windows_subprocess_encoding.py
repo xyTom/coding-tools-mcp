@@ -1,3 +1,9 @@
+"""Encoding contracts at the server-to-executor boundary.
+
+These mocks do not replace Windows Job acceptance. Native process encoding and
+Job lifecycle coverage live in test_windows_job_native and the real-byte
+test_subprocess_encoding_boundaries suite.
+"""
 from __future__ import annotations
 
 import io
@@ -7,28 +13,44 @@ from pathlib import Path
 from unittest.mock import patch
 
 from coding_tools_mcp import server as server_module
-from coding_tools_mcp.server import Runtime, Workspace
+from coding_tools_mcp.server import Runtime
 from coding_tools_mcp.errors import ToolFailure
 
 
 class WindowsSubprocessEncodingTests(unittest.TestCase):
     def test_git_ignore_lookup_decodes_as_utf8(self) -> None:
-        workspace = Workspace(Path.cwd())
+        runtime = Runtime(Path.cwd())
+        self.addCleanup(runtime.close)
+        workspace = runtime.workspace
         workspace.git_path = "git"
         completed = subprocess.CompletedProcess(
             ["git"], 0, stdout="ignored-文件.txt\0".encode("utf-8"), stderr=b""
         )
 
         with patch.object(
-            server_module.subprocess, "run", return_value=completed
+            workspace.executor, "run", return_value=completed
         ) as run:
             ignored = workspace.git_ignored_paths(["ignored-文件.txt"])
 
         self.assertEqual(ignored, {"ignored-文件.txt"})
+        run.assert_called_once()
         self.assertFalse(run.call_args.kwargs["text"])
         self.assertEqual(
             run.call_args.kwargs["input"], "ignored-文件.txt\0".encode("utf-8")
         )
+
+    def test_git_text_decodes_as_utf8(self) -> None:
+        runtime = Runtime(Path.cwd())
+        self.addCleanup(runtime.close)
+        completed = subprocess.CompletedProcess(
+            ["git"], 0, "文件.txt\n".encode("utf-8"), "警告\n".encode("utf-8")
+        )
+        with patch.object(runtime.executor, "run", return_value=completed) as run:
+            result = runtime._run_git_text(["git", "status"])
+        run.assert_called_once()
+        self.assertFalse(run.call_args.kwargs["text"])
+        self.assertEqual(result.stdout, "文件.txt\n")
+        self.assertEqual(result.stderr, "警告\n")
 
     def test_git_text_preserves_newline_translation(self) -> None:
         """Binary capture retains the previous text-mode newline contract."""
@@ -37,7 +59,7 @@ class WindowsSubprocessEncodingTests(unittest.TestCase):
             ["git"], 0, b"a\r\nb\rc\n", b"warning\r\n"
         )
         try:
-            with patch.object(runtime, "_run_git_bytes", return_value=completed):
+            with patch.object(runtime.executor, "run", return_value=completed):
                 result = runtime._run_git_text(["git", "status"])
         finally:
             runtime.close()
@@ -49,7 +71,7 @@ class WindowsSubprocessEncodingTests(unittest.TestCase):
         runtime = Runtime(Path.cwd())
         completed = subprocess.CompletedProcess(["git"], 1, b"", b"bad \xff")
         try:
-            with patch.object(runtime, "_run_git_bytes", return_value=completed):
+            with patch.object(runtime.executor, "run", return_value=completed):
                 with self.assertRaises(ToolFailure) as caught:
                     runtime._run_git_text(["git", "status"])
         finally:
@@ -67,7 +89,7 @@ class WindowsSubprocessEncodingTests(unittest.TestCase):
             with (
                 patch.object(server_module, "cached_which", return_value="fd"),
                 patch.object(
-                    server_module.subprocess, "run", return_value=completed
+                    runtime.executor, "run", return_value=completed
                 ) as run,
             ):
                 result = runtime._list_files_with_fd(
@@ -83,6 +105,8 @@ class WindowsSubprocessEncodingTests(unittest.TestCase):
             runtime.close()
 
         self.assertIsNotNone(result)
+        run.assert_called_once()
+        self.assertTrue(run.call_args.kwargs["text"])
         self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
         self.assertEqual(run.call_args.kwargs["errors"], "strict")
 
@@ -106,7 +130,7 @@ class WindowsSubprocessEncodingTests(unittest.TestCase):
             with (
                 patch.object(server_module, "cached_which", return_value="rg"),
                 patch.object(
-                    server_module.subprocess, "Popen", return_value=FakeProcess()
+                    runtime.executor, "popen", return_value=FakeProcess()
                 ) as popen,
             ):
                 result = runtime._search_text_with_rg(
@@ -124,6 +148,8 @@ class WindowsSubprocessEncodingTests(unittest.TestCase):
             runtime.close()
 
         self.assertIsNotNone(result)
+        popen.assert_called_once()
+        self.assertTrue(popen.call_args.kwargs["text"])
         self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
         self.assertEqual(popen.call_args.kwargs["errors"], "strict")
 
