@@ -1,0 +1,31 @@
+name: swebench-pr
+
+on:
+  pull_request:
+    paths:
+      - benchmarks/swebench/**
+      - .github/workflows/swebench-lite.yml
+      - .github/workflows/swebench-pr.yml
+      - tests/test_swebench.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swebench-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pinned-mcp-evidence:
+    name: Advisory pinned SymPy evidence
+    if: github.repository == 'xyTom/coding-tools-mcp'
+    uses: ./.github/workflows/swebench-lite.yml
+    with:
+      source_ref: ${{ github.event.pull_request.head.sha }}
+      prediction_source: mcp_reference_replay
+      instance_ids: sympy__sympy-12419
+      max_workers: '1'
+      install_swebench: true
+      require_evaluation_pass: true
+      blocking: false
+      timeout_minutes: 30
