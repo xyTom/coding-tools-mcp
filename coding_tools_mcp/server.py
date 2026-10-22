@@ -1046,8 +1046,42 @@ def normalize_rel_display(path: Path, root: Path) -> str:
     return "." if text == "" else text
 
 
+def _matches_globstar_segments(rel: str, pattern: str) -> bool:
+    """Allow `**/` to consume zero or more path segments without expanding patterns.
+
+    The reachable path positions are bounded by path depth, preventing the
+    exponential expansion caused by enumerating optional globstar segments.
+    """
+    path_parts = rel.split("/")
+    pattern_parts = pattern.split("/")
+    if "**" not in pattern_parts[:-1]:
+        return False
+    reachable = {0}
+    for index, token in enumerate(pattern_parts):
+        if token == "**":
+            start = min(reachable)
+            # A trailing /** matches descendants, not the named file itself.
+            if index == len(pattern_parts) - 1:
+                start += 1
+            reachable = set(range(start, len(path_parts) + 1))
+        else:
+            reachable = {
+                position + 1
+                for position in reachable
+                if position < len(path_parts) and fnmatch.fnmatch(path_parts[position], token)
+            }
+        if not reachable:
+            return False
+    return len(path_parts) in reachable
+
+
 def matches_any_glob(rel: str, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatch(rel, pattern) or PurePosixPath(rel).match(pattern) for pattern in patterns)
+    return any(
+        fnmatch.fnmatch(rel, pattern)
+        or PurePosixPath(rel).match(pattern)
+        or _matches_globstar_segments(rel, pattern)
+        for pattern in patterns
+    )
 
 
 def file_entry(path: Path, rel: str, path_stat: os.stat_result) -> dict[str, Any]:
