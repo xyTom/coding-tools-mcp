@@ -1,6 +1,54 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-10-07
+
+The strict backend is supported on provisioned Linux x86-64 and AArch64 hosts.
+macOS and Windows retain compatibility execution and reject unavailable strict
+capabilities. The Python package is 0.6.0, the npm launcher is 0.1.1, and the
+separately installed native helper remains 0.1.0.
+
+### Changed
+
+- Windows defaults to trusted PowerShell 7 when available. Existing cmd scripts
+  should select `CODING_TOOLS_MCP_WINDOWS_SHELL=cmd`; see the
+  [shell migration guidance](docs/cross-platform-sandbox.md#windows-compatibility-and-deployment).
+- Release builds and publishing require the
+  [native sandbox workflow](.github/workflows/cross-platform-sandbox.yml) to
+  pass for the release plan's immutable source commit, alongside the existing evidence
+  gates. Linux x86-64/AArch64 enforce isolation; macOS and Windows verify their
+  advertised compatibility and explicit strict rejection.
+
+### Security
+
+- Read-only Git helpers use a private, per-launch configuration snapshot that
+  removes clean/process filter drivers and suppresses submodule dirty checks,
+  closing implicit command execution through repository configuration. Git's
+  protected system/global `safe.directory` trust is preserved in compatibility
+  mode; unreadable or invalid configuration fails instead of retrying with
+  filters enabled. See the
+  [Git helper contract](docs/cross-platform-sandbox.md#contract-and-migration).
+- Native Linux proxy acceptance covers direct IPv4/IPv6 TCP, UDP, DNS and host
+  loopback bypass attempts alongside allowed CONNECT traffic, destination
+  checks and fail-closed proxy shutdown. Fixture reachability is verified
+  outside isolation before denial assertions.
+
+### Added
+
+- Opt-in `--execution-isolation strict` uses one immutable policy for all
+  workspace processes and handle-relative structured file access. Linux uses a
+  pinned native helper and bubblewrap for offline isolation or exact-destination
+  CONNECT proxy egress; initialization failures never fall back to plain
+  execution. See [cross-platform sandbox](docs/cross-platform-sandbox.md) for
+  installation, native acceptance gates, and explicit capability limitations.
+- Windows compatibility execution discovers trusted PowerShell 7 installations,
+  supports explicit cmd selection/fallback, and assigns suspended processes to
+  non-breakaway, kill-on-close Job Objects before resuming them. Existing cmd
+  scripts can set `CODING_TOOLS_MCP_WINDOWS_SHELL=cmd`. Native Windows strict
+  filesystem/network isolation remains unavailable; Jobs manage lifetime only.
+- macOS has an experimental Seatbelt policy compiler and separate native
+  file/network acceptance tests. Full
+  strict execution is rejected while hostile descendant cleanup lacks a
+  reliable native mechanism; no Linux-equivalent guarantee is claimed.
 
 ### Fixed
 

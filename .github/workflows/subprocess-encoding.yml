@@ -48,6 +48,9 @@ jobs:
         run: python -X utf8=0 -m tests.test_subprocess_encoding_boundaries 2>&1 | tee encoding-results.txt
       - name: Check Windows command lifecycle and encoding wrappers
         if: runner.os == 'Windows'
+        env:
+          # These existing regression commands use cmd syntax.
+          CODING_TOOLS_MCP_WINDOWS_SHELL: cmd
         run: python -X utf8=0 -m unittest tests.test_exec_commands tests.test_windows_subprocess_encoding
       - name: Save evidence including failures
         if: always()

@@ -1,5 +1,10 @@
 # Known Limitations
 
+The Landlock and network-policy limitations below describe the default
+`--execution-isolation compatibility` mode. See
+[cross-platform execution isolation](cross-platform-sandbox.md) for strict-mode
+capabilities and remaining native-platform acceptance requirements.
+
 - `exec_command` is policy-constrained and uses Linux Landlock filesystem confinement where available, but it is not a complete OS/container sandbox.
 - Command classification uses string/path checks for non-filesystem risk classes and can miss behavior hidden inside interpreters, package scripts, static binaries, or generated files.
 - Network denial is policy-based unless the operator runs the server in an external sandbox with egress controls.

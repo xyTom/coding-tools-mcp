@@ -1,251 +1,233 @@
 name: release
 
-# A release normally starts by pushing a v<version> tag. workflow_dispatch is
-# also available as a recovery/manual path: dispatch this workflow with the
-# release tag as the selected ref. In either case everything below runs from
-# that single tagged commit — evidence workflows, package builds, registry
-# publishes, and the GitHub Release.
-#
-# PyPI and npm trusted publishing must be configured with this workflow's
-# filename (release.yml) and the pypi / npm environments.
-
+# Merge a version PR into main. Tags are receipts written LAST, not triggers.
+# Recovery uses this workflow from main and the same version-introducing commit.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to recover, for example 0.5.1 (run from main)'
+        type: string
+        required: true
 
 permissions:
   contents: read
 
+env:
+  CODING_TOOLS_MCP_TELEMETRY: 'off'
+
 jobs:
-  validate:
-    name: Validate release metadata
+  plan:
+    name: Select immutable release commit
+    if: github.repository == 'xyTom/coding-tools-mcp' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
-      npm_version: ${{ steps.npm.outputs.version }}
-      npm_already_published: ${{ steps.npm.outputs.already_published }}
+      publish: ${{ steps.plan.outputs.publish }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      version: ${{ steps.plan.outputs.version }}
+      npm_version: ${{ steps.plan.outputs.npm_version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      source_date_epoch: ${{ steps.plan.outputs.source_date_epoch }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@v6.2.0
+      - uses: actions/checkout@v6.0.2
         with:
-          python-version: "3.11"
-
-      - name: Require a release tag ref
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Resolve first publication or recovery
+        id: plan
+        env:
+          BEFORE: ${{ github.event.before }}
+          VERSION: ${{ inputs.version }}
+        run: python -m scripts.release_plan --head "$GITHUB_SHA" --before "$BEFORE" --version "$VERSION" --output release-plan.json
+      - uses: actions/checkout@v6.0.2
+        if: steps.plan.outputs.publish == 'true'
+        with:
+          ref: ${{ steps.plan.outputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - name: Validate release metadata and existing tag
+        if: steps.plan.outputs.publish == 'true'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          SOURCE: ${{ steps.plan.outputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
-            echo "release must run from a v* tag ref, got $GITHUB_REF" >&2
-            exit 1
-          fi
-
-      - name: Validate release metadata
-        run: python scripts/check_release_versions.py --tag "$GITHUB_REF_NAME"
-
-      - name: Check whether the npm launcher version is already published
-        id: npm
-        run: |
-          version="$(python -c 'import json; print(json.load(open("packages/npm-launcher/package.json"))["version"])')"
-          if npm view "coding-tools-mcp@${version}" version >/dev/null 2>&1; then
-            already=true
-          else
-            already=false
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "already_published=$already" >> "$GITHUB_OUTPUT"
+          python scripts/check_release_versions.py --root source --tag "$TAG"
+          python -m scripts.finalize_release --tag "$TAG" --source "$SOURCE"
+      - uses: actions/upload-artifact@v7.0.1
+        if: steps.plan.outputs.publish == 'true'
+        with:
+          name: release-plan-${{ steps.plan.outputs.source_sha }}
+          path: release-plan.json
+          retention-days: 90
+          overwrite: true
 
   compliance:
-    name: Evidence
+    name: Hard gate
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
     uses: ./.github/workflows/compliance.yml
+    with:
+      source_ref: ${{ needs.plan.outputs.source_sha }}
+
+  native-sandbox:
+    name: Native sandbox hard gate
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    uses: ./.github/workflows/cross-platform-sandbox.yml
+    with:
+      source_ref: ${{ needs.plan.outputs.source_sha }}
 
   real-workloads:
-    name: Evidence
+    name: Hard gate
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
     uses: ./.github/workflows/real-workloads.yml
+    with:
+      source_ref: ${{ needs.plan.outputs.source_sha }}
 
+  # Evidence is deliberately absent from build/publish needs. External Docker,
+  # Hugging Face and harness outages must not block or delay package publication.
   swebench-lite:
-    name: Evidence
+    name: Advisory evidence
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
     uses: ./.github/workflows/swebench-lite.yml
     with:
-      # SWE-bench is useful release evidence, but the official harness depends
-      # on mutable external infrastructure. Keep collecting its artifacts
-      # without allowing harness/environment drift to block a package release.
+      source_ref: ${{ needs.plan.outputs.source_sha }}
       blocking: false
 
   build:
-    name: Build distribution
-    needs: [validate, compliance, real-workloads, swebench-lite]
+    name: Build and verify packages
+    needs: [plan, compliance, native-sandbox, real-workloads]
     runs-on: ubuntu-latest
+    env:
+      SOURCE_DATE_EPOCH: ${{ needs.plan.outputs.source_date_epoch }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@v6.2.0
+      - uses: actions/checkout@v6.0.2
         with:
-          python-version: "3.11"
-
-      - name: Install build tools
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install build twine
-
+          persist-credentials: false
+      - uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ needs.plan.outputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install pinned build tools
+        run: python -m pip install -r source/scripts/release-build-requirements.txt
       - name: Build source and wheel distributions
-        run: python -m build
-
-      - name: Check distribution metadata
-        run: python -m twine check dist/*
-
-      - name: Verify wheel contents and installation
+        working-directory: source
         run: |
-          python - <<'PY'
-          import glob
-          import zipfile
-
-          wheel = glob.glob("dist/*.whl")
-          if len(wheel) != 1:
-              raise SystemExit(f"expected one wheel, found {wheel}")
-          required = {
-              "coding_tools_mcp/__init__.py",
-              "mcp_desktop_client/app.py",
-              "mcp_desktop_client/locales/app_zh_CN.qm",
-              "mcp_desktop_client/locales/app_zh_CN.ts",
-          }
-          with zipfile.ZipFile(wheel[0]) as archive:
-              names = set(archive.namelist())
-              missing = sorted(required - names)
-              if missing:
-                  raise SystemExit(f"wheel is missing: {missing}")
-              entry_points = archive.read(
-                  next(name for name in names if name.endswith("entry_points.txt"))
-              ).decode()
-              for command in ("coding-tools-mcp", "coding-tools-mcp-desktop"):
-                  if command not in entry_points:
-                      raise SystemExit(f"wheel entry point is missing: {command}")
-          PY
-          python -m venv .package-verify
-          .package-verify/bin/python -m pip install dist/*.whl
-          .package-verify/bin/coding-tools-mcp --help >/dev/null
-          .package-verify/bin/python - <<'PY'
-          import coding_tools_mcp
-          import tomllib
-
-          with open("pyproject.toml", "rb") as handle:
-              expected = tomllib.load(handle)["project"]["version"]
-          assert coding_tools_mcp.__version__ == expected
-          PY
-
-      - name: Upload distribution artifacts
+          python -m build --no-isolation
+          python -m twine check dist/*
+      - name: Verify wheel contents and installation
+        env:
+          EXPECTED_VERSION: ${{ needs.plan.outputs.version }}
+        run: python scripts/verify_release_packages.py --source source
+      - name: Install source-pinned npm pack tooling
+        run: npm install --global "npm@$(cat source/scripts/release-npm-version.txt)"
+      - name: Test and pack npm launcher
+        working-directory: source
+        run: |
+          make check-npm-launcher
+          cd packages/npm-launcher
+          npm pack
+      - name: Preflight BOTH registries before either publication
+        id: registry-preflight
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          NPM_VERSION: ${{ needs.plan.outputs.npm_version }}
+        run: |
+          python -m scripts.release_artifacts pypi --directory source/dist --version "$VERSION"
+          python -m scripts.release_artifacts npm --directory source/packages/npm-launcher --version "$NPM_VERSION"
+        # Read-only: detect known conflicts before either package can be uploaded.
+        # Publishers still revalidate under their locks; this is not a transaction.
+      - name: Upload Python distributions
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: python-package-distributions
-          path: dist/
+          name: python-distributions-${{ needs.plan.outputs.source_sha }}
+          path: source/dist/*
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
+          overwrite: true
+      - name: Upload npm distribution
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: npm-distribution-${{ needs.plan.outputs.source_sha }}
+          path: source/packages/npm-launcher/*.tgz
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: true
 
   publish-pypi:
-    name: Publish to PyPI
-    needs: build
+    name: Verify or publish PyPI
+    needs: [plan, build]
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-pypi-${{ needs.plan.outputs.version }}
+      cancel-in-progress: false
     environment:
       name: pypi
       url: https://pypi.org/project/coding-tools-mcp/
     permissions:
-      id-token: write
       contents: read
+      id-token: write
     steps:
-      - name: Download distribution artifacts
-        uses: actions/download-artifact@v7.0.0
+      - uses: actions/checkout@v6.0.2
         with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Report distributions already published with different contents
-        run: |
-          python - <<'PY'
-          import glob
-          import hashlib
-          import json
-          import os
-          import urllib.error
-          import urllib.request
-
-          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
-          try:
-              with urllib.request.urlopen(
-                  f"https://pypi.org/pypi/coding-tools-mcp/{version}/json"
-              ) as response:
-                  published = {
-                      item["filename"]: item["digests"]["sha256"]
-                      for item in json.load(response)["urls"]
-                  }
-          except urllib.error.HTTPError as error:
-              if error.code != 404:
-                  raise
-              published = {}
-          for path in sorted(glob.glob("dist/*")):
-              name = os.path.basename(path)
-              if name not in published:
-                  continue
-              with open(path, "rb") as handle:
-                  digest = hashlib.sha256(handle.read()).hexdigest()
-              if digest == published[name]:
-                  print(f"{name}: already published, identical")
-              else:
-                  print(
-                      f"::warning::{name} is already on PyPI with different "
-                      "bytes (rebuilds are not byte-reproducible); "
-                      "skipping its upload"
-                  )
-          PY
-
-      - name: Publish package distributions to PyPI
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v7.0.0
+        with:
+          name: python-distributions-${{ needs.plan.outputs.source_sha }}
+          path: dist
+      - name: Verify existing files and stage only missing distributions
+        id: registry
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: python -m scripts.release_artifacts pypi --directory dist --version "$VERSION" --stage pending
+      - name: Publish missing Python distributions
+        if: steps.registry.outputs.missing != '0'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          # Recovery re-dispatches must be able to resume after PyPI already
-          # accepted the (immutable) files from an earlier run.
-          skip-existing: true
+          packages-dir: pending/
+          # Existing contents were compared above. Never conceal an upload error.
+          skip-existing: false
+      - name: Verify complete PyPI contents
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: python -m scripts.release_artifacts pypi --directory dist --version "$VERSION" --require-complete --wait-seconds 120 --report pypi-receipt.json
 
-  pack-npm:
-    name: Pack npm launcher
-    needs: [validate, compliance, real-workloads, swebench-lite]
-    if: needs.validate.outputs.npm_already_published == 'false'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@v6.2.0
-        with:
-          python-version: "3.11"
-
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
-
-      - name: Test launcher
-        run: make check-npm-launcher
-
-      - name: Pack launcher
-        working-directory: packages/npm-launcher
-        run: npm pack
-
-      - name: Upload npm package artifact
+      - name: Save verified PyPI receipt
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: npm-package-distribution
-          path: packages/npm-launcher/*.tgz
+          name: pypi-receipt-${{ needs.plan.outputs.source_sha }}
+          path: pypi-receipt.json
+          retention-days: 90
+          overwrite: true
           if-no-files-found: error
-          retention-days: 7
 
   publish-npm:
-    name: Publish npm launcher
-    needs: pack-npm
+    name: Verify or publish npm
+    needs: [plan, build]
     runs-on: ubuntu-latest
+    concurrency:
+      # Serialize latest-tag selection and publication across launcher versions.
+      group: release-npm
+      cancel-in-progress: false
     environment:
       name: npm
       url: https://www.npmjs.com/package/coding-tools-mcp
@@ -253,49 +235,72 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - name: Download npm package artifact
-        uses: actions/download-artifact@v7.0.0
+      - uses: actions/checkout@v6.0.2
         with:
-          name: npm-package-distribution
-          path: dist
-
-      - name: Set up Node
-        uses: actions/setup-node@v6
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
         with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
+          python-version: '3.11'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
           package-manager-cache: false
-
+      - uses: actions/download-artifact@v7.0.0
+        with:
+          name: npm-distribution-${{ needs.plan.outputs.source_sha }}
+          path: dist
+      - name: Validate existing npm package contents
+        id: registry
+        env:
+          VERSION: ${{ needs.plan.outputs.npm_version }}
+        run: python -m scripts.release_artifacts npm --directory dist --version "$VERSION" --select-publish-tag
       - name: Install OIDC-capable npm CLI
+        if: steps.registry.outputs.missing != '0'
         run: npm install --global npm@11.18.0
+      - name: Publish missing launcher with provenance
+        if: steps.registry.outputs.missing != '0'
+        # ./ prevents npm from interpreting a tarball as GitHub owner/repo.
+        env:
+          PUBLISH_TAG: ${{ steps.registry.outputs.publish_tag }}
+        run: npm publish ./dist/*.tgz --access public --provenance --tag "$PUBLISH_TAG"
+      - name: Verify complete npm contents
+        env:
+          VERSION: ${{ needs.plan.outputs.npm_version }}
+        run: python -m scripts.release_artifacts npm --directory dist --version "$VERSION" --require-complete --wait-seconds 120 --report npm-receipt.json
 
-      - name: Publish launcher with provenance
-        # The ./ prefix is load-bearing: without it npm parses the argument as
-        # a GitHub owner/repo shorthand instead of a local tarball path.
-        run: npm publish ./dist/*.tgz --access public --provenance
+      - name: Save verified npm receipt
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: npm-receipt-${{ needs.plan.outputs.source_sha }}
+          path: npm-receipt.json
+          retention-days: 90
+          overwrite: true
+          if-no-files-found: error
 
   github-release:
-    name: Publish GitHub Release
-    needs: publish-pypi
+    name: Finalize tag and GitHub Release
+    needs: [plan, publish-pypi, publish-npm]
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-finalize-${{ needs.plan.outputs.tag }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6.0.2
-
-      - name: Create release with changelog notes
+      - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ needs.plan.outputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-python@v6.2.0
+        with:
+          python-version: '3.11'
+      - name: Create missing tag and release only after BOTH registries verified
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          awk -v ver="$version" '/^## /{flag = ($0 ~ "^## " ver " ")} flag' CHANGELOG.md > release-notes.md
-          if ! test -s release-notes.md; then
-            echo "CHANGELOG.md has no section for $version" >&2
-            exit 1
-          fi
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; leaving it unchanged"
-          else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
-          fi
+          TAG: ${{ needs.plan.outputs.tag }}
+          SOURCE: ${{ needs.plan.outputs.source_sha }}
+        run: python -m scripts.finalize_release --tag "$TAG" --source "$SOURCE" --changelog source/CHANGELOG.md --finalize --github-token

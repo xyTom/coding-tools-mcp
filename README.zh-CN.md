@@ -166,12 +166,17 @@ coding-tools-mcp-desktop
 
 ## 证据、Dogfood 与 SWE-bench
 
-每个版本都经由 tag 触发的流水线发布：合规套件、真实工作负载基准和
-SWE-bench 评测与 registry 发布运行在同一个 commit 上——PyPI 与 npm 均走
-trusted publishing，npm 带 provenance。Dogfood 效率指标可复现
-（`make dogfood-smoke`），报告存于 `reports/`。本仓库不宣称任何模型生成的
-SWE-bench 榜单成绩——[docs/swe-bench.md](docs/swe-bench.md) 写明了测了什么、
-没测什么。更多：[COMPLIANCE.md](COMPLIANCE.md) ·
+Release PR 合并到 `main` 后，流水线选定引入该版本的不可变 commit，运行
+hard gates 和包验证，再通过 trusted publishing 发布到 PyPI 与 npm。
+两个 registry 的内容验证成功后，才创建 tag 和 GitHub Release；npm 发布带
+provenance。门禁、仓库配置、源码证据和恢复步骤见
+[CI 与测试](docs/ci-and-tests.md#release-from-main)。
+
+SWE-bench 提供 advisory evidence：固定输入的官方 harness 对照测试，以及真实
+HTTP MCP 的读、patch、edit、diff、exec 回放，再由官方 harness 判定结果。
+它不阻断发布，也不衡量模型生成的解题率。测试范围与证据见
+[docs/swe-bench.md](docs/swe-bench.md)。Dogfood 效率指标可复现
+（`make dogfood-smoke`），报告存于 `reports/`。更多：[COMPLIANCE.md](COMPLIANCE.md) ·
 [BENCHMARK.md](BENCHMARK.md) · [docs/dogfood.md](docs/dogfood.md)
 
 ## 文档
