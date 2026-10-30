@@ -36,7 +36,8 @@ Tag: `{args.tag}`
 
 ## Summary
 
-The final commit is verified by GitHub Actions on the same SHA listed above.
+This report indexes the workflow runs checked by `final-audit` for the SHA above.
+It does not read their artifacts or establish individual benchmark outcomes.
 The runtime can be launched with:
 
 ```bash
@@ -71,15 +72,15 @@ The release gate expects passing local or CI runs for:
 
 ## Compliance
 
-The compliance workflow artifact contains `reports/compliance/latest.*`
-generated on commit `{args.commit}`. It covers the full `all` suite and the
-required MCP tool surface.
+The expected compliance evidence is `reports/compliance/latest.*` in the linked
+workflow artifact. Review it for the full `all` suite, the required MCP tool
+surface, and any failures or skips; this renderer does not inspect that evidence.
 
 ## Dogfood And Benchmarks
 
-- Dogfood MCP-only runner: `PASS`
-- MCP latency benchmark: `PASS`
-- Real workload benchmark: `PASS`
+Individual result details are `UNKNOWN` to this metadata-only report. Inspect
+the compliance and real-workloads artifacts linked above for the actual dogfood,
+latency, and workload outcomes and any skips or limitations.
 
 Real workload coverage includes public Python, Node, Rust, Go, and monorepo
 repositories, plus large-file read, large-output command, and long-running
@@ -87,28 +88,26 @@ command checks.
 
 ## SWE-bench
 
-The `swebench-lite` workflow ran the official Docker-backed SWE-bench harness
-on `princeton-nlp/SWE-bench_Lite` instance `sympy__sympy-12419`.
+- Official evaluation status: `UNKNOWN` (report artifacts were not inspected)
+- Baseline completed/resolved counts: `UNKNOWN`
+- Candidate completed/resolved counts: `UNKNOWN`
 
-The uploaded SWE-bench report records:
+A successful workflow alone does not prove official Docker evaluation ran or
+passed: advisory stages can fail or be blocked while the workflow succeeds.
+Inspect the linked run's `swebench-lite-evidence` artifact, including its
+`attempt.json`, selected evaluation reports, predictions, and raw harness logs.
+Current workflows upload only that attempt's generated evidence. Missing reports
+are not a pass, and historical checked-in reports do not verify this commit.
 
-- baseline predictions: non-placeholder reference-patch prediction
-- MCP candidate predictions: non-placeholder reference-patch prediction
-- baseline completed/resolved: `1 / 1`, `1`
-- candidate completed/resolved: `1 / 1`, `1`
-- acceptance: `candidate_mcp_resolved >= baseline_native_resolved`
-
-Raw harness logs, prediction JSONL files, and environment metadata are uploaded
-under `reports/benchmark/` in the SWE-bench workflow artifact.
-
-The reference-patch prediction mode is an official harness sanity check. It is
-not a model-generated SWE-bench leaderboard score.
+Reference-patch controls and scripted MCP replays are not model-generated
+SWE-bench leaderboard scores. A valid comparison requires complete fresh official
+reports, a nonzero baseline, and a candidate resolved count at least as high.
 
 ## Remaining Items
 
-- No release-blocking items remain for this final verification package.
-- Model-generated SWE-bench predictions remain future work; the current evidence
-  intentionally validates the official harness path with reference patches.
+- Release readiness cannot be concluded from this metadata-only report.
+- Review the referenced artifacts and their limitations before making outcome or
+  model-generated benchmark claims.
 """
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(output, encoding="utf-8")
